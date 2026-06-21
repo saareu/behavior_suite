@@ -100,6 +100,33 @@ The `project` module is shared infrastructure and is intentionally separate from
 
 ---
 
+## Command-Line Interface
+
+Install the project and inspect the available preprocessing commands:
+
+```powershell
+pip install -e ".[dev]"
+
+behavior-suite --help
+behavior-suite preprocess --help
+```
+
+Automatic cropping uses an explicit three-phase workflow:
+
+```powershell
+behavior-suite preprocess detect-crop --project-dir ProjectName --raw-video raw.avi --config configs/preprocess_default.yaml --output-crop-plan ProjectName/preprocess/detected_crop_plan.json
+
+behavior-suite preprocess accept-crop --crop-plan ProjectName/preprocess/detected_crop_plan.json --output-crop-plan ProjectName/preprocess/accepted_crop_plan.json
+
+behavior-suite preprocess run --project-dir ProjectName --raw-video raw.avi --config configs/preprocess_default.yaml --crop-plan ProjectName/preprocess/accepted_crop_plan.json
+```
+
+Crop detection never accepts a crop automatically. Review the detected JSON,
+create a separate accepted JSON with `accept-crop`, and pass only that accepted
+plan to `run`.
+
+---
+
 ## Preprocess Subsystem
 
 The Preprocess Subsystem supports the following workflow:
