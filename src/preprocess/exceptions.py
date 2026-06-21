@@ -23,3 +23,7 @@ class CropPlanError(PreprocessError):
 
 class PreCropError(CropPlanError):
     """Raised when a detection pre-crop cannot be resolved safely."""
+
+
+class CageDetectionError(PreprocessError):
+    """Raised when automatic cage detection cannot produce a valid CropPlan."""

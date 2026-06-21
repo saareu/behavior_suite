@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from preprocess.exceptions import PreprocessConfigError
 
@@ -111,6 +111,25 @@ class CageDetectConfig(_StrictConfigModel):
     sample_step: int = Field(default=500, gt=0)
     pad_px: int = Field(default=2, ge=0)
     threshold: int = Field(default=90, ge=0, le=255)
+    pre_crop_expansion_percent: float = Field(default=15.0, ge=0.0, le=200.0)
+    dilate_kernel_size: int = Field(default=13, gt=0)
+    erode_kernel_size: int = Field(default=7, gt=0)
+    rim_close_kernel_size: int = Field(default=9, gt=0)
+    minimum_cage_width_fraction: float = Field(default=0.6, gt=0.0, le=1.0)
+    minimum_cage_height_fraction: float = Field(default=0.6, gt=0.0, le=1.0)
+    minimum_contour_area: float = Field(default=100.0, gt=0.0)
+    fit_tolerance_px: int = Field(default=6, ge=0)
+
+    @field_validator(
+        "dilate_kernel_size",
+        "erode_kernel_size",
+        "rim_close_kernel_size",
+    )
+    @classmethod
+    def validate_odd_kernel_size(cls, value: int) -> int:
+        if value % 2 == 0:
+            raise ValueError("Detector morphology kernel sizes must be odd.")
+        return value
 
 
 class MaskConfig(_StrictConfigModel):
