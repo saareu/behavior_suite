@@ -133,9 +133,11 @@ pip install -e ".[dev,gui]"
 behavior-suite gui
 ```
 
-The first desktop GUI milestone covers project creation/opening, raw-video
-probing, trim selection, and typed pre-crop configuration. Timing, crop review,
-encoding, and final execution remain visible workflow placeholders.
+The desktop GUI covers project creation/opening, raw-video probing, trim
+selection, and typed pre-crop configuration. The Timing page supports optional
+MATLAB `.mat` timing-vector selection with strict validation against the raw
+sequential readable-frame count. Crop review, encoding, and final execution
+remain visible workflow placeholders.
 
 ---
 

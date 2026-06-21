@@ -19,7 +19,7 @@ class MainWindow(QMainWindow):
         self.wizard = PreprocessWizard(controller)
         self.wizard.unexpected_error.connect(self._show_unexpected_error)
         self.setCentralWidget(self.wizard)
-        self.statusBar().showMessage("GUI setup milestone: steps 1–3 are available.")
+        self.statusBar().showMessage("GUI setup milestone: steps 1–4 are available.")
 
     def show_startup_error(self, message: str) -> None:
         """Show a non-fatal startup configuration error in the window."""

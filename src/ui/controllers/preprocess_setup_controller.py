@@ -23,7 +23,7 @@ from project.models import Project
 from project.paths import get_preprocess_dir
 from project.service import ProjectService
 from project.validation import ProjectError
-from ui.state import PreprocessSetupState, WorkflowStep
+from ui.state import PreprocessSetupState, TimingMode, WorkflowStep
 
 ConfigLoader = Callable[[Path], PreprocessConfig]
 PreCropResolver = Callable[[PreCropConfig, tuple[int, int]], ResolvedPreCrop]
@@ -117,7 +117,7 @@ class PreprocessSetupController:
         self.state.raw_probe = None
         self.state.resolved_pre_crop = None
         self.state.trim_pre_crop_valid = False
-        self.state.external_timing_selection = None
+        self._reset_timing_state()
         self.state.last_validation_error = None
 
     def set_raw_video_path(self, path: Path) -> Path:
@@ -128,6 +128,7 @@ class PreprocessSetupController:
         self.state.raw_probe = None
         self.state.resolved_pre_crop = None
         self.state.trim_pre_crop_valid = False
+        self._reset_timing_state()
         self.state.last_validation_error = None
         return selected
 
@@ -155,6 +156,7 @@ class PreprocessSetupController:
         self.state.raw_probe = result
         self.state.resolved_pre_crop = None
         self.state.trim_pre_crop_valid = False
+        self._reset_timing_state()
         self.state.last_validation_error = None
         return result
 
@@ -261,14 +263,39 @@ class PreprocessSetupController:
             raise self._new_validation_error("A successfully probed raw video is required.")
         if resolved_step is WorkflowStep.RAW_VIDEO:
             return
+        if (
+            not self.state.trim_pre_crop_valid
+            or self.state.pre_crop_config is None
+            or self.state.resolved_pre_crop is None
+        ):
+            raise self._new_validation_error(
+                "A valid trim and resolved pre-crop are required."
+            )
         if resolved_step is WorkflowStep.TRIM_PRE_CROP:
-            if (
-                not self.state.trim_pre_crop_valid
-                or self.state.pre_crop_config is None
-                or self.state.resolved_pre_crop is None
-            ):
-                raise self._new_validation_error("A valid trim and resolved pre-crop are required.")
             return
+        if resolved_step is WorkflowStep.TIMING:
+            if not self.state.timing_valid:
+                raise self._new_validation_error(
+                    "Complete and validate the selected external timing option."
+                )
+            if self.state.timing_mode is TimingMode.NO_EXTERNAL:
+                if (
+                    self.state.timing_status != "not_provided"
+                    or self.state.external_time_selection is not None
+                    or self.state.external_time_vector_seconds is not None
+                ):
+                    raise self._new_validation_error(
+                        "No-external-timing state is inconsistent."
+                    )
+                return
+            if (
+                self.state.external_time_selection is not None
+                and self.state.timing_status in {"valid", "not_convertible_to_seconds"}
+            ):
+                return
+            raise self._new_validation_error(
+                "Complete and validate the selected external timing option."
+            )
         raise self._new_validation_error("Not implemented in this GUI milestone.")
 
     def can_advance(self, step: WorkflowStep | int) -> bool:
@@ -286,6 +313,18 @@ class PreprocessSetupController:
         self.state.unexpected_error_detail = "".join(
             traceback.format_exception(type(exc), exc, exc.__traceback__)
         )
+
+    def _reset_timing_state(self) -> None:
+        self.state.timing_mode = TimingMode.NO_EXTERNAL
+        self.state.timing_status = "not_provided"
+        self.state.timing_valid = True
+        self.state.external_time_mat_path = None
+        self.state.mat_workspace_format = None
+        self.state.mat_candidates.clear()
+        self.state.selected_timing_variable = None
+        self.state.selected_timing_units = None
+        self.state.external_time_selection = None
+        self.state.external_time_vector_seconds = None
 
     def _new_validation_error(self, message: str) -> SetupValidationError:
         self.state.last_validation_error = message
