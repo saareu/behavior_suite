@@ -155,6 +155,8 @@ class CropPlan(BaseModel):
     H_raw_to_prepared_3x3: np.ndarray
     H_prepared_to_raw_3x3: np.ndarray
     prepared_size_wh: tuple[StrictInt, StrictInt]
+    native_size_wh: tuple[StrictInt, StrictInt] | None = None
+    canonical_geometry: CanonicalGeometry | None = None
     rotated_90: bool
     fit_score: float | None = None
     rim_density: float | None = None
@@ -203,6 +205,25 @@ class CropPlan(BaseModel):
             raise CropPlanError("Prepared width and height must be positive.")
         if width % 2 or height % 2:
             raise CropPlanError("Prepared width and height must be even.")
+
+        if (self.native_size_wh is None) != (self.canonical_geometry is None):
+            raise CropPlanError(
+                "native_size_wh and canonical_geometry must be provided together."
+            )
+        if self.native_size_wh is not None and self.canonical_geometry is not None:
+            native_width, native_height = self.native_size_wh
+            if native_width <= 0 or native_height <= 0:
+                raise CropPlanError("Native width and height must be positive.")
+            if native_width % 2 or native_height % 2:
+                raise CropPlanError("Native width and height must be even.")
+            if self.canonical_geometry.native_size_wh != self.native_size_wh:
+                raise CropPlanError(
+                    "Canonical geometry native size must match native_size_wh."
+                )
+            if self.canonical_geometry.canonical_size_wh != self.prepared_size_wh:
+                raise CropPlanError(
+                    "Canonical geometry final size must match prepared_size_wh."
+                )
 
         for field_name, value in (
             ("fit_score", self.fit_score),
@@ -273,6 +294,9 @@ class CanonicalGeometry(BaseModel):
         """Return JSON-safe canonical geometry metadata."""
 
         return self.model_dump(mode="json")
+
+
+CropPlan.model_rebuild()
 
 
 def _validate_dimension(name: str, value: int, *, require_even: bool) -> int:

@@ -152,6 +152,8 @@ class MaskConfig(_StrictConfigModel):
 class FFmpegEncodingConfig(_StrictConfigModel):
     """Validated legacy-compatible ffmpeg encoding profile."""
 
+    ffmpeg_path: Path | None = None
+    ffprobe_path: Path | None = None
     container: Literal["mp4"] = "mp4"
     codec: Literal["libx264"] = "libx264"
     pixel_format: Literal["yuv420p"] = "yuv420p"

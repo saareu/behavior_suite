@@ -27,3 +27,7 @@ class PreCropError(CropPlanError):
 
 class CageDetectionError(PreprocessError):
     """Raised when automatic cage detection cannot produce a valid CropPlan."""
+
+
+class VideoPreparationError(PreprocessError):
+    """Raised when the ffmpeg preparation stage cannot complete safely."""

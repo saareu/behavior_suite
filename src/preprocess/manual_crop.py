@@ -169,7 +169,7 @@ def make_manual_crop_plan(
             if canonical_resolution.enabled
             else None
         )
-        homography_canonical, _canonical_geometry, output_size_wh = (
+        homography_canonical, canonical_geometry, output_size_wh = (
             build_canonical_transform(
                 native_size_wh,
                 canonical_size_wh,
@@ -201,6 +201,8 @@ def make_manual_crop_plan(
             H_raw_to_prepared_3x3=homography_raw_to_prepared,
             H_prepared_to_raw_3x3=homography_prepared_to_raw,
             prepared_size_wh=output_size_wh,
+            native_size_wh=native_size_wh,
+            canonical_geometry=canonical_geometry,
             rotated_90=rotated_90,
             fit_score=None,
             rim_density=None,
