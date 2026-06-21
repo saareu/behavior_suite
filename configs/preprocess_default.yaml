@@ -1,0 +1,57 @@
+schema_version: preprocess_config_v1
+
+trim:
+  start_frame: null
+  end_frame: null
+  end_frame_semantics: exclusive
+
+timing:
+  mode: decode_order_cfr
+  allow_frame_resampling: false
+  require_one_to_one_frame_mapping: true
+  require_constant_output_fps_header: true
+
+prepare:
+  roi_margin_px: 40
+  perspective_interpolation: cubic
+  canonical_resolution:
+    enabled: true
+    width: 928
+    height: 528
+    flags: lanczos
+
+pre_crop:
+  enabled: false
+  mode: none
+
+cage_detect:
+  sample_step: 500
+  pad_px: 2
+  threshold: 90
+
+mask:
+  enabled: false
+  coordinate_space: prepared_video
+  fill_value_bgr: [0, 0, 0]
+  shapes: []
+
+encoding:
+  ffmpeg:
+    container: mp4
+    codec: libx264
+    pixel_format: yuv420p
+    preset: veryfast
+    crf: 18
+    bframes: 0
+    faststart: true
+  opencv:
+    container: mp4
+    fourcc: mp4v
+
+background:
+  method: median
+  max_samples: 500
+  sample_every_n: 50
+
+debug:
+  enabled: false

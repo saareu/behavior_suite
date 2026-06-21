@@ -83,6 +83,9 @@ exclude = [
 
 [tool.pytest.ini_options]
 minversion = "8.0"
+pythonpath = [
+"src",
+]
 testpaths = [
 "tests",
 ]
@@ -126,6 +129,9 @@ line-length = 100
 src = [
 "src",
 "tests",
+]
+exclude = [
+  "legacy",
 ]
 
 [tool.ruff.lint]
