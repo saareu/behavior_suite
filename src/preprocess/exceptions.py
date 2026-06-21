@@ -43,3 +43,7 @@ class VideoValidationError(PreprocessError):
 
 class SyncValidationError(PreprocessError, ValueError):
     """Raised when synchronization data or its NPZ artifact is invalid."""
+
+
+class BackgroundGenerationError(PreprocessError, ValueError):
+    """Raised when prepared-video background estimation or writing fails."""
