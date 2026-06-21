@@ -15,3 +15,11 @@ class VideoProbeError(PreprocessError):
 
 class ExternalTimingError(PreprocessError, ValueError):
     """Raised when a MATLAB workspace or selected timing vector is invalid."""
+
+
+class CropPlanError(PreprocessError):
+    """Raised when crop or canonical geometry is invalid."""
+
+
+class PreCropError(CropPlanError):
+    """Raised when a detection pre-crop cannot be resolved safely."""

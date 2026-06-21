@@ -8,6 +8,7 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from preprocess.config import PreprocessConfig
+from preprocess.crop_plan import CropPlan
 from project.models import Project
 
 
@@ -132,7 +133,7 @@ class PreprocessRequest(BaseModel):
     config: PreprocessConfig
     start_frame: int = Field(default=0, ge=0)
     end_frame_exclusive: int | None = Field(default=None, ge=1)
-    accepted_crop_plan: Any | None = None
+    accepted_crop_plan: CropPlan | None = None
     external_time_selection: ExternalTimeSelection | None = None
     external_timing_vector: np.ndarray | None = None
 

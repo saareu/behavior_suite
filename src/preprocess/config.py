@@ -74,6 +74,8 @@ class PreCropConfig(_StrictConfigModel):
         "horizontal_keep_lower",
         "manual_rectangle",
     ] = "none"
+    boundary_px: int | None = Field(default=None, ge=0)
+    manual_rectangle: tuple[int, int, int, int] | None = None
 
     @model_validator(mode="after")
     def validate_enabled_mode(self) -> "PreCropConfig":
@@ -81,6 +83,25 @@ class PreCropConfig(_StrictConfigModel):
             raise ValueError("pre_crop.mode must be selected when pre_crop.enabled is true.")
         if not self.enabled and self.mode != "none":
             raise ValueError("pre_crop.mode must be 'none' when pre_crop.enabled is false.")
+        if self.mode == "none":
+            if self.boundary_px is not None or self.manual_rectangle is not None:
+                raise ValueError("pre_crop geometry must be absent when mode is 'none'.")
+        elif self.mode == "manual_rectangle":
+            if self.manual_rectangle is None:
+                raise ValueError(
+                    "pre_crop.manual_rectangle is required for manual_rectangle mode."
+                )
+            if self.boundary_px is not None:
+                raise ValueError(
+                    "pre_crop.boundary_px is not used for manual_rectangle mode."
+                )
+        else:
+            if self.boundary_px is None:
+                raise ValueError("pre_crop.boundary_px is required for boundary modes.")
+            if self.manual_rectangle is not None:
+                raise ValueError(
+                    "pre_crop.manual_rectangle is only valid for manual_rectangle mode."
+                )
         return self
 
 
