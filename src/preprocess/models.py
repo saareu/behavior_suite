@@ -23,6 +23,20 @@ class TimingUnit(StrEnum):
     UNKNOWN = "unknown"
 
 
+class SoftwareEnvironmentInfo(BaseModel):
+    """Version provenance supplied to preprocessing metadata generation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    python_version: str | None = None
+    platform: str | None = None
+    opencv_version: str | None = None
+    numpy_version: str | None = None
+    ffmpeg_version: str | None = None
+    ffprobe_version: str | None = None
+    application_version: str | None = None
+
+
 class VideoProbeResult(BaseModel):
     """Metadata collected independently from ffprobe and OpenCV."""
 

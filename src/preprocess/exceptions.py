@@ -47,3 +47,11 @@ class SyncValidationError(PreprocessError, ValueError):
 
 class BackgroundGenerationError(PreprocessError, ValueError):
     """Raised when prepared-video background estimation or writing fails."""
+
+
+class MetadataArtifactError(PreprocessError, ValueError):
+    """Raised when metadata or settings validation/persistence fails."""
+
+
+class ProcessingLogError(PreprocessError):
+    """Raised when the preprocessing text logger cannot be configured."""
