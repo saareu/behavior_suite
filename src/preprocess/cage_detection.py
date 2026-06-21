@@ -12,10 +12,11 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from preprocess.config import CageDetectConfig, PreprocessConfig
 from preprocess.crop_plan import (
-    CanonicalGeometry,
     CropMode,
     CropPlan,
-    compute_canonical_geometry,
+    build_canonical_transform,
+    build_clockwise_rotation_transform,
+    compute_native_rectified_size,
 )
 from preprocess.exceptions import CageDetectionError, CropPlanError
 from preprocess.pre_crop import (
@@ -368,23 +369,13 @@ def _detect_rotated_rectangle(
     )
 
 
-def _make_even(value: int) -> int:
-    return value if value % 2 == 0 else value + 1
-
-
 def _build_rectification_geometry(
     quad_in_pre_crop: np.ndarray,
     pad_px: int,
 ) -> tuple[np.ndarray, np.ndarray, tuple[int, int], bool]:
-    top_width = float(np.linalg.norm(quad_in_pre_crop[1] - quad_in_pre_crop[0]))
-    bottom_width = float(np.linalg.norm(quad_in_pre_crop[2] - quad_in_pre_crop[3]))
-    right_height = float(np.linalg.norm(quad_in_pre_crop[2] - quad_in_pre_crop[1]))
-    left_height = float(np.linalg.norm(quad_in_pre_crop[3] - quad_in_pre_crop[0]))
-    rectified_width = _make_even(
-        max(2 * pad_px + 2, int(round(max(top_width, bottom_width))) + 2 * pad_px)
-    )
-    rectified_height = _make_even(
-        max(2 * pad_px + 2, int(round(max(left_height, right_height))) + 2 * pad_px)
+    rectified_width, rectified_height = compute_native_rectified_size(
+        quad_in_pre_crop,
+        padding_px=pad_px,
     )
     destination = np.array(
         [
@@ -399,56 +390,10 @@ def _build_rectification_geometry(
         quad_in_pre_crop.astype(np.float32),
         destination,
     ).astype(np.float64)
-
-    rotated_90 = rectified_height > rectified_width
-    if rotated_90:
-        homography_rotate = np.array(
-            [
-                [0.0, -1.0, rectified_height - 1.0],
-                [1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0],
-            ],
-            dtype=np.float64,
-        )
-        output_size = (rectified_height, rectified_width)
-    else:
-        homography_rotate = np.eye(3, dtype=np.float64)
-        output_size = (rectified_width, rectified_height)
+    homography_rotate, output_size, rotated_90 = (
+        build_clockwise_rotation_transform((rectified_width, rectified_height))
+    )
     return homography_rectify, homography_rotate, output_size, rotated_90
-
-
-def _build_canonical_transform(
-    native_size_wh: tuple[int, int],
-    config: PreprocessConfig,
-) -> tuple[np.ndarray, CanonicalGeometry, tuple[int, int]]:
-    native_width, native_height = native_size_wh
-    canonical_config = config.prepare.canonical_resolution
-    if canonical_config.enabled:
-        geometry = compute_canonical_geometry(
-            native_width,
-            native_height,
-            canonical_config.width,
-            canonical_config.height,
-        )
-        transform = np.array(
-            [
-                [geometry.uniform_scale, 0.0, geometry.padding_left],
-                [0.0, geometry.uniform_scale, geometry.padding_top],
-                [0.0, 0.0, 1.0],
-            ],
-            dtype=np.float64,
-        )
-        output_size = geometry.canonical_size_wh
-    else:
-        geometry = compute_canonical_geometry(
-            native_width,
-            native_height,
-            native_width,
-            native_height,
-        )
-        transform = np.eye(3, dtype=np.float64)
-        output_size = native_size_wh
-    return transform, geometry, output_size
 
 
 def _rectangle_diagnostics(
@@ -516,8 +461,14 @@ def detect_cage_crop_plan(
                 config.cage_detect.pad_px,
             )
         )
+        canonical_config = config.prepare.canonical_resolution
+        canonical_size_wh = (
+            (canonical_config.width, canonical_config.height)
+            if canonical_config.enabled
+            else None
+        )
         homography_canonical, canonical_geometry, output_size_wh = (
-            _build_canonical_transform(native_size_wh, config)
+            build_canonical_transform(native_size_wh, canonical_size_wh)
         )
     except cv2.error as exc:
         raise CageDetectionError(f"OpenCV cage geometry operation failed: {exc}") from exc

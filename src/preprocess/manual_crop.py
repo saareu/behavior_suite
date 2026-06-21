@@ -1,0 +1,210 @@
+"""Pure geometry for creating manual four-corner crop plans."""
+
+from __future__ import annotations
+
+import cv2
+import numpy as np
+from pydantic import ValidationError
+
+from preprocess.config import CanonicalResolutionConfig
+from preprocess.crop_plan import (
+    CropMode,
+    CropPlan,
+    build_canonical_transform,
+    build_clockwise_rotation_transform,
+    compute_native_rectified_size,
+    validate_quad_tl_tr_br_bl,
+)
+from preprocess.exceptions import CropPlanError
+from preprocess.pre_crop import PreCropROI, build_pre_crop_translation_homography
+
+
+def _validate_raw_frame_shape(raw_frame_shape: tuple[int, int]) -> tuple[int, int]:
+    try:
+        dimension_count = len(raw_frame_shape)
+    except TypeError as exc:
+        raise CropPlanError(
+            "raw_frame_shape must contain integer height and width values."
+        ) from exc
+    if dimension_count != 2:
+        raise CropPlanError("raw_frame_shape must contain exactly height and width.")
+
+    raw_height, raw_width = raw_frame_shape
+    if any(
+        isinstance(value, bool) or not isinstance(value, int)
+        for value in (raw_height, raw_width)
+    ):
+        raise CropPlanError("Raw frame height and width must be integers.")
+    if raw_height <= 0 or raw_width <= 0:
+        raise CropPlanError("Raw frame height and width must be positive.")
+    return raw_height, raw_width
+
+
+def _resolve_pre_crop_roi(
+    pre_crop_roi: tuple[int, int, int, int] | None,
+    raw_width: int,
+    raw_height: int,
+) -> PreCropROI:
+    if pre_crop_roi is None:
+        return PreCropROI(x=0, y=0, width=raw_width, height=raw_height)
+    try:
+        value_count = len(pre_crop_roi)
+    except TypeError as exc:
+        raise CropPlanError(
+            "pre_crop_roi must contain integer x, y, width, and height values."
+        ) from exc
+    if value_count != 4:
+        raise CropPlanError("pre_crop_roi must contain x, y, width, and height.")
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in pre_crop_roi):
+        raise CropPlanError("pre_crop_roi values must be integers.")
+
+    x, y, width, height = pre_crop_roi
+    if x < 0 or y < 0:
+        raise CropPlanError("pre_crop_roi x and y must be non-negative.")
+    if width <= 0 or height <= 0:
+        raise CropPlanError("pre_crop_roi width and height must be positive.")
+    if x + width > raw_width or y + height > raw_height:
+        raise CropPlanError("pre_crop_roi must lie within the raw frame.")
+    return PreCropROI(x=x, y=y, width=width, height=height)
+
+
+def _validate_points_within_region(
+    points: np.ndarray,
+    *,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    region_name: str,
+) -> None:
+    x_coordinates = points[:, 0]
+    y_coordinates = points[:, 1]
+    if not (
+        np.all(x_coordinates >= x)
+        and np.all(x_coordinates < x + width)
+        and np.all(y_coordinates >= y)
+        and np.all(y_coordinates < y + height)
+    ):
+        raise CropPlanError(
+            f"Manual crop points must lie within the {region_name} bounds."
+        )
+
+
+def _build_rectification_geometry(
+    points_in_pre_crop: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, tuple[int, int], bool]:
+    rectified_width, rectified_height = compute_native_rectified_size(
+        points_in_pre_crop
+    )
+
+    destination = np.array(
+        [
+            [0.0, 0.0],
+            [rectified_width - 1.0, 0.0],
+            [rectified_width - 1.0, rectified_height - 1.0],
+            [0.0, rectified_height - 1.0],
+        ],
+        dtype=np.float32,
+    )
+    homography_rectify = cv2.getPerspectiveTransform(
+        points_in_pre_crop.astype(np.float32),
+        destination,
+    ).astype(np.float64)
+    homography_rotate, output_size, rotated_90 = (
+        build_clockwise_rotation_transform((rectified_width, rectified_height))
+    )
+    return homography_rectify, homography_rotate, output_size, rotated_90
+
+
+def make_manual_crop_plan(
+    raw_frame_shape: tuple[int, int],
+    points_tl_tr_br_bl: np.ndarray,
+    pre_crop_roi: tuple[int, int, int, int] | None,
+    canonical_resolution: CanonicalResolutionConfig,
+) -> CropPlan:
+    """Create an unaccepted manual CropPlan from four raw-frame corners.
+
+    ``raw_frame_shape`` uses NumPy order ``(height, width)``. Manual points use
+    original raw-frame ``(x, y)`` coordinates in TL, TR, BR, BL order and are
+    never reordered or clamped. A supplied pre-crop uses ``(x, y, width,
+    height)`` and is composed into the final raw-to-prepared transform.
+
+    Manual plans use ``None`` for both detector-only metrics, ``fit_score`` and
+    ``rim_density``, and start with ``accepted_by_user=False``.
+
+    Raises:
+        CropPlanError: If frame, ROI, point, homography, canonical, or CropPlan
+            geometry is invalid.
+    """
+
+    raw_height, raw_width = _validate_raw_frame_shape(raw_frame_shape)
+    points = validate_quad_tl_tr_br_bl(points_tl_tr_br_bl)
+    _validate_points_within_region(
+        points,
+        x=0,
+        y=0,
+        width=raw_width,
+        height=raw_height,
+        region_name="raw frame",
+    )
+
+    roi = _resolve_pre_crop_roi(pre_crop_roi, raw_width, raw_height)
+    _validate_points_within_region(
+        points,
+        x=roi.x,
+        y=roi.y,
+        width=roi.width,
+        height=roi.height,
+        region_name="pre-crop ROI",
+    )
+
+    homography_raw_to_pre_crop = build_pre_crop_translation_homography(roi)
+    points_in_pre_crop = points - np.array([roi.x, roi.y], dtype=np.float64)
+    try:
+        homography_rectify, homography_rotate, native_size_wh, rotated_90 = (
+            _build_rectification_geometry(points_in_pre_crop)
+        )
+        canonical_size_wh = (
+            (canonical_resolution.width, canonical_resolution.height)
+            if canonical_resolution.enabled
+            else None
+        )
+        homography_canonical, _canonical_geometry, output_size_wh = (
+            build_canonical_transform(
+                native_size_wh,
+                canonical_size_wh,
+            )
+        )
+    except cv2.error as exc:
+        raise CropPlanError(f"Could not compute manual crop homography: {exc}") from exc
+
+    homography_raw_to_prepared = (
+        homography_canonical
+        @ homography_rotate
+        @ homography_rectify
+        @ homography_raw_to_pre_crop
+    )
+    if not np.all(np.isfinite(homography_raw_to_prepared)):
+        raise CropPlanError("Manual raw-to-prepared homography is non-finite.")
+    try:
+        homography_prepared_to_raw = np.linalg.inv(homography_raw_to_prepared)
+    except np.linalg.LinAlgError as exc:
+        raise CropPlanError("Manual raw-to-prepared homography is singular.") from exc
+    if not np.all(np.isfinite(homography_prepared_to_raw)):
+        raise CropPlanError("Manual prepared-to-raw homography is non-finite.")
+
+    try:
+        return CropPlan(
+            mode=CropMode.MANUAL,
+            pre_crop_roi=roi,
+            quad_raw_tl_tr_br_bl=points,
+            H_raw_to_prepared_3x3=homography_raw_to_prepared,
+            H_prepared_to_raw_3x3=homography_prepared_to_raw,
+            prepared_size_wh=output_size_wh,
+            rotated_90=rotated_90,
+            fit_score=None,
+            rim_density=None,
+            accepted_by_user=False,
+        )
+    except (CropPlanError, ValidationError) as exc:
+        raise CropPlanError(f"Manual crop produced an invalid CropPlan: {exc}") from exc

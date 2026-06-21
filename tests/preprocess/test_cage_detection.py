@@ -18,8 +18,9 @@ from preprocess.config import (
     PrepareConfig,
     PreprocessConfig,
 )
-from preprocess.crop_plan import CropMode
+from preprocess.crop_plan import CropMode, compute_canonical_geometry
 from preprocess.exceptions import CageDetectionError, CropPlanError
+from preprocess.manual_crop import make_manual_crop_plan
 from preprocess.pre_crop import (
     build_pre_crop_translation_homography,
     resolve_pre_crop,
@@ -67,19 +68,21 @@ def _detector_config(
     *,
     threshold: int = 100,
     canonical_size_wh: tuple[int, int] = (200, 120),
+    canonical_enabled: bool = True,
+    pad_px: int = 2,
 ) -> PreprocessConfig:
     return PreprocessConfig(
         prepare=PrepareConfig(
             roi_margin_px=0,
             canonical_resolution=CanonicalResolutionConfig(
-                enabled=True,
+                enabled=canonical_enabled,
                 width=canonical_size_wh[0],
                 height=canonical_size_wh[1],
             ),
         ),
         cage_detect=CageDetectConfig(
             sample_step=1,
-            pad_px=2,
+            pad_px=pad_px,
             threshold=threshold,
             pre_crop_expansion_percent=5.0,
             dilate_kernel_size=5,
@@ -128,6 +131,135 @@ def test_canonical_geometry_is_honored(tmp_path: Path) -> None:
     assert isinstance(canonical, dict)
     assert canonical["enabled"] is True
     assert canonical["canonical_size_wh"] == [240, 160]
+
+
+def test_auto_and_manual_crop_plans_share_final_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    quad = np.array(
+        [
+            [20.0, 20.0],
+            [120.1, 20.0],
+            [120.1, 70.1],
+            [20.0, 70.1],
+        ],
+        dtype=np.float64,
+    )
+    background = np.zeros((120, 200), dtype=np.uint8)
+    detected = cage_detection._DetectedRectangle(
+        rectangle_in_search=((70.05, 45.05), (100.1, 50.1), 0.0),
+        quad_in_pre_crop=quad,
+        fit_score=1.0,
+        rim_density=0.1,
+        contour_area=5015.01,
+        coarse_search_roi=(0, 0, 200, 120),
+    )
+    monkeypatch.setattr(
+        cage_detection,
+        "_build_median_background_with_count",
+        lambda _path, _step: cage_detection._MedianBackground(
+            image=background,
+            sampled_frame_count=1,
+        ),
+    )
+    monkeypatch.setattr(
+        cage_detection,
+        "_detect_rotated_rectangle",
+        lambda _background, _config, _margin: detected,
+    )
+
+    canonical_size_wh = (202, 120)
+    native_config = _detector_config(
+        canonical_size_wh=canonical_size_wh,
+        canonical_enabled=False,
+        pad_px=0,
+    )
+    canonical_config = _detector_config(
+        canonical_size_wh=canonical_size_wh,
+        canonical_enabled=True,
+        pad_px=0,
+    )
+    pre_crop = resolve_pre_crop(native_config.pre_crop, raw_size_wh=(200, 120))
+    automatic_native = detect_cage_crop_plan(
+        Path("unused.avi"),
+        native_config,
+        pre_crop,
+    )
+    automatic_canonical = detect_cage_crop_plan(
+        Path("unused.avi"),
+        canonical_config,
+        pre_crop,
+    )
+    manual_native = make_manual_crop_plan(
+        raw_frame_shape=(120, 200),
+        points_tl_tr_br_bl=quad,
+        pre_crop_roi=None,
+        canonical_resolution=native_config.prepare.canonical_resolution,
+    )
+    manual_canonical = make_manual_crop_plan(
+        raw_frame_shape=(120, 200),
+        points_tl_tr_br_bl=quad,
+        pre_crop_roi=None,
+        canonical_resolution=canonical_config.prepare.canonical_resolution,
+    )
+
+    assert automatic_native.crop_plan.prepared_size_wh == (102, 52)
+    assert manual_native.prepared_size_wh == (102, 52)
+    assert automatic_canonical.crop_plan.prepared_size_wh == canonical_size_wh
+    assert manual_canonical.prepared_size_wh == canonical_size_wh
+    np.testing.assert_allclose(
+        automatic_native.crop_plan.H_raw_to_prepared_3x3,
+        manual_native.H_raw_to_prepared_3x3,
+    )
+    np.testing.assert_allclose(
+        automatic_canonical.crop_plan.H_raw_to_prepared_3x3,
+        manual_canonical.H_raw_to_prepared_3x3,
+    )
+    np.testing.assert_allclose(
+        automatic_canonical.crop_plan.H_prepared_to_raw_3x3,
+        manual_canonical.H_prepared_to_raw_3x3,
+    )
+
+    expected_geometry = compute_canonical_geometry(102, 52, 202, 120)
+    assert expected_geometry.scaled_size_wh == (202, 103)
+    assert (
+        expected_geometry.padding_left,
+        expected_geometry.padding_right,
+        expected_geometry.padding_top,
+        expected_geometry.padding_bottom,
+    ) == (0, 0, 8, 9)
+    expected_canonical_transform = np.array(
+        [
+            [expected_geometry.uniform_scale, 0.0, 0.0],
+            [0.0, expected_geometry.uniform_scale, 8.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    np.testing.assert_allclose(
+        automatic_canonical.crop_plan.H_raw_to_prepared_3x3
+        @ automatic_native.crop_plan.H_prepared_to_raw_3x3,
+        expected_canonical_transform,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        manual_canonical.H_raw_to_prepared_3x3
+        @ manual_native.H_prepared_to_raw_3x3,
+        expected_canonical_transform,
+        atol=1e-12,
+    )
+
+    disabled_geometry = automatic_native.detector_diagnostics[
+        "canonical_scaling_info"
+    ]
+    assert isinstance(disabled_geometry, dict)
+    assert disabled_geometry["uniform_scale"] == 1.0
+    assert disabled_geometry["scaled_size_wh"] == [102, 52]
+    assert (
+        disabled_geometry["padding_left"],
+        disabled_geometry["padding_right"],
+        disabled_geometry["padding_top"],
+        disabled_geometry["padding_bottom"],
+    ) == (0, 0, 0, 0)
 
 
 def test_pre_crop_is_carried_and_composed_into_raw_homography(

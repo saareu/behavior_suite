@@ -113,6 +113,33 @@ def _validate_quad_geometry(quad: np.ndarray) -> None:
         )
 
 
+def validate_quad_tl_tr_br_bl(value: Any) -> np.ndarray:
+    """Validate and copy four finite corners in TL, TR, BR, BL order.
+
+    The returned float64 array is read-only. Points are never reordered.
+
+    Raises:
+        CropPlanError: If the input is not a numeric ``(4, 2)`` array or the
+            quadrilateral is degenerate, self-intersecting, non-convex, or in
+            an order other than top-left, top-right, bottom-right, bottom-left.
+    """
+
+    try:
+        array = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise CropPlanError("Crop quadrilateral must be numeric.") from exc
+    if array.shape != (4, 2):
+        raise CropPlanError(
+            "quad_raw_tl_tr_br_bl must contain exactly four (x, y) points."
+        )
+    if not np.all(np.isfinite(array)):
+        raise CropPlanError("Crop quadrilateral must contain only finite values.")
+    validated = np.array(array, dtype=np.float64, copy=True)
+    _validate_quad_geometry(validated)
+    validated.setflags(write=False)
+    return validated
+
+
 class CropPlan(BaseModel):
     """A shared, validated raw-frame-to-prepared-frame crop transformation.
 
@@ -152,20 +179,7 @@ class CropPlan(BaseModel):
     @field_validator("quad_raw_tl_tr_br_bl", mode="before")
     @classmethod
     def validate_quad_array(cls, value: Any) -> np.ndarray:
-        try:
-            array = np.asarray(value, dtype=np.float64)
-        except (TypeError, ValueError) as exc:
-            raise CropPlanError("Crop quadrilateral must be numeric.") from exc
-        if array.shape != (4, 2):
-            raise CropPlanError(
-                "quad_raw_tl_tr_br_bl must contain exactly four (x, y) points."
-            )
-        if not np.all(np.isfinite(array)):
-            raise CropPlanError("Crop quadrilateral must contain only finite values.")
-        validated = np.array(array, dtype=np.float64, copy=True)
-        _validate_quad_geometry(validated)
-        validated.setflags(write=False)
-        return validated
+        return validate_quad_tl_tr_br_bl(value)
 
     @field_validator("H_raw_to_prepared_3x3", "H_prepared_to_raw_3x3", mode="before")
     @classmethod
@@ -322,3 +336,127 @@ def compute_canonical_geometry(
         padding_bottom=vertical_padding - padding_top,
         canonical_size_wh=(canonical_width, canonical_height),
     )
+
+
+def round_up_to_even_dimension(value: float) -> int:
+    """Round a positive finite dimension upward to the next even integer.
+
+    Raises:
+        CropPlanError: If ``value`` is not numeric, finite, and positive.
+    """
+
+    if isinstance(value, bool):
+        raise CropPlanError("Rectified dimensions must be numeric.")
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError) as exc:
+        raise CropPlanError("Rectified dimensions must be numeric.") from exc
+    if not math.isfinite(numeric_value) or numeric_value <= 0:
+        raise CropPlanError("Rectified dimensions must be finite and positive.")
+    return max(2, int(2 * math.ceil(numeric_value / 2.0)))
+
+
+def compute_native_rectified_size(
+    quad_tl_tr_br_bl: np.ndarray,
+    padding_px: int = 0,
+) -> tuple[int, int]:
+    """Compute upward-rounded even rectified dimensions from opposite edges.
+
+    ``padding_px`` is symmetric spatial padding around the source quadrilateral
+    and is included before the final upward-even rounding.
+
+    Raises:
+        CropPlanError: If the quadrilateral or padding is invalid.
+    """
+
+    quad = validate_quad_tl_tr_br_bl(quad_tl_tr_br_bl)
+    if isinstance(padding_px, bool) or not isinstance(padding_px, int):
+        raise CropPlanError("Rectification padding must be an integer.")
+    if padding_px < 0:
+        raise CropPlanError("Rectification padding must be non-negative.")
+
+    top_width = float(np.linalg.norm(quad[1] - quad[0]))
+    bottom_width = float(np.linalg.norm(quad[2] - quad[3]))
+    right_height = float(np.linalg.norm(quad[2] - quad[1]))
+    left_height = float(np.linalg.norm(quad[3] - quad[0]))
+    return (
+        round_up_to_even_dimension(max(top_width, bottom_width) + 2 * padding_px),
+        round_up_to_even_dimension(max(left_height, right_height) + 2 * padding_px),
+    )
+
+
+def build_clockwise_rotation_transform(
+    native_size_wh: tuple[int, int],
+) -> tuple[np.ndarray, tuple[int, int], bool]:
+    """Build the shared portrait-to-landscape clockwise rotation transform.
+
+    Portrait geometry is rotated 90 degrees clockwise. Landscape and square
+    geometry receives an identity transform.
+
+    Raises:
+        CropPlanError: If native dimensions are not positive even integers.
+    """
+
+    try:
+        native_width, native_height = native_size_wh
+    except (TypeError, ValueError) as exc:
+        raise CropPlanError("Native size must contain width and height.") from exc
+    native_width = _validate_dimension("native_width", native_width, require_even=True)
+    native_height = _validate_dimension("native_height", native_height, require_even=True)
+    if native_height <= native_width:
+        return np.eye(3, dtype=np.float64), (native_width, native_height), False
+
+    transform = np.array(
+        [
+            [0.0, -1.0, native_height - 1.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    return transform, (native_height, native_width), True
+
+
+def build_canonical_transform(
+    native_size_wh: tuple[int, int],
+    canonical_size_wh: tuple[int, int] | None,
+) -> tuple[np.ndarray, CanonicalGeometry, tuple[int, int]]:
+    """Build the shared native-to-final uniform scale and padding transform.
+
+    A ``None`` canonical size disables canonical scaling and returns an identity
+    transform with the native output dimensions and no padding.
+
+    Raises:
+        CropPlanError: If native or enabled canonical dimensions are invalid.
+    """
+
+    try:
+        native_width, native_height = native_size_wh
+    except (TypeError, ValueError) as exc:
+        raise CropPlanError("Native size must contain width and height.") from exc
+    if canonical_size_wh is None:
+        canonical_width, canonical_height = native_width, native_height
+    else:
+        try:
+            canonical_width, canonical_height = canonical_size_wh
+        except (TypeError, ValueError) as exc:
+            raise CropPlanError("Canonical size must contain width and height.") from exc
+
+    geometry = compute_canonical_geometry(
+        native_width,
+        native_height,
+        canonical_width,
+        canonical_height,
+    )
+    if canonical_size_wh is None:
+        return np.eye(3, dtype=np.float64), geometry, (native_width, native_height)
+
+    transform = np.array(
+        [
+            [geometry.uniform_scale, 0.0, geometry.padding_left],
+            [0.0, geometry.uniform_scale, geometry.padding_top],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    return transform, geometry, geometry.canonical_size_wh
