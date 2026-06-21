@@ -55,3 +55,7 @@ class MetadataArtifactError(PreprocessError, ValueError):
 
 class ProcessingLogError(PreprocessError):
     """Raised when the preprocessing text logger cannot be configured."""
+
+
+class PreprocessServiceError(PreprocessError, ValueError):
+    """Raised when service-level decisions or run invariants are invalid."""

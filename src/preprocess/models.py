@@ -2,14 +2,21 @@
 
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from preprocess.config import PreprocessConfig
 from preprocess.crop_plan import CropPlan
-from project.models import Project
+from preprocess.validation import PreparedVideoValidationResult
+
+FPSHeaderSource = Literal[
+    "external_time",
+    "ffprobe_avg_frame_rate",
+    "ffprobe_r_frame_rate",
+    "opencv_reported_fps",
+]
 
 
 class TimingUnit(StrEnum):
@@ -138,33 +145,39 @@ class PreprocessOutputs(BaseModel):
 
 
 class PreprocessRequest(BaseModel):
-    """First-sprint placeholder for a future end-to-end preprocess request."""
+    """One preprocess run with all caller-owned decisions already supplied."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    project: Project
+    project_dir: Path
     raw_video_path: Path
     config: PreprocessConfig
-    start_frame: int = Field(default=0, ge=0)
-    end_frame_exclusive: int | None = Field(default=None, ge=1)
-    accepted_crop_plan: CropPlan | None = None
+    start_frame: int | None = None
+    end_frame_exclusive: int | None = None
     external_time_selection: ExternalTimeSelection | None = None
-    external_timing_vector: np.ndarray | None = None
-
-    @model_validator(mode="after")
-    def validate_frame_range(self) -> "PreprocessRequest":
-        if self.end_frame_exclusive is not None and self.end_frame_exclusive <= self.start_frame:
-            raise ValueError("end_frame_exclusive must be greater than start_frame.")
-        return self
+    external_time_vector_seconds: np.ndarray | None = None
+    crop_plan: CropPlan | None = None
+    automatic_crop_requested: bool = False
+    crop_accepted_by_user: bool = False
+    detector_diagnostics: dict[str, object] | None = None
 
 
 class PreprocessResult(BaseModel):
-    """First-sprint placeholder for a future end-to-end preprocess result."""
+    """Structured success or expected domain failure from one service run."""
 
     model_config = ConfigDict(extra="forbid")
 
     success: bool
     outputs: PreprocessOutputs | None = None
-    validation_result: dict[str, Any] | None = None
+    raw_probe: VideoProbeResult | None = None
+    prepared_validation: PreparedVideoValidationResult | None = None
+    crop_plan: CropPlan | None = None
+    message: str
     warnings: list[str] = Field(default_factory=list)
-    errors: list[str] = Field(default_factory=list)
+    elapsed_sec: float = Field(ge=0.0)
+    fps_header: float | None = Field(default=None, gt=0)
+    fps_header_source: FPSHeaderSource | None = None
+    raw_fps_effective: float | None = Field(default=None, gt=0)
+    raw_fps_effective_method: str | None = None
+    external_fps_effective: float | None = Field(default=None, gt=0)
+    external_fps_effective_method: str | None = None

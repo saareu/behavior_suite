@@ -20,6 +20,7 @@ from preprocess.exceptions import (
 )
 from preprocess.models import (
     ExternalTimeSelection,
+    FPSHeaderSource,
     PreprocessOutputs,
     SoftwareEnvironmentInfo,
     VideoProbeResult,
@@ -65,6 +66,7 @@ _REQUIRED_NESTED_FIELDS: dict[str, set[str]] = {
         "frame_count_opencv_reported",
         "frame_count_opencv_readable",
         "fps_effective",
+        "fps_effective_method",
         "pts_status",
     },
     "trim": {
@@ -101,7 +103,16 @@ _REQUIRED_NESTED_FIELDS: dict[str, set[str]] = {
         "native_geometry",
         "canonical_geometry",
     },
-    "encoding": {"ffmpeg", "opencv", "output_fps_header"},
+    "encoding": {
+        "ffmpeg",
+        "opencv",
+        "output_fps_header",
+        "fps_header_source",
+        "raw_fps_effective",
+        "raw_fps_effective_method",
+        "external_fps_effective",
+        "external_fps_effective_method",
+    },
     "prepared_video": {
         "path",
         "width",
@@ -148,9 +159,9 @@ def _path_text(path: Path) -> str:
 
 
 def _expected_trimmed_count(
-    raw_probe: VideoProbeResult,
     start_frame: int,
     end_frame_exclusive: int | None,
+    completed_readable_count: int,
 ) -> int:
     if isinstance(start_frame, bool) or not isinstance(start_frame, int) or start_frame < 0:
         raise MetadataArtifactError("start_frame must be a non-negative integer.")
@@ -164,19 +175,16 @@ def _expected_trimmed_count(
                 "end_frame_exclusive must be an integer greater than start_frame."
             )
         return end_frame_exclusive - start_frame
-    if raw_probe.frame_count_opencv_readable is None:
-        raise MetadataArtifactError(
-            "Raw readable frame count is required when end_frame_exclusive is null."
-        )
-    expected = raw_probe.frame_count_opencv_readable - start_frame
-    if expected <= 0:
-        raise MetadataArtifactError("The resolved trim contains no frames.")
-    return expected
+    if completed_readable_count <= 0:
+        raise MetadataArtifactError("Completed prepared readable frame count must be positive.")
+    return completed_readable_count
 
 
 def _external_time_metadata(
     selection: ExternalTimeSelection | None,
     raw_probe: VideoProbeResult,
+    validation_status: str | None,
+    external_fps_effective: float | None,
 ) -> dict[str, object]:
     if selection is None or not selection.provided:
         return {
@@ -185,33 +193,25 @@ def _external_time_metadata(
             "selected_variable": None,
             "selected_units": None,
             "raw_vector_length": 0,
-            "raw_video_frame_count_opencv_readable": (
-                raw_probe.frame_count_opencv_readable
-            ),
+            "raw_video_frame_count_opencv_readable": (raw_probe.frame_count_opencv_readable),
             "median_dt": None,
             "estimated_fps": None,
-            "validation_status": "not_provided",
+            "validation_status": validation_status or "not_provided",
         }
     return {
         "provided": True,
         "source_path": (
-            _path_text(selection.source_path)
-            if selection.source_path is not None
-            else None
+            _path_text(selection.source_path) if selection.source_path is not None else None
         ),
         "selected_variable": selection.selected_variable,
         "selected_units": (
-            selection.declared_units.value
-            if selection.declared_units is not None
-            else None
+            selection.declared_units.value if selection.declared_units is not None else None
         ),
         "raw_vector_length": selection.raw_vector_length,
-        "raw_video_frame_count_opencv_readable": (
-            selection.raw_video_frame_count_opencv_readable
-        ),
+        "raw_video_frame_count_opencv_readable": (selection.raw_video_frame_count_opencv_readable),
         "median_dt": selection.median_difference,
-        "estimated_fps": selection.estimated_fps,
-        "validation_status": selection.validation_status,
+        "estimated_fps": external_fps_effective,
+        "validation_status": validation_status or selection.validation_status,
     }
 
 
@@ -234,9 +234,7 @@ def _geometry_metadata(
         "accepted_by_user": crop_plan.accepted_by_user,
         "native_geometry": {
             "size_wh": (
-                list(crop_plan.native_size_wh)
-                if crop_plan.native_size_wh is not None
-                else None
+                list(crop_plan.native_size_wh) if crop_plan.native_size_wh is not None else None
             )
         },
         "canonical_geometry": (
@@ -265,6 +263,13 @@ def build_prepare_metadata(
     end_frame_exclusive: int | None,
     software_environment: SoftwareEnvironmentInfo,
     detector_diagnostics: dict[str, object] | None = None,
+    fps_header: float | None = None,
+    fps_header_source: FPSHeaderSource | None = None,
+    raw_fps_effective: float | None = None,
+    raw_fps_effective_method: str | None = None,
+    external_fps_effective: float | None = None,
+    external_fps_effective_method: str | None = None,
+    external_time_status: str | None = None,
 ) -> dict[str, object]:
     """Build complete JSON-safe metadata from already-computed typed results.
 
@@ -274,20 +279,16 @@ def build_prepare_metadata(
     """
 
     expected_count = _expected_trimmed_count(
-        raw_probe,
         start_frame,
         end_frame_exclusive,
+        prepared_validation.opencv_readable_frame_count,
     )
     sync_file = Path(sync_path).expanduser()
     if sync_file.resolve() != Path(outputs.prepared_sync_path).expanduser().resolve():
-        raise MetadataArtifactError(
-            "sync_path must match outputs.prepared_sync_path."
-        )
+        raise MetadataArtifactError("sync_path must match outputs.prepared_sync_path.")
     prepared_path = Path(outputs.prepared_video_path).expanduser().resolve()
     if Path(background_result.source_video_path).expanduser().resolve() != prepared_path:
-        raise MetadataArtifactError(
-            "Background source must be the final prepared video output."
-        )
+        raise MetadataArtifactError("Background source must be the final prepared video output.")
     try:
         validate_background(
             background_result.background,
@@ -297,7 +298,26 @@ def build_prepare_metadata(
         raise MetadataArtifactError(f"Background result is invalid: {exc}") from exc
 
     prepared_width, prepared_height = prepared_validation.opencv_reported_size_wh
-    output_fps = prepared_validation.opencv_reported_fps
+    output_fps = prepared_validation.opencv_reported_fps if fps_header is None else fps_header
+    resolved_fps_source = fps_header_source
+    if resolved_fps_source is None:
+        raw_method = raw_probe.raw_fps_effective_method
+        resolved_fps_source = "opencv_reported_fps" if raw_method == "opencv_fps" else raw_method
+    if resolved_fps_source not in {
+        "external_time",
+        "ffprobe_avg_frame_rate",
+        "ffprobe_r_frame_rate",
+        "opencv_reported_fps",
+    }:
+        raise MetadataArtifactError("fps_header_source is missing or invalid.")
+    resolved_raw_fps = (
+        raw_probe.raw_fps_effective if raw_fps_effective is None else raw_fps_effective
+    )
+    resolved_raw_fps_method = (
+        raw_probe.raw_fps_effective_method
+        if raw_fps_effective_method is None
+        else raw_fps_effective_method
+    )
     validation_status = "passed" if prepared_validation.is_valid else "failed"
     geometry = _geometry_metadata(crop_plan, preprocess_config)
     is_automatic = crop_plan.mode is CropMode.AUTOMATIC
@@ -324,6 +344,7 @@ def build_prepare_metadata(
             "frame_count_opencv_reported": raw_probe.frame_count_opencv_reported,
             "frame_count_opencv_readable": raw_probe.frame_count_opencv_readable,
             "fps_effective": raw_probe.raw_fps_effective,
+            "fps_effective_method": raw_probe.raw_fps_effective_method,
             "pts_status": raw_probe.pts_status,
         },
         "trim": {
@@ -342,6 +363,8 @@ def build_prepare_metadata(
         "external_time": _external_time_metadata(
             external_time_selection,
             raw_probe,
+            external_time_status,
+            external_fps_effective,
         ),
         "cage_detection": {
             "used": is_automatic,
@@ -368,21 +391,20 @@ def build_prepare_metadata(
                 "fourcc": opencv_config.fourcc,
             },
             "output_fps_header": output_fps,
+            "fps_header_source": resolved_fps_source,
+            "raw_fps_effective": resolved_raw_fps,
+            "raw_fps_effective_method": resolved_raw_fps_method,
+            "external_fps_effective": external_fps_effective,
+            "external_fps_effective_method": external_fps_effective_method,
         },
         "prepared_video": {
             "path": _path_text(outputs.prepared_video_path),
             "width": prepared_width,
             "height": prepared_height,
             "fps_header": output_fps,
-            "opencv_reported_frame_count": (
-                prepared_validation.opencv_reported_frame_count
-            ),
-            "opencv_readable_frame_count": (
-                prepared_validation.opencv_readable_frame_count
-            ),
-            "frame_count_used_for_sleap": (
-                prepared_validation.opencv_readable_frame_count
-            ),
+            "opencv_reported_frame_count": (prepared_validation.opencv_reported_frame_count),
+            "opencv_readable_frame_count": (prepared_validation.opencv_readable_frame_count),
+            "frame_count_used_for_sleap": (prepared_validation.opencv_readable_frame_count),
         },
         "background": {
             "path": _path_text(outputs.cropped_background_path),
@@ -396,9 +418,7 @@ def build_prepare_metadata(
         "sync": {
             "path": _path_text(sync_file),
             "sync_schema_version": PREPARED_SYNC_SCHEMA_VERSION,
-            "frame_count_used_for_sleap": (
-                prepared_validation.opencv_readable_frame_count
-            ),
+            "frame_count_used_for_sleap": (prepared_validation.opencv_readable_frame_count),
         },
         "mask": {"enabled": False, "shapes": []},
         "validation": {
@@ -415,9 +435,7 @@ def build_prepare_metadata(
             "prepared_video_path": _path_text(outputs.prepared_video_path),
             "prepare_meta_path": _path_text(outputs.prepare_meta_path),
             "prepared_sync_path": _path_text(outputs.prepared_sync_path),
-            "cropped_background_path": _path_text(
-                outputs.cropped_background_path
-            ),
+            "cropped_background_path": _path_text(outputs.cropped_background_path),
             "settings_used_path": _path_text(outputs.settings_used_path),
             "processing_log_path": _path_text(outputs.processing_log_path),
         },
@@ -432,9 +450,7 @@ def _require_mapping(
 ) -> Mapping[str, object]:
     value = metadata.get(section_name)
     if not isinstance(value, Mapping):
-        raise MetadataArtifactError(
-            f"Metadata section '{section_name}' must be an object."
-        )
+        raise MetadataArtifactError(f"Metadata section '{section_name}' must be an object.")
     return value
 
 
@@ -465,10 +481,7 @@ def _size_pair(name: str, value: object) -> tuple[int, int]:
     if not isinstance(value, (list, tuple)) or len(value) != 2:
         raise MetadataArtifactError(f"{name} must contain width and height.")
     width, height = value
-    if any(
-        isinstance(item, bool) or not isinstance(item, int)
-        for item in (width, height)
-    ):
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in (width, height)):
         raise MetadataArtifactError(f"{name} width and height must be integers.")
     if width <= 0 or height <= 0:
         raise MetadataArtifactError(f"{name} width and height must be positive.")
@@ -483,9 +496,7 @@ def validate_prepare_metadata(metadata: dict[str, object]) -> None:
             unsuccessful, or not strictly JSON serializable.
     """
 
-    missing_top_level = sorted(
-        set(PREPARE_METADATA_TOP_LEVEL_SECTIONS) - set(metadata)
-    )
+    missing_top_level = sorted(set(PREPARE_METADATA_TOP_LEVEL_SECTIONS) - set(metadata))
     if missing_top_level:
         raise MetadataArtifactError(
             f"Metadata is missing required top-level sections: {missing_top_level}."
@@ -508,13 +519,9 @@ def validate_prepare_metadata(metadata: dict[str, object]) -> None:
         or not isinstance(readable_count, int)
         or readable_count <= 0
     ):
-        raise MetadataArtifactError(
-            "prepared_video.opencv_readable_frame_count must be positive."
-        )
+        raise MetadataArtifactError("prepared_video.opencv_readable_frame_count must be positive.")
     if reported_count != readable_count:
-        raise MetadataArtifactError(
-            "Prepared reported and readable frame counts must match."
-        )
+        raise MetadataArtifactError("Prepared reported and readable frame counts must match.")
     if used_count != readable_count:
         raise MetadataArtifactError(
             "prepared_video.frame_count_used_for_sleap must equal readable count."
@@ -537,15 +544,11 @@ def validate_prepare_metadata(metadata: dict[str, object]) -> None:
     if trim["end_frame_semantics"] != "exclusive":
         raise MetadataArtifactError("trim.end_frame_semantics must be exclusive.")
     if trim["expected_trimmed_frame_count"] != readable_count:
-        raise MetadataArtifactError(
-            "Trim expected frame count must match prepared readable count."
-        )
+        raise MetadataArtifactError("Trim expected frame count must match prepared readable count.")
 
     background = sections["background"]
     if _size_pair("background.source_size_wh", background["source_size_wh"]) != prepared_size:
-        raise MetadataArtifactError(
-            "Background source size must match prepared-video dimensions."
-        )
+        raise MetadataArtifactError("Background source size must match prepared-video dimensions.")
     if sections["sync"]["frame_count_used_for_sleap"] != readable_count:
         raise MetadataArtifactError(
             "Sync frame_count_used_for_sleap must match prepared readable count."
@@ -585,8 +588,7 @@ def validate_prepare_metadata(metadata: dict[str, object]) -> None:
     manual_used = sections["manual_crop"]["used"]
     if mode == CropMode.AUTOMATIC.value:
         missing_cage_fields = sorted(
-            {"fit_score", "rim_density", "detector_diagnostics"}
-            - set(sections["cage_detection"])
+            {"fit_score", "rim_density", "detector_diagnostics"} - set(sections["cage_detection"])
         )
         if missing_cage_fields:
             raise MetadataArtifactError(
@@ -611,14 +613,16 @@ def validate_prepare_metadata(metadata: dict[str, object]) -> None:
     if validation["status"] == "passed":
         prepared_summary = validation["prepared_video"]
         background_summary = validation["background"]
-        if not isinstance(prepared_summary, Mapping) or prepared_summary.get("is_valid") is not True:
-            raise MetadataArtifactError(
-                "Passed metadata requires a valid prepared-video summary."
-            )
-        if not isinstance(background_summary, Mapping) or background_summary.get("status") != "passed":
-            raise MetadataArtifactError(
-                "Passed metadata requires a passed background summary."
-            )
+        if (
+            not isinstance(prepared_summary, Mapping)
+            or prepared_summary.get("is_valid") is not True
+        ):
+            raise MetadataArtifactError("Passed metadata requires a valid prepared-video summary.")
+        if (
+            not isinstance(background_summary, Mapping)
+            or background_summary.get("status") != "passed"
+        ):
+            raise MetadataArtifactError("Passed metadata requires a passed background summary.")
 
     mask = sections["mask"]
     if mask["enabled"] is not False or mask["shapes"] != []:
@@ -629,6 +633,35 @@ def validate_prepare_metadata(metadata: dict[str, object]) -> None:
         "encoding.output_fps_header",
         encoding["output_fps_header"],
     )
+    if encoding["output_fps_header"] != prepared["fps_header"]:
+        raise MetadataArtifactError(
+            "encoding.output_fps_header must match prepared_video.fps_header."
+        )
+    if encoding["fps_header_source"] not in {
+        "external_time",
+        "ffprobe_avg_frame_rate",
+        "ffprobe_r_frame_rate",
+        "opencv_reported_fps",
+    }:
+        raise MetadataArtifactError("encoding.fps_header_source is invalid.")
+    for field_name in ("raw_fps_effective", "external_fps_effective"):
+        value = encoding[field_name]
+        if value is not None:
+            _positive_number(f"encoding.{field_name}", value)
+    external = sections["external_time"]
+    if external["validation_status"] not in {
+        "valid",
+        "not_provided",
+        "not_convertible_to_seconds",
+    }:
+        raise MetadataArtifactError("external_time.validation_status is invalid.")
+    if (
+        encoding["fps_header_source"] == "external_time"
+        and encoding["external_fps_effective"] != encoding["output_fps_header"]
+    ):
+        raise MetadataArtifactError(
+            "External-time FPS must match the selected output FPS header."
+        )
     outputs = sections["outputs"]
     for field_name in _REQUIRED_NESTED_FIELDS["outputs"]:
         value = outputs[field_name]
@@ -656,9 +689,7 @@ def _create_temporary_path(destination: Path, marker: str) -> Path:
         temporary_path = Path(temporary_name).resolve()
         temporary_path.unlink()
     except OSError as exc:
-        raise MetadataArtifactError(
-            f"Could not create temporary artifact path: {exc}"
-        ) from exc
+        raise MetadataArtifactError(f"Could not create temporary artifact path: {exc}") from exc
     return temporary_path
 
 
@@ -703,9 +734,7 @@ def write_prepare_meta_json(
         with temporary_path.open("r", encoding="utf-8") as stream:
             reloaded = json.load(stream)
         if not isinstance(reloaded, dict):
-            raise MetadataArtifactError(
-                "Reloaded prepare metadata is not a JSON object."
-            )
+            raise MetadataArtifactError("Reloaded prepare metadata is not a JSON object.")
         validate_prepare_metadata(reloaded)
         temporary_path.replace(destination)
     except MetadataArtifactError:
@@ -713,9 +742,7 @@ def write_prepare_meta_json(
         raise
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         _remove_temporary_path(temporary_path)
-        raise MetadataArtifactError(
-            f"Could not write prepare metadata JSON: {exc}"
-        ) from exc
+        raise MetadataArtifactError(f"Could not write prepare metadata JSON: {exc}") from exc
     return destination
 
 
@@ -749,21 +776,15 @@ def write_settings_used_yaml(
         with temporary_path.open("r", encoding="utf-8") as stream:
             reloaded = yaml.safe_load(stream)
         if not isinstance(reloaded, dict):
-            raise MetadataArtifactError(
-                "Reloaded settings artifact is not a YAML mapping."
-            )
+            raise MetadataArtifactError("Reloaded settings artifact is not a YAML mapping.")
         validated = PreprocessConfig.model_validate(reloaded)
         if validated.model_dump(mode="json") != payload:
-            raise MetadataArtifactError(
-                "Reloaded settings differ from the accepted configuration."
-            )
+            raise MetadataArtifactError("Reloaded settings differ from the accepted configuration.")
         temporary_path.replace(destination)
     except MetadataArtifactError:
         _remove_temporary_path(temporary_path)
         raise
     except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
         _remove_temporary_path(temporary_path)
-        raise MetadataArtifactError(
-            f"Could not write settings YAML: {exc}"
-        ) from exc
+        raise MetadataArtifactError(f"Could not write settings YAML: {exc}") from exc
     return destination
