@@ -1,4 +1,4 @@
-"""Stage A ffmpeg preparation with deterministic frame and crop geometry."""
+"""Two-stage video preparation with deterministic frames and crop geometry."""
 
 from __future__ import annotations
 
@@ -7,9 +7,11 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
+import cv2
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -19,7 +21,15 @@ from preprocess.crop_plan import (
     CropPlan,
     build_clockwise_rotation_transform,
 )
-from preprocess.exceptions import CropPlanError, VideoPreparationError
+from preprocess.exceptions import (
+    CropPlanError,
+    VideoPreparationError,
+    VideoValidationError,
+)
+from preprocess.validation import (
+    PreparedVideoValidationResult,
+    validate_prepared_video,
+)
 
 _BINARY_DIRECTORY_NAME = "bin"
 _GEOMETRY_ATOL = 1e-5
@@ -72,6 +82,26 @@ class IntermediatePrepareResult(BaseModel):
     stdout: str
     stderr: str
     elapsed_sec: float = Field(ge=0.0)
+
+
+class FinalReencodeResult(BaseModel):
+    """Result of validated Stage B OpenCV final re-encoding.
+
+    The temporary path records the same-directory staging name used before its
+    successful atomic replacement of the prepared path; it no longer exists
+    after a successful return.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    temporary_output_path: Path
+    prepared_video_path: Path
+    frames_written: int = Field(gt=0)
+    output_fps: float = Field(gt=0)
+    output_size_wh: tuple[int, int]
+    opencv_fourcc: str
+    elapsed_sec: float = Field(ge=0.0)
+    validation_result: PreparedVideoValidationResult
 
 
 def _bundled_binary_candidates(binary_name: str) -> tuple[Path, ...]:
@@ -676,4 +706,208 @@ def run_ffmpeg_prepare(
         stdout=completed.stdout or "",
         stderr=completed.stderr or "",
         elapsed_sec=elapsed_sec,
+    )
+
+
+def _validate_stage_b_geometry(
+    output_size_wh: tuple[int, int],
+) -> tuple[int, int]:
+    try:
+        width, height = output_size_wh
+    except (TypeError, ValueError) as exc:
+        raise VideoPreparationError(
+            "output_size_wh must contain width and height."
+        ) from exc
+    if any(
+        isinstance(value, bool) or not isinstance(value, int)
+        for value in (width, height)
+    ):
+        raise VideoPreparationError("Stage B output width and height must be integers.")
+    if width <= 0 or height <= 0:
+        raise VideoPreparationError("Stage B output width and height must be positive.")
+    if width % 2 or height % 2:
+        raise VideoPreparationError("Stage B output width and height must be even.")
+    return width, height
+
+
+def _validate_stage_b_fps(output_fps: float) -> float:
+    if isinstance(output_fps, bool):
+        raise VideoPreparationError("Stage B output FPS must be numeric.")
+    try:
+        fps = float(output_fps)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise VideoPreparationError("Stage B output FPS must be numeric.") from exc
+    if not math.isfinite(fps) or fps <= 0:
+        raise VideoPreparationError("Stage B output FPS must be finite and positive.")
+    return fps
+
+
+def _create_temporary_video_path(prepared_path: Path) -> Path:
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{prepared_path.stem}.stage-b-",
+            suffix=prepared_path.suffix,
+            dir=prepared_path.parent,
+        )
+        os.close(descriptor)
+        temporary_path = Path(temporary_name).resolve()
+        temporary_path.unlink()
+    except OSError as exc:
+        raise VideoPreparationError(
+            f"Could not create Stage B temporary output path: {exc}"
+        ) from exc
+    return temporary_path
+
+
+def _remove_temporary_video(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise VideoPreparationError(
+            f"Could not remove failed Stage B temporary output {path}: {exc}"
+        ) from exc
+
+
+def reencode_intermediate_with_opencv(
+    intermediate_video_path: Path,
+    prepared_video_path: Path,
+    output_fps: float,
+    output_size_wh: tuple[int, int],
+    config: PreprocessConfig,
+) -> FinalReencodeResult:
+    """Sequentially re-encode an ffmpeg intermediate through OpenCV.
+
+    Exactly one output frame is written for each successful sequential input
+    decode. No resize, frame-rate conversion, temporal resampling, masking, or
+    other frame transform is performed. The output is written beside the
+    requested destination under a temporary name, strictly validated, and
+    atomically moved into place only after validation succeeds.
+
+    Raises:
+        VideoPreparationError: If arguments, input, frame geometry, writer
+            creation, encoding, temporary-file handling, or replacement fails.
+        VideoValidationError: If the completed temporary video fails any
+            strict prepared-video validation gate.
+    """
+
+    fps = _validate_stage_b_fps(output_fps)
+    expected_size = _validate_stage_b_geometry(output_size_wh)
+    intermediate_path = Path(intermediate_video_path).expanduser()
+    if not intermediate_path.is_file():
+        raise VideoPreparationError(
+            f"ffmpeg intermediate does not exist: {intermediate_path}"
+        )
+    intermediate_path = intermediate_path.resolve()
+
+    prepared_path = Path(prepared_video_path).expanduser()
+    encoding = config.encoding.opencv
+    if prepared_path.suffix.lower() != f".{encoding.container}":
+        raise VideoPreparationError(
+            "Prepared output suffix does not match configured OpenCV container."
+        )
+    try:
+        prepared_path.parent.mkdir(parents=True, exist_ok=True)
+        prepared_path = prepared_path.resolve()
+    except OSError as exc:
+        raise VideoPreparationError(
+            f"Could not create prepared-video output directory: {exc}"
+        ) from exc
+    if intermediate_path == prepared_path:
+        raise VideoPreparationError(
+            "ffmpeg intermediate and prepared-video output paths must differ."
+        )
+
+    temporary_path = _create_temporary_video_path(prepared_path)
+    started = time.perf_counter()
+    capture: cv2.VideoCapture | None = None
+    writer: cv2.VideoWriter | None = None
+    frames_written = 0
+    try:
+        capture = cv2.VideoCapture(str(intermediate_path))
+        if not capture.isOpened():
+            raise VideoPreparationError(
+                f"OpenCV could not open ffmpeg intermediate: {intermediate_path}"
+            )
+
+        fourcc = cv2.VideoWriter_fourcc(*encoding.fourcc)
+        writer = cv2.VideoWriter(
+            str(temporary_path),
+            fourcc,
+            fps,
+            expected_size,
+        )
+        if not writer.isOpened():
+            raise VideoPreparationError(
+                "OpenCV could not open VideoWriter for the Stage B temporary output."
+            )
+
+        while True:
+            try:
+                success, frame = capture.read()
+            except cv2.error as exc:
+                raise VideoPreparationError(
+                    f"OpenCV failed while decoding the ffmpeg intermediate: {exc}"
+                ) from exc
+            if not success:
+                break
+            if frame is None or frame.ndim < 2:
+                raise VideoPreparationError(
+                    "OpenCV reported a successful intermediate decode without a valid frame."
+                )
+            frame_size = (int(frame.shape[1]), int(frame.shape[0]))
+            if frame_size != expected_size:
+                raise VideoPreparationError(
+                    f"Intermediate frame {frames_written} has size {frame_size}; "
+                    f"expected {expected_size}. Stage B does not resize frames."
+                )
+            # Reserved insertion point for future prepared-coordinate transforms.
+            try:
+                writer.write(frame)
+            except cv2.error as exc:
+                raise VideoPreparationError(
+                    f"OpenCV failed while writing prepared frame {frames_written}: {exc}"
+                ) from exc
+            frames_written += 1
+    except cv2.error as exc:
+        raise VideoPreparationError(
+            f"OpenCV could not initialize or complete Stage B re-encoding: {exc}"
+        ) from exc
+    finally:
+        failed = sys.exc_info()[0] is not None
+        if capture is not None:
+            capture.release()
+        if writer is not None:
+            writer.release()
+        if failed:
+            _remove_temporary_video(temporary_path)
+
+    try:
+        if frames_written <= 0:
+            raise VideoPreparationError(
+                "No frames were written during Stage B OpenCV re-encoding."
+            )
+        validation_result = validate_prepared_video(
+            temporary_path,
+            expected_frame_count=frames_written,
+            expected_size_wh=expected_size,
+        )
+        try:
+            temporary_path.replace(prepared_path)
+        except OSError as exc:
+            raise VideoPreparationError(
+                f"Could not replace prepared-video output atomically: {exc}"
+            ) from exc
+    except (VideoPreparationError, VideoValidationError):
+        _remove_temporary_video(temporary_path)
+        raise
+
+    return FinalReencodeResult(
+        temporary_output_path=temporary_path,
+        prepared_video_path=prepared_path,
+        frames_written=frames_written,
+        output_fps=fps,
+        output_size_wh=expected_size,
+        opencv_fourcc=encoding.fourcc,
+        elapsed_sec=time.perf_counter() - started,
+        validation_result=validation_result,
     )

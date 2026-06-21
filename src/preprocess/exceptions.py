@@ -30,4 +30,12 @@ class CageDetectionError(PreprocessError):
 
 
 class VideoPreparationError(PreprocessError):
-    """Raised when the ffmpeg preparation stage cannot complete safely."""
+    """Raised when a video preparation stage cannot complete safely."""
+
+
+class VideoValidationError(PreprocessError):
+    """Raised when a prepared video fails one or more hard validation gates."""
+
+    def __init__(self, message: str, *, result: object | None = None) -> None:
+        super().__init__(message)
+        self.result = result
