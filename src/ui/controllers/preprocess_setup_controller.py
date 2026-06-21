@@ -1,0 +1,296 @@
+"""Headless controller for project, video, trim, and pre-crop setup."""
+
+from __future__ import annotations
+
+import traceback
+from collections.abc import Callable
+from pathlib import Path
+from typing import NoReturn, cast
+
+from pydantic import ValidationError
+
+from preprocess.config import (
+    PreCropConfig,
+    PreprocessConfig,
+    load_preprocess_config,
+)
+from preprocess.exceptions import PreprocessError
+from preprocess.models import VideoProbeResult
+from preprocess.pre_crop import PreCropMode, ResolvedPreCrop, resolve_pre_crop
+from preprocess.service import resolve_trim_range
+from preprocess.video_probe import probe_video
+from project.models import Project
+from project.paths import get_preprocess_dir
+from project.service import ProjectService
+from project.validation import ProjectError
+from ui.state import PreprocessSetupState, WorkflowStep
+
+ConfigLoader = Callable[[Path], PreprocessConfig]
+PreCropResolver = Callable[[PreCropConfig, tuple[int, int]], ResolvedPreCrop]
+
+
+class SetupValidationError(ValueError):
+    """Expected user-facing setup validation failure."""
+
+
+class PreprocessSetupController:
+    """Coordinate setup state through existing typed core APIs."""
+
+    def __init__(
+        self,
+        state: PreprocessSetupState | None = None,
+        *,
+        project_service: ProjectService | None = None,
+        probe_function: Callable[..., VideoProbeResult] = probe_video,
+        config_loader: ConfigLoader = load_preprocess_config,
+        pre_crop_resolver: PreCropResolver = resolve_pre_crop,
+    ) -> None:
+        self.state = state or PreprocessSetupState()
+        self._project_service = project_service or ProjectService()
+        self._probe_function = probe_function
+        self._config_loader = config_loader
+        self._pre_crop_resolver = pre_crop_resolver
+
+    @staticmethod
+    def default_config_path() -> Path:
+        """Return the repository default preprocessing YAML path."""
+
+        return Path(__file__).resolve().parents[3] / "configs" / "preprocess_default.yaml"
+
+    def load_startup_config(self, path: Path | None = None) -> PreprocessConfig:
+        """Load an explicit/default YAML, or use typed defaults if unavailable."""
+
+        selected_path = Path(path).expanduser() if path is not None else self.default_config_path()
+        if selected_path.is_file():
+            return self.load_config(selected_path)
+        if path is not None:
+            raise SetupValidationError(f"Configuration file does not exist: {selected_path}")
+        config = PreprocessConfig()
+        self._apply_config(config, None)
+        return config
+
+    def load_config(self, path: Path) -> PreprocessConfig:
+        """Load a validated YAML configuration and update setup defaults."""
+
+        try:
+            config = self._config_loader(Path(path))
+        except (PreprocessError, ValidationError, OSError, ValueError) as exc:
+            self._validation_failure(f"Invalid preprocess configuration: {exc}", exc)
+        self._apply_config(config, Path(path).expanduser().resolve())
+        return config
+
+    def _apply_config(self, config: PreprocessConfig, path: Path | None) -> None:
+        self.state.preprocess_config = config
+        self.state.config_path = path
+        self.state.start_frame = config.trim.start_frame or 0
+        self.state.end_frame_exclusive = config.trim.end_frame
+        self.state.pre_crop_config = config.pre_crop
+        self.state.resolved_pre_crop = None
+        self.state.trim_pre_crop_valid = False
+        self.state.last_validation_error = None
+
+    def create_project(self, parent_dir: Path, project_name: str) -> Project:
+        """Create a project through ProjectService and reset downstream state."""
+
+        try:
+            project = self._project_service.create_project(parent_dir, project_name)
+        except (ProjectError, OSError, ValueError) as exc:
+            self._validation_failure(f"Could not create project: {exc}", exc)
+        self._set_project(project)
+        return project
+
+    def open_project(self, project_dir: Path) -> Project:
+        """Open a validated project and reset downstream state."""
+
+        try:
+            project = self._project_service.open_project(project_dir)
+        except (ProjectError, OSError, ValueError) as exc:
+            self._validation_failure(f"Could not open project: {exc}", exc)
+        self._set_project(project)
+        return project
+
+    def _set_project(self, project: Project) -> None:
+        self.state.project = project
+        self.state.project_dir = project.root_dir
+        self.state.preprocess_dir = get_preprocess_dir(project)
+        self.state.raw_video_path = None
+        self.state.raw_probe = None
+        self.state.resolved_pre_crop = None
+        self.state.trim_pre_crop_valid = False
+        self.state.external_timing_selection = None
+        self.state.last_validation_error = None
+
+    def set_raw_video_path(self, path: Path) -> Path:
+        """Store a selected raw-video path and invalidate downstream setup."""
+
+        selected = Path(path).expanduser()
+        self.state.raw_video_path = selected
+        self.state.raw_probe = None
+        self.state.resolved_pre_crop = None
+        self.state.trim_pre_crop_valid = False
+        self.state.last_validation_error = None
+        return selected
+
+    def probe_raw_video(
+        self,
+        path: Path | None = None,
+        *,
+        require_sequential_count: bool = False,
+    ) -> VideoProbeResult:
+        """Probe the selected raw video with optional sequential counting."""
+
+        if self.state.project is None:
+            raise self._new_validation_error("Select or create a project first.")
+        selected = Path(path).expanduser() if path is not None else self.state.raw_video_path
+        if selected is None:
+            raise self._new_validation_error("Select a raw video before probing.")
+        try:
+            result = self._probe_function(
+                selected,
+                require_sequential_count=require_sequential_count,
+            )
+        except (PreprocessError, OSError, ValueError) as exc:
+            self._validation_failure(f"Could not probe raw video: {exc}", exc)
+        self.state.raw_video_path = result.source_path
+        self.state.raw_probe = result
+        self.state.resolved_pre_crop = None
+        self.state.trim_pre_crop_valid = False
+        self.state.last_validation_error = None
+        return result
+
+    def configure_trim_and_pre_crop(
+        self,
+        *,
+        start_frame: int,
+        end_frame_exclusive: int | None,
+        mode: str | PreCropMode,
+        boundary_px: int | None = None,
+        rectangle_x: int | None = None,
+        rectangle_y: int | None = None,
+        rectangle_width: int | None = None,
+        rectangle_height: int | None = None,
+    ) -> ResolvedPreCrop:
+        """Validate and store trim selection plus one resolved pre-crop ROI."""
+
+        self.state.start_frame = start_frame
+        self.state.end_frame_exclusive = end_frame_exclusive
+        self.state.resolved_pre_crop = None
+        self.state.trim_pre_crop_valid = False
+        config = self.state.preprocess_config
+        raw_probe = self.state.raw_probe
+        if config is None:
+            raise self._new_validation_error("Load a preprocess configuration first.")
+        if raw_probe is None:
+            raise self._new_validation_error("Probe a raw video first.")
+        try:
+            trim = resolve_trim_range(
+                request_start_frame=start_frame,
+                request_end_frame_exclusive=end_frame_exclusive,
+                config=config,
+                raw_readable_frame_count=raw_probe.frame_count_opencv_readable,
+            )
+            pre_crop_config = self._build_pre_crop_config(
+                mode=mode,
+                boundary_px=boundary_px,
+                rectangle_x=rectangle_x,
+                rectangle_y=rectangle_y,
+                rectangle_width=rectangle_width,
+                rectangle_height=rectangle_height,
+            )
+            resolved = self._pre_crop_resolver(
+                pre_crop_config,
+                (raw_probe.width, raw_probe.height),
+            )
+        except (PreprocessError, ValidationError, ValueError) as exc:
+            self._validation_failure(f"Invalid trim or pre-crop: {exc}", exc)
+        self.state.start_frame = trim.start_frame
+        self.state.end_frame_exclusive = trim.end_frame_exclusive
+        self.state.pre_crop_config = pre_crop_config
+        self.state.resolved_pre_crop = resolved
+        self.state.trim_pre_crop_valid = True
+        self.state.last_validation_error = None
+        return resolved
+
+    @staticmethod
+    def _build_pre_crop_config(
+        *,
+        mode: str | PreCropMode,
+        boundary_px: int | None,
+        rectangle_x: int | None,
+        rectangle_y: int | None,
+        rectangle_width: int | None,
+        rectangle_height: int | None,
+    ) -> PreCropConfig:
+        try:
+            resolved_mode = PreCropMode(mode)
+        except ValueError as exc:
+            raise SetupValidationError(f"Unsupported pre-crop mode: {mode}") from exc
+        rectangle = (
+            rectangle_x,
+            rectangle_y,
+            rectangle_width,
+            rectangle_height,
+        )
+        if resolved_mode is PreCropMode.NONE:
+            return PreCropConfig(enabled=False, mode=resolved_mode.value)
+        if resolved_mode is PreCropMode.MANUAL_RECTANGLE:
+            if any(value is None for value in rectangle):
+                raise SetupValidationError("Manual rectangle requires x, y, width, and height.")
+            return PreCropConfig(
+                enabled=True,
+                mode=resolved_mode.value,
+                manual_rectangle=cast(tuple[int, int, int, int], rectangle),
+            )
+        if boundary_px is None:
+            raise SetupValidationError(f"{resolved_mode.value} requires a boundary coordinate.")
+        return PreCropConfig(
+            enabled=True,
+            mode=resolved_mode.value,
+            boundary_px=boundary_px,
+        )
+
+    def validate_step(self, step: WorkflowStep | int) -> None:
+        """Raise when setup state cannot advance from the requested step."""
+
+        resolved_step = WorkflowStep(step)
+        if self.state.project is None or self.state.project_dir is None:
+            raise self._new_validation_error("A valid project is required.")
+        if resolved_step is WorkflowStep.PROJECT:
+            return
+        if self.state.raw_video_path is None or self.state.raw_probe is None:
+            raise self._new_validation_error("A successfully probed raw video is required.")
+        if resolved_step is WorkflowStep.RAW_VIDEO:
+            return
+        if resolved_step is WorkflowStep.TRIM_PRE_CROP:
+            if (
+                not self.state.trim_pre_crop_valid
+                or self.state.pre_crop_config is None
+                or self.state.resolved_pre_crop is None
+            ):
+                raise self._new_validation_error("A valid trim and resolved pre-crop are required.")
+            return
+        raise self._new_validation_error("Not implemented in this GUI milestone.")
+
+    def can_advance(self, step: WorkflowStep | int) -> bool:
+        """Return whether the requested workflow step is currently valid."""
+
+        try:
+            self.validate_step(step)
+        except SetupValidationError:
+            return False
+        return True
+
+    def record_unexpected_error(self, exc: BaseException) -> None:
+        """Preserve detailed unexpected-error text for future logging."""
+
+        self.state.unexpected_error_detail = "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        )
+
+    def _new_validation_error(self, message: str) -> SetupValidationError:
+        self.state.last_validation_error = message
+        return SetupValidationError(message)
+
+    def _validation_failure(self, message: str, exc: BaseException) -> NoReturn:
+        self.state.last_validation_error = message
+        raise SetupValidationError(message) from exc

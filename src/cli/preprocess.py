@@ -544,5 +544,27 @@ def run_preprocess(
         _show_unexpected_error(exc)
 
 
+@app.command("gui")
+def gui_command(
+    config_path: Annotated[
+        Path | None,
+        typer.Option("--config", help="Optional preprocess YAML configuration."),
+    ] = None,
+) -> None:
+    """Launch the desktop preprocessing setup application."""
+
+    from ui.app import GUI_INSTALL_GUIDANCE, GuiDependencyError, launch_gui
+
+    try:
+        exit_code = launch_gui(config_path)
+    except GuiDependencyError:
+        typer.echo(GUI_INSTALL_GUIDANCE, err=True)
+        raise typer.Exit(code=1) from None
+    except Exception as exc:
+        _show_unexpected_error(exc)
+    if exit_code != 0:
+        raise typer.Exit(code=exit_code)
+
+
 if __name__ == "__main__":
     app()

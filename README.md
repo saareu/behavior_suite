@@ -125,6 +125,18 @@ Crop detection never accepts a crop automatically. Review the detected JSON,
 create a separate accepted JSON with `accept-crop`, and pass only that accepted
 plan to `run`.
 
+### Desktop GUI setup
+
+```powershell
+pip install -e ".[dev,gui]"
+
+behavior-suite gui
+```
+
+The first desktop GUI milestone covers project creation/opening, raw-video
+probing, trim selection, and typed pre-crop configuration. Timing, crop review,
+encoding, and final execution remain visible workflow placeholders.
+
 ---
 
 ## Preprocess Subsystem
