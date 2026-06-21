@@ -175,6 +175,7 @@ def _extract_rectification_geometry(
     tuple[int, int],
     tuple[int, int, int, int],
     np.ndarray,
+    np.ndarray,
 ]:
     if crop_plan.native_size_wh is None or crop_plan.canonical_geometry is None:
         raise VideoPreparationError(
@@ -259,7 +260,81 @@ def _extract_rectification_geometry(
     content_size_wh = (right_px - left_px + 1, bottom_px - top_px + 1)
     if content_size_wh[0] <= 0 or content_size_wh[1] <= 0:
         raise VideoPreparationError("CropPlan rectified content size must be positive.")
-    return pre_rotation_size_wh, content_size_wh, padding, destination
+    return (
+        pre_rotation_size_wh,
+        content_size_wh,
+        padding,
+        destination,
+        rectification_homography,
+    )
+
+
+def _build_perspective_source_quad(
+    crop_plan: CropPlan,
+    rectification_homography: np.ndarray,
+    content_size_wh: tuple[int, int],
+    rectification_padding: tuple[int, int, int, int],
+) -> np.ndarray:
+    """Adapt CropPlan pixel centers to ffmpeg's W/H corner convention."""
+
+    roi = crop_plan.pre_crop_roi
+    content_width, content_height = content_size_wh
+    input_width, input_height = roi.width, roi.height
+    scale_x = content_width / input_width
+    scale_y = content_height / input_height
+    pixel_center_scale = np.array(
+        [
+            [scale_x, 0.0, scale_x / 2.0 - 0.5],
+            [0.0, scale_y, scale_y / 2.0 - 0.5],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    raw_from_local = np.array(
+        [
+            [1.0, 0.0, roi.x],
+            [0.0, 1.0, roi.y],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    pad_left, _pad_right, pad_top, _pad_bottom = rectification_padding
+    remove_padding = np.array(
+        [
+            [1.0, 0.0, -pad_left],
+            [0.0, 1.0, -pad_top],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    desired_local_to_content = (
+        remove_padding @ rectification_homography @ raw_from_local
+    )
+    try:
+        desired_local_to_perspective = (
+            np.linalg.inv(pixel_center_scale) @ desired_local_to_content
+        )
+        perspective_to_local = np.linalg.inv(desired_local_to_perspective)
+    except np.linalg.LinAlgError as exc:
+        raise VideoPreparationError(
+            "CropPlan perspective stage contains a singular transform."
+        ) from exc
+
+    perspective_boundary = np.array(
+        [
+            [0.0, 0.0],
+            [float(input_width), 0.0],
+            [float(input_width), float(input_height)],
+            [0.0, float(input_height)],
+        ],
+        dtype=np.float64,
+    )
+    source_quad = _transform_points(perspective_to_local, perspective_boundary)
+    if not np.all(np.isfinite(source_quad)):
+        raise VideoPreparationError(
+            "CropPlan perspective source coordinates are non-finite."
+        )
+    return source_quad
 
 
 def _format_number(value: float) -> str:
@@ -339,16 +414,26 @@ def build_prepare_filtergraph(
 
     _validate_trim(start_frame, end_frame_exclusive)
     canonical = _validate_canonical_contract(crop_plan, config)
-    pre_rotation_size_wh, content_size_wh, rectification_padding, _destination = (
-        _extract_rectification_geometry(crop_plan)
-    )
+    (
+        pre_rotation_size_wh,
+        content_size_wh,
+        rectification_padding,
+        _destination,
+        rectification_homography,
+    ) = _extract_rectification_geometry(crop_plan)
 
     roi = crop_plan.pre_crop_roi
     quad_local = crop_plan.quad_raw_tl_tr_br_bl - np.array(
         [roi.x, roi.y],
         dtype=np.float64,
     )
-    tl, tr, br, bl = quad_local
+    perspective_source_quad = _build_perspective_source_quad(
+        crop_plan,
+        rectification_homography,
+        content_size_wh,
+        rectification_padding,
+    )
+    tl, tr, br, bl = perspective_source_quad
     filters: list[str] = []
     stages: list[str] = []
     if end_frame_exclusive is None:

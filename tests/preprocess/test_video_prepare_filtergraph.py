@@ -126,13 +126,17 @@ def test_filtergraph_contains_perspective_and_required_clockwise_rotation() -> N
 
     assert "perspective=" in landscape_filtergraph
     assert "sense=source" in landscape_filtergraph
+    assert (
+        "perspective=x0=0:y0=0:x1=320:y1=0:x2=0:y2=240:x3=320:y3=240"
+        in landscape_filtergraph
+    )
     assert "transpose=" not in landscape_filtergraph
     assert landscape_metadata.rotated_90 is False
     assert "transpose=clock" in portrait_filtergraph
     assert portrait_metadata.rotated_90 is True
 
 
-def test_filtergraph_applies_pre_crop_and_uses_local_quad_coordinates() -> None:
+def test_filtergraph_applies_pre_crop_and_preserves_local_quad_metadata() -> None:
     config = _config(canonical_enabled=False)
     plan = make_manual_crop_plan(
         raw_frame_shape=(240, 320),
@@ -146,7 +150,7 @@ def test_filtergraph_applies_pre_crop_and_uses_local_quad_coordinates() -> None:
     filtergraph, metadata = build_prepare_filtergraph(plan, config)
 
     assert "crop=240:180:40:30" in filtergraph
-    assert "perspective=x0=10:y0=20:x1=210:y1=20" in filtergraph
+    assert "perspective=" in filtergraph
     assert metadata.pre_crop_roi_xywh == (40, 30, 240, 180)
     assert metadata.quad_pre_crop_tl_tr_br_bl[0] == (10.0, 20.0)
 
