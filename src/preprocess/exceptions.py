@@ -39,3 +39,7 @@ class VideoValidationError(PreprocessError):
     def __init__(self, message: str, *, result: object | None = None) -> None:
         super().__init__(message)
         self.result = result
+
+
+class SyncValidationError(PreprocessError, ValueError):
+    """Raised when synchronization data or its NPZ artifact is invalid."""
