@@ -138,9 +138,13 @@ selection, and typed pre-crop configuration. The Timing page supports optional
 MATLAB `.mat` timing-vector selection with strict validation against the raw
 sequential readable-frame count. Crop Review supports automatic cage detection,
 detector-setting retries, manual four-corner selection, prepared-crop preview,
-and explicit crop acceptance. Automatic detection and full sequential frame
-counting run in responsive background tasks. Encode Settings and final execution
-remain visible workflow placeholders.
+and explicit crop acceptance. Encode Settings exposes the supported typed
+canonical, ffmpeg, OpenCV, and debug configuration. Run and Validate provides a
+final review, runs `PreprocessService` in a responsive background task, and shows
+the validated official artifacts or a readable failure. The GUI therefore
+supports the full v1 workflow through validated Run and Validate. Automatic
+detection and full sequential frame counting also run in responsive background
+tasks.
 
 ---
 

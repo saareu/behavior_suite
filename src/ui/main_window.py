@@ -20,7 +20,7 @@ class MainWindow(QMainWindow):
         self.wizard.unexpected_error.connect(self._show_unexpected_error)
         self.setCentralWidget(self.wizard)
         self.statusBar().showMessage(
-            "GUI setup and explicit Crop Review are available; encoding remains deferred."
+            "Full preprocessing setup, explicit crop acceptance, and validated Run are available."
         )
 
     def show_startup_error(self, message: str) -> None:

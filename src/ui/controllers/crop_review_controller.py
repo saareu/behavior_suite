@@ -425,7 +425,7 @@ class CropReviewController:
             )
         except (ValidationError, ValueError) as exc:
             raise self._new_validation_error(f"Invalid detector settings: {exc}") from exc
-        self.state.preprocess_config = updated
+        self.state.store_preprocess_config(updated)
         self.state.crop_mode = CropReviewMode.AUTOMATIC
         self.state.last_validation_error = None
         return updated

@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from preprocess.config import (
     PreCropConfig,
     PreprocessConfig,
+    TrimConfig,
     load_preprocess_config,
 )
 from preprocess.exceptions import PreprocessError
@@ -80,7 +81,7 @@ class PreprocessSetupController:
         return config
 
     def _apply_config(self, config: PreprocessConfig, path: Path | None) -> None:
-        self.state.preprocess_config = config
+        self.state.set_loaded_preprocess_config(config)
         self.state.config_path = path
         self.state.start_frame = config.trim.start_frame or 0
         self.state.end_frame_exclusive = config.trim.end_frame
@@ -270,6 +271,17 @@ class PreprocessSetupController:
         self.state.pre_crop_config = pre_crop_config
         self.state.resolved_pre_crop = resolved
         self.state.trim_pre_crop_valid = True
+        effective_config = PreprocessConfig.model_validate(
+            {
+                **config.model_dump(mode="python"),
+                "trim": TrimConfig(
+                    start_frame=trim.start_frame,
+                    end_frame=trim.end_frame_exclusive,
+                ),
+                "pre_crop": pre_crop_config,
+            }
+        )
+        self.state.store_preprocess_config(effective_config)
         current_selection = (
             self.state.start_frame,
             self.state.end_frame_exclusive,
@@ -365,12 +377,21 @@ class PreprocessSetupController:
             )
         if resolved_step is WorkflowStep.TIMING:
             return
+        accepted = self.state.accepted_crop_plan
+        if accepted is None or not accepted.accepted_by_user:
+            raise self._new_validation_error(
+                "Review the crop preview and explicitly accept the crop."
+            )
         if resolved_step is WorkflowStep.CROP_REVIEW:
-            accepted = self.state.accepted_crop_plan
-            if accepted is None or not accepted.accepted_by_user:
-                raise self._new_validation_error(
-                    "Review the crop preview and explicitly accept the crop."
-                )
+            return
+        if self.state.preprocess_config is None or not self.state.encode_settings_valid:
+            raise self._new_validation_error(
+                "A valid typed Encode Settings configuration is required."
+            )
+        if resolved_step in {
+            WorkflowStep.ENCODE_SETTINGS,
+            WorkflowStep.RUN_VALIDATE,
+        }:
             return
         raise self._new_validation_error("Not implemented in this GUI milestone.")
 

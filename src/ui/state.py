@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import IntEnum, StrEnum
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from preprocess.crop_plan import CropPlan
 from preprocess.models import (
     ExternalTimeSelection,
     MatVectorCandidate,
+    PreprocessResult,
     TimingUnit,
     VideoProbeResult,
 )
@@ -67,6 +69,9 @@ class PreprocessSetupState:
     raw_video_path: Path | None = None
     raw_probe: VideoProbeResult | None = None
     preprocess_config: PreprocessConfig | None = None
+    original_preprocess_config: PreprocessConfig | None = None
+    config_dirty: bool = False
+    encode_settings_valid: bool = True
     config_path: Path | None = None
     start_frame: int | None = None
     end_frame_exclusive: int | None = None
@@ -88,6 +93,12 @@ class PreprocessSetupState:
     crop_review_status: str = "not_reviewed"
     detector_diagnostics: dict[str, object] | None = None
     crop_review_revision: int = 0
+    preprocess_task_running: bool = False
+    preprocess_result: PreprocessResult | None = None
+    run_status: str = "Not started"
+    run_error_message: str | None = None
+    run_started_at: datetime | None = None
+    run_elapsed_sec: float = 0.0
     trim_pre_crop_valid: bool = False
     current_step: WorkflowStep = WorkflowStep.PROJECT
     last_validation_error: str | None = None
@@ -101,6 +112,7 @@ class PreprocessSetupState:
         self.crop_review_status = status
         self.detector_diagnostics = None
         self.crop_review_revision += 1
+        self.invalidate_run_result("Inputs changed")
 
     def store_accepted_crop_plan(self, crop_plan: CropPlan) -> None:
         """Store only a CropPlan carrying explicit user acceptance."""
@@ -108,3 +120,40 @@ class PreprocessSetupState:
         if not crop_plan.accepted_by_user:
             raise ValueError("accepted_crop_plan must be explicitly accepted by the user.")
         self.accepted_crop_plan = crop_plan
+
+    def set_loaded_preprocess_config(self, config: PreprocessConfig) -> None:
+        """Store independent validated current/original copies for this session."""
+
+        payload = config.model_dump(mode="python")
+        self.original_preprocess_config = PreprocessConfig.model_validate(payload)
+        self.preprocess_config = PreprocessConfig.model_validate(payload)
+        self.config_dirty = False
+        self.encode_settings_valid = True
+        self.invalidate_run_result("Configuration loaded")
+
+    def store_preprocess_config(self, config: PreprocessConfig) -> None:
+        """Store one validated GUI config copy and update its dirty state."""
+
+        validated = PreprocessConfig.model_validate(config.model_dump(mode="python"))
+        changed = self.preprocess_config is None or (
+            self.preprocess_config.model_dump(mode="json")
+            != validated.model_dump(mode="json")
+        )
+        self.preprocess_config = validated
+        original = self.original_preprocess_config
+        self.config_dirty = original is None or (
+            original.model_dump(mode="json") != validated.model_dump(mode="json")
+        )
+        self.encode_settings_valid = True
+        if changed:
+            self.invalidate_run_result("Configuration changed")
+
+    def invalidate_run_result(self, status: str = "Inputs changed") -> None:
+        """Clear displayed run success without deleting any output artifacts."""
+
+        self.preprocess_result = None
+        self.run_error_message = None
+        if not self.preprocess_task_running:
+            self.run_status = status
+            self.run_started_at = None
+            self.run_elapsed_sec = 0.0

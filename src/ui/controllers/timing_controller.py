@@ -84,6 +84,7 @@ class TimingController:
     def choose_no_external_timing(self) -> None:
         """Clear external timing and mark the no-timing path navigable."""
 
+        self.state.invalidate_run_result("Timing changed")
         self._workspace = None
         self.state.timing_mode = TimingMode.NO_EXTERNAL
         self.state.timing_status = "not_provided"
@@ -360,6 +361,7 @@ class TimingController:
         status: str,
         preserve_choices: bool = False,
     ) -> None:
+        self.state.invalidate_run_result("Timing changed")
         self.state.timing_valid = False
         self.state.timing_status = status
         self.state.external_time_selection = None
