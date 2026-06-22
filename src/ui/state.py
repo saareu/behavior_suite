@@ -52,6 +52,17 @@ class TimingMode(StrEnum):
     MATLAB = "matlab_timing"
 
 
+class RawReadableCountStatus(StrEnum):
+    """Current-session status of the exact sequential raw-frame count."""
+
+    NOT_COUNTED = "not_counted"
+    COUNTED_THIS_SESSION = "counted_this_session"
+    COUNTING = "counting"
+    RECOUNTING = "recounting"
+    COUNT_FAILED = "count_failed"
+    RECOUNT_FAILED = "recount_failed"
+
+
 class CropReviewMode(StrEnum):
     """Crop-review choices available in the desktop workflow."""
 
@@ -68,6 +79,9 @@ class PreprocessSetupState:
     preprocess_dir: Path | None = None
     raw_video_path: Path | None = None
     raw_probe: VideoProbeResult | None = None
+    raw_readable_count_status: RawReadableCountStatus = (
+        RawReadableCountStatus.NOT_COUNTED
+    )
     preprocess_config: PreprocessConfig | None = None
     original_preprocess_config: PreprocessConfig | None = None
     config_dirty: bool = False

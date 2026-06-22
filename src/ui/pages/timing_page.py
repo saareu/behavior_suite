@@ -31,7 +31,7 @@ from ui.controllers.timing_controller import (
     TimingUnexpectedError,
     TimingValidationError,
 )
-from ui.state import TimingMode
+from ui.state import RawReadableCountStatus, TimingMode
 from ui.tasks import GuiTaskRunner, TaskAlreadyRunningError
 
 _TABLE_HEADERS = (
@@ -114,12 +114,12 @@ class TimingPage(QWidget):
         self.units.currentIndexChanged.connect(self._units_selected)
 
         self.raw_count_status = QLabel()
-        raw_count_explanation = QLabel(
-            "External timing requires an exact full sequential count of readable "
-            "raw frames. Counting may take time for a long video."
+        self.raw_count_explanation = QLabel(
+            "Exact TTL timing validation requires a full sequential count of "
+            "readable raw frames."
         )
-        raw_count_explanation.setWordWrap(True)
-        raw_count_explanation.setStyleSheet("color: #8a5a00;")
+        self.raw_count_explanation.setWordWrap(True)
+        self.raw_count_explanation.setStyleSheet("color: #8a5a00;")
         self.count_button = QPushButton("Count All Readable Raw Frames Now")
         self.count_button.clicked.connect(self._count_raw_frames)
 
@@ -139,7 +139,7 @@ class TimingPage(QWidget):
         units_row.addStretch(1)
         mat_layout.addLayout(units_row)
         mat_layout.addWidget(self.raw_count_status)
-        mat_layout.addWidget(raw_count_explanation)
+        mat_layout.addWidget(self.raw_count_explanation)
         mat_layout.addWidget(self.count_button)
         mat_layout.addWidget(self.busy_indicator)
         mat_layout.addWidget(self.validate_button)
@@ -275,11 +275,18 @@ class TimingPage(QWidget):
 
     def _count_raw_frames(self) -> None:
         try:
-            path = self.controller.prepare_full_raw_frame_count()
+            force_recount = self.controller.raw_frame_count_action() == "recount"
+            path = self.controller.prepare_full_raw_frame_count(
+                force_recount=force_recount
+            )
             self._set_busy(True)
             self.task_runner.start(
                 lambda: self.controller.compute_full_raw_frame_count(path),
-                task_name="sequential raw-frame count",
+                task_name=(
+                    "sequential raw-frame recount"
+                    if force_recount
+                    else "sequential raw-frame count"
+                ),
                 on_success=self._raw_count_succeeded,
                 on_error=self._raw_count_failed,
                 on_finished=lambda: self._set_busy(False),
@@ -324,10 +331,9 @@ class TimingPage(QWidget):
         self.no_timing.setEnabled(not busy)
         self.matlab_timing.setEnabled(not busy)
         self.load_button.setEnabled(not busy)
-        self.count_button.setEnabled(not busy)
-        self.validate_button.setEnabled(not busy)
         self.candidate_table.setEnabled(not busy)
         self.units.setEnabled(not busy)
+        self._refresh_raw_count(busy=busy)
 
     def _validate_selection(self) -> None:
         try:
@@ -370,15 +376,50 @@ class TimingPage(QWidget):
                 self.candidate_table.selectRow(row_index)
         self._refreshing = False
 
-    def _refresh_raw_count(self) -> None:
-        probe = self.controller.state.raw_probe
-        readable_count = (
-            probe.frame_count_opencv_readable if probe is not None else None
-        )
-        self.raw_count_status.setText(
-            "Raw OpenCV-readable frame count: "
-            + (str(readable_count) if readable_count is not None else "Not counted")
-        )
+    def _refresh_raw_count(self, *, busy: bool = False) -> None:
+        state = self.controller.state
+        readable_count = self.controller.reusable_raw_frame_count()
+        status = state.raw_readable_count_status
+        is_matlab = state.timing_mode is TimingMode.MATLAB
+        count_active = status in {
+            RawReadableCountStatus.COUNTING,
+            RawReadableCountStatus.RECOUNTING,
+        }
+        controls_blocked = busy or count_active
+        if readable_count is not None:
+            status_lines = [
+                f"Verified readable raw-frame count: {readable_count:,}",
+                "Source: counted during this GUI session",
+            ]
+            if status is RawReadableCountStatus.RECOUNTING:
+                status_lines.append("Diagnostic recount in progress…")
+            elif status is RawReadableCountStatus.RECOUNT_FAILED:
+                status_lines.append(
+                    "Diagnostic recount failed; the existing verified count is retained."
+                )
+            self.raw_count_status.setText("\n".join(status_lines))
+            self.raw_count_explanation.setText(
+                "The verified same-session count is reused automatically for exact "
+                "TTL validation. A diagnostic recount decodes the entire video again "
+                "and may take substantial time."
+            )
+            self.count_button.setText("Recount Readable Raw Frames")
+            self.validate_button.setEnabled(not controls_blocked and is_matlab)
+        else:
+            if status is RawReadableCountStatus.COUNTING:
+                count_status = "Full sequential readable-frame count in progress…"
+            elif status is RawReadableCountStatus.COUNT_FAILED:
+                count_status = "Readable raw-frame count failed."
+            else:
+                count_status = "Readable raw-frame count: not yet counted."
+            self.raw_count_status.setText(count_status)
+            self.raw_count_explanation.setText(
+                "Exact TTL timing validation requires a full sequential readable-frame "
+                "count. Reported ffprobe or OpenCV metadata counts are not substitutes."
+            )
+            self.count_button.setText("Count All Readable Raw Frames Now")
+            self.validate_button.setEnabled(False)
+        self.count_button.setEnabled(not controls_blocked and is_matlab)
 
     def _refresh_result(self) -> None:
         state = self.controller.state

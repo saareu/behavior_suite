@@ -12,7 +12,7 @@ from ui.controllers.preprocess_setup_controller import (
     PreprocessSetupController,
     SetupValidationError,
 )
-from ui.state import WorkflowStep
+from ui.state import RawReadableCountStatus, WorkflowStep
 
 
 def _probe_result(path: Path, *, readable_count: int | None = None) -> VideoProbeResult:
@@ -148,6 +148,63 @@ def test_raw_video_probe_updates_state_and_forwards_count_choice(
     assert controller.state.raw_video_path == raw_path.resolve()
     assert controller.state.raw_probe == result
     assert result.frame_count_opencv_readable == (20 if require_sequential_count else None)
+
+
+def test_changing_raw_video_invalidates_same_session_readable_count(
+    tmp_path: Path,
+) -> None:
+    controller = _controller_with_probe()
+    controller.create_project(tmp_path, "CountInvalidationProject")
+    first_path = tmp_path / "first.avi"
+    controller.probe_raw_video(first_path, require_sequential_count=True)
+
+    controller.set_raw_video_path(tmp_path / "second.avi")
+
+    assert controller.state.raw_probe is None
+    assert (
+        controller.state.raw_readable_count_status
+        is RawReadableCountStatus.NOT_COUNTED
+    )
+
+
+def test_probe_from_different_source_does_not_reuse_previous_count(
+    tmp_path: Path,
+) -> None:
+    controller = _controller_with_probe()
+    controller.create_project(tmp_path, "ProbeReplacementProject")
+    controller.probe_raw_video(
+        tmp_path / "first.avi", require_sequential_count=True
+    )
+
+    replacement = controller.apply_raw_video_probe(
+        _probe_result(tmp_path / "second.avi", readable_count=None)
+    )
+
+    assert replacement.frame_count_opencv_readable is None
+    assert controller.state.raw_video_path == (tmp_path / "second.avi").resolve()
+    assert (
+        controller.state.raw_readable_count_status
+        is RawReadableCountStatus.NOT_COUNTED
+    )
+
+
+def test_same_source_metadata_reprobe_preserves_sequential_count(
+    tmp_path: Path,
+) -> None:
+    controller = _controller_with_probe()
+    controller.create_project(tmp_path, "SameSourceReprobeProject")
+    raw_path = tmp_path / "raw.avi"
+    controller.probe_raw_video(raw_path, require_sequential_count=True)
+
+    replacement = controller.apply_raw_video_probe(
+        _probe_result(raw_path, readable_count=None)
+    )
+
+    assert replacement.frame_count_opencv_readable == 20
+    assert (
+        controller.state.raw_readable_count_status
+        is RawReadableCountStatus.COUNTED_THIS_SESSION
+    )
 
 
 @pytest.mark.parametrize(

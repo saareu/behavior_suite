@@ -24,10 +24,23 @@ from project.models import Project
 from project.paths import get_preprocess_dir
 from project.service import ProjectService
 from project.validation import ProjectError
-from ui.state import PreprocessSetupState, TimingMode, WorkflowStep
+from ui.state import (
+    PreprocessSetupState,
+    RawReadableCountStatus,
+    TimingMode,
+    WorkflowStep,
+)
 
 ConfigLoader = Callable[[Path], PreprocessConfig]
 PreCropResolver = Callable[[PreCropConfig, tuple[int, int]], ResolvedPreCrop]
+
+
+def _same_video_source(first: Path, second: Path) -> bool:
+    """Compare two source paths without requiring either path to exist."""
+
+    return first.expanduser().resolve(strict=False) == second.expanduser().resolve(
+        strict=False
+    )
 
 
 class SetupValidationError(ValueError):
@@ -117,6 +130,7 @@ class PreprocessSetupController:
         self.state.preprocess_dir = get_preprocess_dir(project)
         self.state.raw_video_path = None
         self.state.raw_probe = None
+        self.state.raw_readable_count_status = RawReadableCountStatus.NOT_COUNTED
         self.state.resolved_pre_crop = None
         self.state.trim_pre_crop_valid = False
         self.state.invalidate_crop_review("Project changed; crop review is required.")
@@ -129,6 +143,7 @@ class PreprocessSetupController:
         selected = Path(path).expanduser()
         self.state.raw_video_path = selected
         self.state.raw_probe = None
+        self.state.raw_readable_count_status = RawReadableCountStatus.NOT_COUNTED
         self.state.resolved_pre_crop = None
         self.state.trim_pre_crop_valid = False
         self.state.invalidate_crop_review("Raw video changed; crop review is required.")
@@ -141,6 +156,7 @@ class PreprocessSetupController:
 
         self.state.raw_video_path = None
         self.state.raw_probe = None
+        self.state.raw_readable_count_status = RawReadableCountStatus.NOT_COUNTED
         self.state.resolved_pre_crop = None
         self.state.trim_pre_crop_valid = False
         self.state.invalidate_crop_review("Raw video changed; crop review is required.")
@@ -188,8 +204,31 @@ class PreprocessSetupController:
     def apply_raw_video_probe(self, result: VideoProbeResult) -> VideoProbeResult:
         """Apply a completed raw-video probe on the GUI thread."""
 
+        previous_probe = self.state.raw_probe
+        if (
+            result.frame_count_opencv_readable is None
+            and previous_probe is not None
+            and previous_probe.frame_count_opencv_readable is not None
+            and _same_video_source(previous_probe.source_path, result.source_path)
+        ):
+            result = VideoProbeResult.model_validate(
+                {
+                    **result.model_dump(mode="python"),
+                    "frame_count_opencv_readable": (
+                        previous_probe.frame_count_opencv_readable
+                    ),
+                }
+            )
         self.state.raw_video_path = result.source_path
         self.state.raw_probe = result
+        self.state.raw_readable_count_status = (
+            RawReadableCountStatus.COUNTED_THIS_SESSION
+            if (
+                result.frame_count_opencv_readable is not None
+                and result.frame_count_opencv_readable > 0
+            )
+            else RawReadableCountStatus.NOT_COUNTED
+        )
         self.state.resolved_pre_crop = None
         self.state.trim_pre_crop_valid = False
         self.state.invalidate_crop_review("Raw video probe changed; crop review is required.")
@@ -201,6 +240,7 @@ class PreprocessSetupController:
         """Record a worker-delivered raw probe failure and return concise text."""
 
         self.state.raw_probe = None
+        self.state.raw_readable_count_status = RawReadableCountStatus.NOT_COUNTED
         self.state.resolved_pre_crop = None
         self.state.trim_pre_crop_valid = False
         self.state.invalidate_crop_review("Raw video probe failed.")

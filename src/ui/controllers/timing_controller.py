@@ -26,13 +26,21 @@ from preprocess.models import (
     VideoProbeResult,
 )
 from preprocess.video_probe import probe_video
-from ui.state import PreprocessSetupState, TimingMode
+from ui.state import PreprocessSetupState, RawReadableCountStatus, TimingMode
 
 WorkspaceLoader = Callable[[Path], MatWorkspace]
 CandidateLister = Callable[[MatWorkspace], list[MatVectorCandidate]]
 VectorGetter = Callable[[MatWorkspace, str], np.ndarray]
 TimingValidator = Callable[..., ExternalTimeSelection]
 TimingConverter = Callable[[np.ndarray, str | TimingUnit], np.ndarray | None]
+
+
+def _same_video_source(first: Path, second: Path) -> bool:
+    """Compare source paths without requiring the video to exist."""
+
+    return first.expanduser().resolve(strict=False) == second.expanduser().resolve(
+        strict=False
+    )
 
 
 class TimingValidationError(ValueError):
@@ -80,6 +88,25 @@ class TimingController:
         self._timing_converter = timing_converter
         self._probe_function = probe_function
         self._workspace: MatWorkspace | None = None
+        reusable_count = self.reusable_raw_frame_count()
+        if (
+            reusable_count is not None
+            and self.state.raw_readable_count_status
+            is RawReadableCountStatus.NOT_COUNTED
+        ):
+            self.state.raw_readable_count_status = (
+                RawReadableCountStatus.COUNTED_THIS_SESSION
+            )
+        elif (
+            reusable_count is None
+            and self.state.raw_readable_count_status
+            in {
+                RawReadableCountStatus.COUNTED_THIS_SESSION,
+                RawReadableCountStatus.RECOUNTING,
+                RawReadableCountStatus.RECOUNT_FAILED,
+            }
+        ):
+            self.state.raw_readable_count_status = RawReadableCountStatus.NOT_COUNTED
 
     def choose_no_external_timing(self) -> None:
         """Clear external timing and mark the no-timing path navigable."""
@@ -152,11 +179,7 @@ class TimingController:
     def candidate_summaries(self) -> list[TimingCandidateSummary]:
         """Return display rows with length match against sequential raw count."""
 
-        raw_count = (
-            self.state.raw_probe.frame_count_opencv_readable
-            if self.state.raw_probe is not None
-            else None
-        )
+        raw_count = self.reusable_raw_frame_count()
         return [
             TimingCandidateSummary(
                 variable_name=candidate.variable_name,
@@ -210,24 +233,77 @@ class TimingController:
         self.state.selected_timing_units = None
         self._invalidate_matlab_selection(status="pending", preserve_choices=True)
 
-    def count_all_readable_raw_frames(self) -> int:
+    def reusable_raw_frame_count(self) -> int | None:
+        """Return the exact count only when it belongs to the selected raw video."""
+
+        raw_path = self.state.raw_video_path
+        probe = self.state.raw_probe
+        if (
+            raw_path is None
+            or probe is None
+            or not _same_video_source(raw_path, probe.source_path)
+        ):
+            return None
+        readable_count = probe.frame_count_opencv_readable
+        if readable_count is None or readable_count <= 0:
+            return None
+        return readable_count
+
+    def raw_frame_count_action(self) -> str:
+        """Return the headless action rendered by the Timing page."""
+
+        return "recount" if self.reusable_raw_frame_count() is not None else "count"
+
+    def count_all_readable_raw_frames(self, *, force_recount: bool = False) -> int:
         """Request the existing probe API's full sequential readable count."""
 
-        path = self.prepare_full_raw_frame_count()
+        path = self.prepare_full_raw_frame_count(force_recount=force_recount)
         try:
             result = self.compute_full_raw_frame_count(path)
         except (PreprocessError, OSError, ValueError) as exc:
-            self._expected_failure(f"Could not count readable raw frames: {exc}", exc)
+            self.record_full_raw_frame_count_failure(exc)
+            raise TimingValidationError(
+                self.state.last_validation_error
+                or "Could not count readable raw frames."
+            ) from exc
         except Exception as exc:
-            self._unexpected_failure("counting readable raw frames", exc)
+            self.record_full_raw_frame_count_failure(exc)
+            raise TimingUnexpectedError(
+                "An unexpected error occurred while counting readable raw frames."
+            ) from exc
         return self.apply_full_raw_frame_count(result)
 
-    def prepare_full_raw_frame_count(self) -> Path:
+    def prepare_full_raw_frame_count(self, *, force_recount: bool = False) -> Path:
         """Validate a sequential-count request before dispatching a worker."""
 
-        if self.state.raw_video_path is None:
-            raise self._new_validation_error("Select and probe a raw video first.")
-        return self.state.raw_video_path
+        raw_path = self.state.raw_video_path
+        raw_probe = self.state.raw_probe
+        if (
+            raw_path is None
+            or raw_probe is None
+            or not _same_video_source(raw_path, raw_probe.source_path)
+        ):
+            self.state.raw_readable_count_status = RawReadableCountStatus.NOT_COUNTED
+            raise self._new_count_validation_error(
+                "Select and probe the current raw video before counting frames."
+            )
+        reusable_count = self.reusable_raw_frame_count()
+        if reusable_count is not None and not force_recount:
+            raise self._new_count_validation_error(
+                "A verified readable raw-frame count is already available. "
+                "Use the explicit diagnostic recount action to count again."
+            )
+        if reusable_count is None and force_recount:
+            raise self._new_count_validation_error(
+                "No verified readable raw-frame count is available to recount."
+            )
+        self.state.raw_readable_count_status = (
+            RawReadableCountStatus.RECOUNTING
+            if force_recount
+            else RawReadableCountStatus.COUNTING
+        )
+        self.state.last_validation_error = None
+        return raw_path
 
     def compute_full_raw_frame_count(self, path: Path) -> VideoProbeResult:
         """Run a full raw-video probe without mutating GUI state."""
@@ -237,13 +313,20 @@ class TimingController:
     def apply_full_raw_frame_count(self, result: VideoProbeResult) -> int:
         """Apply a completed full raw-video count on the GUI thread."""
 
+        raw_path = self.state.raw_video_path
+        if raw_path is None or not _same_video_source(raw_path, result.source_path):
+            self._count_result_failure(
+                "Completed readable-frame count is for a different raw video."
+            )
         readable_count = result.frame_count_opencv_readable
         if readable_count is None or readable_count <= 0:
-            raise self._new_validation_error(
+            self._count_result_failure(
                 "Full raw-video probe did not produce a positive readable frame count."
             )
         self.state.raw_probe = result
-        self.state.raw_video_path = result.source_path
+        self.state.raw_readable_count_status = (
+            RawReadableCountStatus.COUNTED_THIS_SESSION
+        )
         if self.state.timing_mode is TimingMode.MATLAB:
             self._invalidate_matlab_selection(
                 status="pending",
@@ -255,19 +338,34 @@ class TimingController:
     def record_full_raw_frame_count_failure(self, exc: BaseException) -> None:
         """Convert a worker-delivered failure into controller timing state."""
 
+        recount_failed = (
+            self.state.raw_readable_count_status
+            is RawReadableCountStatus.RECOUNTING
+            and self.reusable_raw_frame_count() is not None
+        )
+        self.state.raw_readable_count_status = (
+            RawReadableCountStatus.RECOUNT_FAILED
+            if recount_failed
+            else RawReadableCountStatus.COUNT_FAILED
+        )
         if isinstance(exc, (PreprocessError, OSError, ValueError)):
-            self.state.timing_valid = False
-            self.state.timing_status = "invalid"
-            self.state.external_time_selection = None
-            self.state.external_time_vector_seconds = None
+            if not recount_failed:
+                self._clear_timing_after_count_failure(status="invalid")
             self.state.last_validation_error = (
-                f"Could not count readable raw frames: {exc}"
+                ("Readable raw-frame recount failed; the existing verified count remains available: "
+                 if recount_failed
+                 else "Could not count readable raw frames: ")
+                + str(exc)
             )
             return
-        self.state.timing_valid = False
-        self.state.timing_status = "error"
-        self.state.external_time_selection = None
-        self.state.external_time_vector_seconds = None
+        if not recount_failed:
+            self._clear_timing_after_count_failure(status="error")
+        self.state.last_validation_error = (
+            "An unexpected error occurred while recounting readable raw frames; "
+            "the existing verified count remains available."
+            if recount_failed
+            else "An unexpected error occurred while counting readable raw frames."
+        )
         self.state.unexpected_error_detail = "".join(
             traceback.format_exception(type(exc), exc, exc.__traceback__)
         )
@@ -285,12 +383,7 @@ class TimingController:
         units = self.state.selected_timing_units
         if units is None:
             raise self._new_validation_error("Select timing units.")
-        raw_probe = self.state.raw_probe
-        raw_count = (
-            raw_probe.frame_count_opencv_readable
-            if raw_probe is not None
-            else None
-        )
+        raw_count = self.reusable_raw_frame_count()
         if raw_count is None or raw_count <= 0:
             raise self._new_validation_error(
                 "A full sequential raw readable-frame count is required."
@@ -375,6 +468,27 @@ class TimingController:
         self.state.timing_valid = False
         self.state.last_validation_error = message
         return TimingValidationError(message)
+
+    def _new_count_validation_error(self, message: str) -> TimingValidationError:
+        self.state.last_validation_error = message
+        if (
+            self.state.timing_mode is TimingMode.MATLAB
+            and self.reusable_raw_frame_count() is None
+        ):
+            self.state.timing_valid = False
+        return TimingValidationError(message)
+
+    def _count_result_failure(self, message: str) -> NoReturn:
+        self.record_full_raw_frame_count_failure(ValueError(message))
+        raise TimingValidationError(self.state.last_validation_error or message)
+
+    def _clear_timing_after_count_failure(self, *, status: str) -> None:
+        if self.state.timing_mode is not TimingMode.MATLAB:
+            return
+        self.state.timing_valid = False
+        self.state.timing_status = status
+        self.state.external_time_selection = None
+        self.state.external_time_vector_seconds = None
 
     def _expected_failure(self, message: str, exc: BaseException) -> NoReturn:
         self.state.timing_valid = False

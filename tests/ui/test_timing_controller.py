@@ -13,7 +13,7 @@ from ui.controllers.timing_controller import (
     TimingController,
     TimingValidationError,
 )
-from ui.state import PreprocessSetupState, TimingMode
+from ui.state import PreprocessSetupState, RawReadableCountStatus, TimingMode
 
 
 def _probe_result(path: Path, *, readable_count: int | None) -> VideoProbeResult:
@@ -146,8 +146,77 @@ def test_timing_validation_requires_raw_readable_frame_count(tmp_path: Path) -> 
     controller = _loaded_controller(tmp_path, readable_count=None)
     _select(controller)
 
+    assert controller.raw_frame_count_action() == "count"
     with pytest.raises(TimingValidationError, match="full sequential"):
         controller.validate_selected_timing()
+
+
+def test_existing_same_session_count_is_reused_without_second_probe(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    probe_calls: list[Path] = []
+
+    def unexpected_probe(
+        path: Path, *, require_sequential_count: bool
+    ) -> VideoProbeResult:
+        probe_calls.append(path)
+        return _probe_result(path, readable_count=4)
+
+    controller = TimingController(
+        _state(tmp_path),
+        workspace_loader=lambda _path: workspace,
+        probe_function=unexpected_probe,
+    )
+    controller.choose_matlab_timing()
+    controller.load_mat_file(workspace.source_path)
+    _select(controller)
+
+    selection = controller.validate_selected_timing()
+
+    assert selection.selected_variable == "frame_times"
+    assert controller.reusable_raw_frame_count() == 4
+    assert probe_calls == []
+    assert (
+        controller.state.raw_readable_count_status
+        is RawReadableCountStatus.COUNTED_THIS_SESSION
+    )
+
+
+def test_existing_count_replaces_default_count_action_with_explicit_recount(
+    tmp_path: Path,
+) -> None:
+    controller = TimingController(_state(tmp_path))
+
+    assert controller.raw_frame_count_action() == "recount"
+    with pytest.raises(TimingValidationError, match="already available"):
+        controller.prepare_full_raw_frame_count()
+
+    path = controller.prepare_full_raw_frame_count(force_recount=True)
+
+    assert path == controller.state.raw_video_path
+    assert (
+        controller.state.raw_readable_count_status
+        is RawReadableCountStatus.RECOUNTING
+    )
+
+
+def test_failed_diagnostic_recount_preserves_existing_count_and_no_timing_mode(
+    tmp_path: Path,
+) -> None:
+    controller = TimingController(_state(tmp_path))
+    controller.prepare_full_raw_frame_count(force_recount=True)
+
+    controller.record_full_raw_frame_count_failure(OSError("decode failed"))
+
+    assert controller.reusable_raw_frame_count() == 4
+    assert (
+        controller.state.raw_readable_count_status
+        is RawReadableCountStatus.RECOUNT_FAILED
+    )
+    assert controller.state.timing_mode is TimingMode.NO_EXTERNAL
+    assert controller.state.timing_valid is True
+    assert controller.state.timing_status == "not_provided"
 
 
 def test_full_raw_frame_count_updates_probe_and_requests_core_count(
@@ -168,6 +237,23 @@ def test_full_raw_frame_count_updates_probe_and_requests_core_count(
     assert calls == [(state.raw_video_path, True)]
     assert state.raw_probe is not None
     assert state.raw_probe.frame_count_opencv_readable == 4
+    assert controller.raw_frame_count_action() == "recount"
+    assert (
+        state.raw_readable_count_status
+        is RawReadableCountStatus.COUNTED_THIS_SESSION
+    )
+
+
+def test_mismatched_probe_source_does_not_supply_timing_count(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    state.raw_probe = _probe_result(tmp_path / "other.avi", readable_count=4)
+    controller = TimingController(state)
+
+    assert controller.reusable_raw_frame_count() is None
+    assert controller.raw_frame_count_action() == "count"
+    assert (
+        state.raw_readable_count_status is RawReadableCountStatus.NOT_COUNTED
+    )
 
 
 def test_valid_seconds_timing_stores_selection_and_seconds_vector(
