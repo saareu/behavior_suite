@@ -212,17 +212,30 @@ class TimingController:
     def count_all_readable_raw_frames(self) -> int:
         """Request the existing probe API's full sequential readable count."""
 
-        if self.state.raw_video_path is None:
-            raise self._new_validation_error("Select and probe a raw video first.")
+        path = self.prepare_full_raw_frame_count()
         try:
-            result = self._probe_function(
-                self.state.raw_video_path,
-                require_sequential_count=True,
-            )
+            result = self.compute_full_raw_frame_count(path)
         except (PreprocessError, OSError, ValueError) as exc:
             self._expected_failure(f"Could not count readable raw frames: {exc}", exc)
         except Exception as exc:
             self._unexpected_failure("counting readable raw frames", exc)
+        return self.apply_full_raw_frame_count(result)
+
+    def prepare_full_raw_frame_count(self) -> Path:
+        """Validate a sequential-count request before dispatching a worker."""
+
+        if self.state.raw_video_path is None:
+            raise self._new_validation_error("Select and probe a raw video first.")
+        return self.state.raw_video_path
+
+    def compute_full_raw_frame_count(self, path: Path) -> VideoProbeResult:
+        """Run a full raw-video probe without mutating GUI state."""
+
+        return self._probe_function(path, require_sequential_count=True)
+
+    def apply_full_raw_frame_count(self, result: VideoProbeResult) -> int:
+        """Apply a completed full raw-video count on the GUI thread."""
+
         readable_count = result.frame_count_opencv_readable
         if readable_count is None or readable_count <= 0:
             raise self._new_validation_error(
@@ -237,6 +250,26 @@ class TimingController:
             )
         self.state.last_validation_error = None
         return readable_count
+
+    def record_full_raw_frame_count_failure(self, exc: BaseException) -> None:
+        """Convert a worker-delivered failure into controller timing state."""
+
+        if isinstance(exc, (PreprocessError, OSError, ValueError)):
+            self.state.timing_valid = False
+            self.state.timing_status = "invalid"
+            self.state.external_time_selection = None
+            self.state.external_time_vector_seconds = None
+            self.state.last_validation_error = (
+                f"Could not count readable raw frames: {exc}"
+            )
+            return
+        self.state.timing_valid = False
+        self.state.timing_status = "error"
+        self.state.external_time_selection = None
+        self.state.external_time_vector_seconds = None
+        self.state.unexpected_error_detail = "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        )
 
     def validate_selected_timing(self) -> ExternalTimeSelection:
         """Validate one explicit vector/units choice through core timing APIs."""

@@ -158,6 +158,9 @@ class TrimPreCropPage(QWidget):
     def _inputs_changed(self) -> None:
         if self._refreshing:
             return
+        self.controller.state.invalidate_crop_review(
+            "Trim or pre-crop changed; crop review is required."
+        )
         self._update_semantics()
         self._validate_inputs()
 

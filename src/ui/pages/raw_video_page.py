@@ -13,15 +13,18 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QProgressBar,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
+from preprocess.exceptions import PreprocessError
 from ui.controllers.preprocess_setup_controller import (
     PreprocessSetupController,
     SetupValidationError,
 )
+from ui.tasks import GuiTaskRunner, TaskAlreadyRunningError
 
 
 class RawVideoPage(QWidget):
@@ -35,15 +38,17 @@ class RawVideoPage(QWidget):
     def __init__(self, controller: PreprocessSetupController) -> None:
         super().__init__()
         self.controller = controller
+        self.task_runner = GuiTaskRunner(self)
         title = QLabel("Raw Video")
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
 
         self.video_path = QLineEdit()
-        browse = QPushButton("Browse for Raw Video")
-        browse.clicked.connect(self._browse_video)
+        self.video_path.textEdited.connect(self._video_path_edited)
+        self.browse_button = QPushButton("Browse for Raw Video")
+        self.browse_button.clicked.connect(self._browse_video)
         path_row = QHBoxLayout()
         path_row.addWidget(self.video_path, 1)
-        path_row.addWidget(browse)
+        path_row.addWidget(self.browse_button)
 
         self.full_count = QCheckBox("Perform full sequential readable-frame count")
         warning = QLabel(
@@ -51,8 +56,11 @@ class RawVideoPage(QWidget):
         )
         warning.setWordWrap(True)
         warning.setStyleSheet("color: #8a5a00;")
-        probe_button = QPushButton("Probe Selected Video")
-        probe_button.clicked.connect(self._probe_video)
+        self.probe_button = QPushButton("Probe Selected Video")
+        self.probe_button.clicked.connect(self._probe_video)
+        self.busy_indicator = QProgressBar()
+        self.busy_indicator.setRange(0, 0)
+        self.busy_indicator.setVisible(False)
 
         summary = QGroupBox("Probe summary")
         self.summary_values = {
@@ -84,7 +92,8 @@ class RawVideoPage(QWidget):
         layout.addLayout(path_row)
         layout.addWidget(self.full_count)
         layout.addWidget(warning)
-        layout.addWidget(probe_button)
+        layout.addWidget(self.probe_button)
+        layout.addWidget(self.busy_indicator)
         layout.addWidget(summary)
         layout.addWidget(self.error_label)
         layout.addStretch(1)
@@ -125,7 +134,18 @@ class RawVideoPage(QWidget):
             self._refresh_summary()
             self.validity_changed.emit()
 
+    def _video_path_edited(self, text: str) -> None:
+        if text.strip():
+            self.controller.set_raw_video_path(Path(text))
+        else:
+            self.controller.clear_raw_video_path()
+        self._refresh_summary()
+        self.validity_changed.emit()
+
     def _probe_video(self) -> None:
+        if self.full_count.isChecked():
+            self._probe_video_in_background()
+            return
         try:
             self.controller.probe_raw_video(
                 Path(self.video_path.text()),
@@ -140,9 +160,54 @@ class RawVideoPage(QWidget):
         except Exception as exc:
             self._show_unexpected(exc)
 
+    def _probe_video_in_background(self) -> None:
+        try:
+            path = self.controller.prepare_raw_video_probe(Path(self.video_path.text()))
+            self._set_busy(True)
+            self.task_runner.start(
+                lambda: self.controller.compute_raw_video_probe(path, True),
+                task_name="full raw-video probe",
+                on_success=self._raw_probe_succeeded,
+                on_error=self._raw_probe_failed,
+                on_finished=lambda: self._set_busy(False),
+            )
+        except (SetupValidationError, TaskAlreadyRunningError) as exc:
+            self._set_busy(False)
+            self._show_expected_error(str(exc))
+        except Exception as exc:
+            self._set_busy(False)
+            self._show_unexpected(exc)
+
+    def _raw_probe_succeeded(self, result: object) -> None:
+        try:
+            self.controller.apply_raw_video_probe(result)
+        except Exception as exc:
+            self._show_unexpected(exc)
+            return
+        self.error_label.clear()
+        self._refresh_summary()
+        self.status_message.emit("Raw video probe and sequential count completed.")
+        self.validity_changed.emit()
+
+    def _raw_probe_failed(self, exc: BaseException) -> None:
+        message = self.controller.record_raw_video_probe_failure(exc)
+        if isinstance(exc, (PreprocessError, OSError, ValueError)):
+            self._show_expected_error(message)
+        else:
+            self._show_unexpected(exc)
+
+    def _set_busy(self, busy: bool) -> None:
+        self.busy_indicator.setVisible(busy)
+        self.browse_button.setEnabled(not busy)
+        self.probe_button.setEnabled(not busy)
+        self.full_count.setEnabled(not busy)
+        self.video_path.setEnabled(not busy)
+
     def _refresh_summary(self) -> None:
         probe = self.controller.state.raw_probe
         if probe is None:
+            for key, label in self.summary_values.items():
+                label.setText("Not counted" if key == "readable" else "—")
             return
         fps = probe.raw_fps_effective or probe.opencv_fps
         self.summary_values["source"].setText(str(probe.source_path))

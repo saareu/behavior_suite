@@ -87,6 +87,7 @@ class PreprocessSetupController:
         self.state.pre_crop_config = config.pre_crop
         self.state.resolved_pre_crop = None
         self.state.trim_pre_crop_valid = False
+        self.state.invalidate_crop_review("Configuration changed; crop review is required.")
         self.state.last_validation_error = None
 
     def create_project(self, parent_dir: Path, project_name: str) -> Project:
@@ -117,6 +118,7 @@ class PreprocessSetupController:
         self.state.raw_probe = None
         self.state.resolved_pre_crop = None
         self.state.trim_pre_crop_valid = False
+        self.state.invalidate_crop_review("Project changed; crop review is required.")
         self._reset_timing_state()
         self.state.last_validation_error = None
 
@@ -128,9 +130,21 @@ class PreprocessSetupController:
         self.state.raw_probe = None
         self.state.resolved_pre_crop = None
         self.state.trim_pre_crop_valid = False
+        self.state.invalidate_crop_review("Raw video changed; crop review is required.")
         self._reset_timing_state()
         self.state.last_validation_error = None
         return selected
+
+    def clear_raw_video_path(self) -> None:
+        """Clear an edited raw-video path and all dependent workflow state."""
+
+        self.state.raw_video_path = None
+        self.state.raw_probe = None
+        self.state.resolved_pre_crop = None
+        self.state.trim_pre_crop_valid = False
+        self.state.invalidate_crop_review("Raw video changed; crop review is required.")
+        self._reset_timing_state()
+        self.state.last_validation_error = None
 
     def probe_raw_video(
         self,
@@ -140,25 +154,62 @@ class PreprocessSetupController:
     ) -> VideoProbeResult:
         """Probe the selected raw video with optional sequential counting."""
 
+        selected = self.prepare_raw_video_probe(path)
+        try:
+            result = self.compute_raw_video_probe(selected, require_sequential_count)
+        except (PreprocessError, OSError, ValueError) as exc:
+            self._validation_failure(f"Could not probe raw video: {exc}", exc)
+        return self.apply_raw_video_probe(result)
+
+    def prepare_raw_video_probe(self, path: Path | None = None) -> Path:
+        """Validate a raw-video probe request without doing blocking work."""
+
         if self.state.project is None:
             raise self._new_validation_error("Select or create a project first.")
         selected = Path(path).expanduser() if path is not None else self.state.raw_video_path
-        if selected is None:
+        if selected is None or not str(selected):
             raise self._new_validation_error("Select a raw video before probing.")
-        try:
-            result = self._probe_function(
-                selected,
-                require_sequential_count=require_sequential_count,
-            )
-        except (PreprocessError, OSError, ValueError) as exc:
-            self._validation_failure(f"Could not probe raw video: {exc}", exc)
+        self.state.invalidate_crop_review("Raw video probe changed; crop review is required.")
+        return selected
+
+    def compute_raw_video_probe(
+        self,
+        path: Path,
+        require_sequential_count: bool,
+    ) -> VideoProbeResult:
+        """Run the core probe without mutating GUI state (worker-safe)."""
+
+        return self._probe_function(
+            path,
+            require_sequential_count=require_sequential_count,
+        )
+
+    def apply_raw_video_probe(self, result: VideoProbeResult) -> VideoProbeResult:
+        """Apply a completed raw-video probe on the GUI thread."""
+
         self.state.raw_video_path = result.source_path
         self.state.raw_probe = result
         self.state.resolved_pre_crop = None
         self.state.trim_pre_crop_valid = False
+        self.state.invalidate_crop_review("Raw video probe changed; crop review is required.")
         self._reset_timing_state()
         self.state.last_validation_error = None
         return result
+
+    def record_raw_video_probe_failure(self, exc: BaseException) -> str:
+        """Record a worker-delivered raw probe failure and return concise text."""
+
+        self.state.raw_probe = None
+        self.state.resolved_pre_crop = None
+        self.state.trim_pre_crop_valid = False
+        self.state.invalidate_crop_review("Raw video probe failed.")
+        if isinstance(exc, (PreprocessError, OSError, ValueError)):
+            message = f"Could not probe raw video: {exc}"
+        else:
+            self.record_unexpected_error(exc)
+            message = "An unexpected error occurred while probing the raw video."
+        self.state.last_validation_error = message
+        return message
 
     def configure_trim_and_pre_crop(
         self,
@@ -174,10 +225,12 @@ class PreprocessSetupController:
     ) -> ResolvedPreCrop:
         """Validate and store trim selection plus one resolved pre-crop ROI."""
 
-        self.state.start_frame = start_frame
-        self.state.end_frame_exclusive = end_frame_exclusive
-        self.state.resolved_pre_crop = None
-        self.state.trim_pre_crop_valid = False
+        previous_selection = (
+            self.state.start_frame,
+            self.state.end_frame_exclusive,
+            self.state.pre_crop_config,
+            self.state.resolved_pre_crop,
+        )
         config = self.state.preprocess_config
         raw_probe = self.state.raw_probe
         if config is None:
@@ -204,12 +257,29 @@ class PreprocessSetupController:
                 (raw_probe.width, raw_probe.height),
             )
         except (PreprocessError, ValidationError, ValueError) as exc:
+            self.state.start_frame = start_frame
+            self.state.end_frame_exclusive = end_frame_exclusive
+            self.state.resolved_pre_crop = None
+            self.state.trim_pre_crop_valid = False
+            self.state.invalidate_crop_review(
+                "Trim or pre-crop changed; crop review is required."
+            )
             self._validation_failure(f"Invalid trim or pre-crop: {exc}", exc)
         self.state.start_frame = trim.start_frame
         self.state.end_frame_exclusive = trim.end_frame_exclusive
         self.state.pre_crop_config = pre_crop_config
         self.state.resolved_pre_crop = resolved
         self.state.trim_pre_crop_valid = True
+        current_selection = (
+            self.state.start_frame,
+            self.state.end_frame_exclusive,
+            self.state.pre_crop_config,
+            self.state.resolved_pre_crop,
+        )
+        if current_selection != previous_selection:
+            self.state.invalidate_crop_review(
+                "Trim or pre-crop changed; crop review is required."
+            )
         self.state.last_validation_error = None
         return resolved
 
@@ -273,29 +343,35 @@ class PreprocessSetupController:
             )
         if resolved_step is WorkflowStep.TRIM_PRE_CROP:
             return
-        if resolved_step is WorkflowStep.TIMING:
-            if not self.state.timing_valid:
-                raise self._new_validation_error(
-                    "Complete and validate the selected external timing option."
-                )
-            if self.state.timing_mode is TimingMode.NO_EXTERNAL:
-                if (
-                    self.state.timing_status != "not_provided"
-                    or self.state.external_time_selection is not None
-                    or self.state.external_time_vector_seconds is not None
-                ):
-                    raise self._new_validation_error(
-                        "No-external-timing state is inconsistent."
-                    )
-                return
-            if (
-                self.state.external_time_selection is not None
-                and self.state.timing_status in {"valid", "not_convertible_to_seconds"}
-            ):
-                return
+        if not self.state.timing_valid:
             raise self._new_validation_error(
                 "Complete and validate the selected external timing option."
             )
+        if self.state.timing_mode is TimingMode.NO_EXTERNAL:
+            if (
+                self.state.timing_status != "not_provided"
+                or self.state.external_time_selection is not None
+                or self.state.external_time_vector_seconds is not None
+            ):
+                raise self._new_validation_error(
+                    "No-external-timing state is inconsistent."
+                )
+        elif not (
+            self.state.external_time_selection is not None
+            and self.state.timing_status in {"valid", "not_convertible_to_seconds"}
+        ):
+            raise self._new_validation_error(
+                "Complete and validate the selected external timing option."
+            )
+        if resolved_step is WorkflowStep.TIMING:
+            return
+        if resolved_step is WorkflowStep.CROP_REVIEW:
+            accepted = self.state.accepted_crop_plan
+            if accepted is None or not accepted.accepted_by_user:
+                raise self._new_validation_error(
+                    "Review the crop preview and explicitly accept the crop."
+                )
+            return
         raise self._new_validation_error("Not implemented in this GUI milestone.")
 
     def can_advance(self, step: WorkflowStep | int) -> bool:

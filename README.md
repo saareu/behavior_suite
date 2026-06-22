@@ -136,7 +136,10 @@ behavior-suite gui
 The desktop GUI covers project creation/opening, raw-video probing, trim
 selection, and typed pre-crop configuration. The Timing page supports optional
 MATLAB `.mat` timing-vector selection with strict validation against the raw
-sequential readable-frame count. Crop review, encoding, and final execution
+sequential readable-frame count. Crop Review supports automatic cage detection,
+detector-setting retries, manual four-corner selection, prepared-crop preview,
+and explicit crop acceptance. Automatic detection and full sequential frame
+counting run in responsive background tasks. Encode Settings and final execution
 remain visible workflow placeholders.
 
 ---

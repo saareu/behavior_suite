@@ -15,11 +15,13 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.controller = controller
         self.setWindowTitle("behavior_suite — Video Preprocessing")
-        self.resize(1050, 720)
+        self.resize(1180, 820)
         self.wizard = PreprocessWizard(controller)
         self.wizard.unexpected_error.connect(self._show_unexpected_error)
         self.setCentralWidget(self.wizard)
-        self.statusBar().showMessage("GUI setup milestone: steps 1–4 are available.")
+        self.statusBar().showMessage(
+            "GUI setup and explicit Crop Review are available; encoding remains deferred."
+        )
 
     def show_startup_error(self, message: str) -> None:
         """Show a non-fatal startup configuration error in the window."""

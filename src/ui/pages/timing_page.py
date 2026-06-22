@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QProgressBar,
     QPushButton,
     QRadioButton,
     QTableWidget,
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from preprocess.exceptions import PreprocessError
 from preprocess.models import TimingUnit
 from ui.controllers.preprocess_setup_controller import PreprocessSetupController
 from ui.controllers.timing_controller import (
@@ -30,6 +32,7 @@ from ui.controllers.timing_controller import (
     TimingValidationError,
 )
 from ui.state import TimingMode
+from ui.tasks import GuiTaskRunner, TaskAlreadyRunningError
 
 _TABLE_HEADERS = (
     "Variable",
@@ -56,6 +59,7 @@ class TimingPage(QWidget):
         super().__init__()
         self.setup_controller = setup_controller
         self.controller = TimingController(setup_controller.state)
+        self.task_runner = GuiTaskRunner(self)
         self._refreshing = False
 
         title = QLabel("External Timing")
@@ -116,11 +120,14 @@ class TimingPage(QWidget):
         )
         raw_count_explanation.setWordWrap(True)
         raw_count_explanation.setStyleSheet("color: #8a5a00;")
-        count_button = QPushButton("Count All Readable Raw Frames Now")
-        count_button.clicked.connect(self._count_raw_frames)
+        self.count_button = QPushButton("Count All Readable Raw Frames Now")
+        self.count_button.clicked.connect(self._count_raw_frames)
 
-        validate_button = QPushButton("Validate Selected Timing")
-        validate_button.clicked.connect(self._validate_selection)
+        self.validate_button = QPushButton("Validate Selected Timing")
+        self.validate_button.clicked.connect(self._validate_selection)
+        self.busy_indicator = QProgressBar()
+        self.busy_indicator.setRange(0, 0)
+        self.busy_indicator.setVisible(False)
 
         mat_layout = QVBoxLayout(self.mat_group)
         mat_layout.addLayout(file_row)
@@ -133,8 +140,9 @@ class TimingPage(QWidget):
         mat_layout.addLayout(units_row)
         mat_layout.addWidget(self.raw_count_status)
         mat_layout.addWidget(raw_count_explanation)
-        mat_layout.addWidget(count_button)
-        mat_layout.addWidget(validate_button)
+        mat_layout.addWidget(self.count_button)
+        mat_layout.addWidget(self.busy_indicator)
+        mat_layout.addWidget(self.validate_button)
 
         self.success_label = QLabel()
         self.success_label.setWordWrap(True)
@@ -267,15 +275,59 @@ class TimingPage(QWidget):
 
     def _count_raw_frames(self) -> None:
         try:
-            count = self.controller.count_all_readable_raw_frames()
-            self.error_label.clear()
-            self.refresh_from_state()
-            self.status_message.emit(f"Sequential readable-frame count completed: {count}.")
-            self.validity_changed.emit()
+            path = self.controller.prepare_full_raw_frame_count()
+            self._set_busy(True)
+            self.task_runner.start(
+                lambda: self.controller.compute_full_raw_frame_count(path),
+                task_name="sequential raw-frame count",
+                on_success=self._raw_count_succeeded,
+                on_error=self._raw_count_failed,
+                on_finished=lambda: self._set_busy(False),
+            )
+        except (TimingValidationError, TaskAlreadyRunningError) as exc:
+            self._set_busy(False)
+            self._show_expected_error(str(exc))
+        except Exception as exc:
+            self._set_busy(False)
+            self._show_unexpected(exc)
+
+    def _raw_count_succeeded(self, result: object) -> None:
+        try:
+            count = self.controller.apply_full_raw_frame_count(result)
         except TimingValidationError as exc:
             self._show_expected_error(str(exc))
-        except TimingUnexpectedError as exc:
+            return
+        except Exception as exc:
             self._show_unexpected(exc)
+            return
+        self.error_label.clear()
+        self.refresh_from_state()
+        self.status_message.emit(f"Sequential readable-frame count completed: {count}.")
+        self.validity_changed.emit()
+
+    def _raw_count_failed(self, exc: BaseException) -> None:
+        self.controller.record_full_raw_frame_count_failure(exc)
+        if isinstance(exc, (PreprocessError, OSError, ValueError)):
+            self._show_expected_error(
+                self.controller.state.last_validation_error
+                or "Could not count readable raw frames."
+            )
+        else:
+            self._show_unexpected(
+                TimingUnexpectedError(
+                    "An unexpected error occurred while counting readable raw frames."
+                )
+            )
+
+    def _set_busy(self, busy: bool) -> None:
+        self.busy_indicator.setVisible(busy)
+        self.no_timing.setEnabled(not busy)
+        self.matlab_timing.setEnabled(not busy)
+        self.load_button.setEnabled(not busy)
+        self.count_button.setEnabled(not busy)
+        self.validate_button.setEnabled(not busy)
+        self.candidate_table.setEnabled(not busy)
+        self.units.setEnabled(not busy)
 
     def _validate_selection(self) -> None:
         try:

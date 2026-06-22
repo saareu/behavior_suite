@@ -18,6 +18,7 @@ from ui.controllers.preprocess_setup_controller import (
     PreprocessSetupController,
     SetupValidationError,
 )
+from ui.pages.crop_review_page import CropReviewPage
 from ui.pages.project_page import ProjectPage
 from ui.pages.raw_video_page import RawVideoPage
 from ui.pages.timing_page import TimingPage
@@ -37,7 +38,7 @@ class PreprocessWizard(QWidget):
         self.navigation.setFixedWidth(190)
         for index, label in enumerate(WORKFLOW_STEP_LABELS):
             item = QListWidgetItem(f"{index + 1}. {label}")
-            if index > WorkflowStep.TIMING:
+            if index > WorkflowStep.CROP_REVIEW:
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
                 item.setToolTip("Not implemented in this GUI milestone.")
             self.navigation.addItem(item)
@@ -48,11 +49,13 @@ class PreprocessWizard(QWidget):
         self.raw_video_page = RawVideoPage(controller)
         self.trim_pre_crop_page = TrimPreCropPage(controller)
         self.timing_page = TimingPage(controller)
+        self.crop_review_page = CropReviewPage(controller)
         interactive_pages = (
             self.project_page,
             self.raw_video_page,
             self.trim_pre_crop_page,
             self.timing_page,
+            self.crop_review_page,
         )
         for page in interactive_pages:
             self.pages.addWidget(page)
@@ -60,7 +63,7 @@ class PreprocessWizard(QWidget):
             page.status_message.connect(self._set_status)
             page.error_message.connect(self._set_error)
             page.unexpected_error.connect(self.unexpected_error.emit)
-        for label in WORKFLOW_STEP_LABELS[4:]:
+        for label in WORKFLOW_STEP_LABELS[5:]:
             self.pages.addWidget(self._placeholder_page(label))
 
         self.status_label = QLabel("Select or create a project.")
@@ -112,6 +115,8 @@ class PreprocessWizard(QWidget):
             return self.trim_pre_crop_page
         if index == WorkflowStep.TIMING:
             return self.timing_page
+        if index == WorkflowStep.CROP_REVIEW:
+            return self.crop_review_page
         return None
 
     def _go_next(self) -> None:
@@ -128,9 +133,12 @@ class PreprocessWizard(QWidget):
         except SetupValidationError as exc:
             self._set_error(str(exc))
             return
-        if index >= WorkflowStep.TIMING:
+        if index == WorkflowStep.TIMING:
             self._set_page(WorkflowStep.CROP_REVIEW)
-            self._set_status("Not implemented in this GUI milestone.")
+            return
+        if index == WorkflowStep.CROP_REVIEW:
+            self._set_page(WorkflowStep.ENCODE_SETTINGS)
+            self._set_status("Encode Settings is not implemented in this GUI milestone.")
             return
         self._set_page(index + 1)
 
@@ -153,8 +161,16 @@ class PreprocessWizard(QWidget):
         index = self.pages.currentIndex()
         self.back_button.setEnabled(index > 0)
         self.next_button.setEnabled(
-            index <= WorkflowStep.TIMING and self.controller.can_advance(index)
+            index <= WorkflowStep.CROP_REVIEW and self.controller.can_advance(index)
         )
+        encode_item = self.navigation.item(WorkflowStep.ENCODE_SETTINGS)
+        accepted = self.controller.state.accepted_crop_plan
+        if accepted is not None and accepted.accepted_by_user:
+            encode_item.setFlags(encode_item.flags() | Qt.ItemFlag.ItemIsEnabled)
+            encode_item.setToolTip("Placeholder; implementation is deferred.")
+        else:
+            encode_item.setFlags(encode_item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+            encode_item.setToolTip("Accept a Crop Review candidate first.")
 
     def _set_status(self, message: str) -> None:
         self.status_label.setText(message)

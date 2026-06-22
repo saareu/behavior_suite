@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from preprocess.config import PreCropConfig, PreprocessConfig
+from preprocess.crop_plan import CropPlan
 from preprocess.models import (
     ExternalTimeSelection,
     MatVectorCandidate,
@@ -49,6 +50,13 @@ class TimingMode(StrEnum):
     MATLAB = "matlab_timing"
 
 
+class CropReviewMode(StrEnum):
+    """Crop-review choices available in the desktop workflow."""
+
+    AUTOMATIC = "automatic"
+    MANUAL = "manual"
+
+
 @dataclass(slots=True)
 class PreprocessSetupState:
     """Small mutable view-model state without frames or open video handles."""
@@ -74,7 +82,29 @@ class PreprocessSetupState:
     selected_timing_units: TimingUnit | None = None
     external_time_selection: ExternalTimeSelection | None = None
     external_time_vector_seconds: np.ndarray | None = None
+    candidate_crop_plan: CropPlan | None = None
+    accepted_crop_plan: CropPlan | None = None
+    crop_mode: CropReviewMode = CropReviewMode.AUTOMATIC
+    crop_review_status: str = "not_reviewed"
+    detector_diagnostics: dict[str, object] | None = None
+    crop_review_revision: int = 0
     trim_pre_crop_valid: bool = False
     current_step: WorkflowStep = WorkflowStep.PROJECT
     last_validation_error: str | None = None
     unexpected_error_detail: str | None = None
+
+    def invalidate_crop_review(self, status: str = "not_reviewed") -> None:
+        """Clear all crop decisions that depend on upstream setup state."""
+
+        self.candidate_crop_plan = None
+        self.accepted_crop_plan = None
+        self.crop_review_status = status
+        self.detector_diagnostics = None
+        self.crop_review_revision += 1
+
+    def store_accepted_crop_plan(self, crop_plan: CropPlan) -> None:
+        """Store only a CropPlan carrying explicit user acceptance."""
+
+        if not crop_plan.accepted_by_user:
+            raise ValueError("accepted_crop_plan must be explicitly accepted by the user.")
+        self.accepted_crop_plan = crop_plan
