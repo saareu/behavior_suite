@@ -5,6 +5,8 @@ import cv2
 import numpy as np
 import pytest
 
+from preprocess import cage_detection
+from preprocess.cage_detection import detect_cage_crop_plan
 from preprocess.config import (
     CanonicalResolutionConfig,
     PrepareConfig,
@@ -12,17 +14,43 @@ from preprocess.config import (
 )
 from preprocess.exceptions import VideoPreparationError
 from preprocess.manual_crop import make_manual_crop_plan
+from preprocess.pre_crop import resolve_pre_crop
 from preprocess.video_prepare import (
+    reencode_intermediate_with_opencv,
     resolve_ffmpeg_binary,
     resolve_ffprobe_binary,
     run_ffmpeg_prepare,
 )
+from ui.controllers.crop_review_controller import build_crop_preview
 
 # This admits interpolation and H.264 centroid noise while rejecting a
 # larger-than-two-pixel spatial disagreement in the Stage A transform.
 MAX_MARKER_CENTER_ERROR_PX = 2.0
+PREVIEW_STAGE_MAX_MARKER_ERROR_PX = 2.5
+VISIBLE_BOUNDS_MAX_ERROR_PX = 2
 _MARKER_POINTS_RAW_XY = np.array(
     [[62.0, 32.0], [90.0, 35.0], [97.0, 84.0], [53.0, 81.0]],
+    dtype=np.float64,
+)
+_FRACTIONAL_PERSPECTIVE_POINTS = np.array(
+    [
+        [25.05680077762755, 20.132692876841816],
+        [276.7875596244743, 34.75081456266568],
+        [268.4005883911093, 201.01696844513665],
+        [32.9860241236059, 198.31592465770703],
+    ],
+    dtype=np.float64,
+)
+_AUTOMATIC_PARITY_QUAD = np.array(
+    [[110.0, 20.0], [205.0, 30.0], [215.0, 220.0], [95.0, 210.0]],
+    dtype=np.float64,
+)
+_MANUAL_PARITY_MARKERS = np.array(
+    [[60.0, 55.0], [240.0, 65.0], [235.0, 170.0], [65.0, 165.0]],
+    dtype=np.float64,
+)
+_AUTOMATIC_PARITY_MARKERS = np.array(
+    [[130.0, 55.0], [180.0, 60.0], [185.0, 180.0], [125.0, 175.0]],
     dtype=np.float64,
 )
 _MARKER_COLORS_BGR = (
@@ -73,6 +101,37 @@ def _write_spatial_marker_image(path: Path) -> Path:
     return path
 
 
+def _write_fractional_perspective_image(path: Path) -> Path:
+    frame = np.full((240, 320, 3), 48, dtype=np.uint8)
+    polygon = np.rint(_FRACTIONAL_PERSPECTIVE_POINTS).astype(np.int32)
+    cv2.fillConvexPoly(frame, polygon, color=(40, 180, 80))
+    assert cv2.imwrite(str(path), frame)
+    return path
+
+
+def _write_parity_image(
+    path: Path,
+    quad: np.ndarray,
+    marker_points: np.ndarray,
+) -> tuple[Path, np.ndarray]:
+    frame = np.full((240, 320, 3), (85, 25, 85), dtype=np.uint8)
+    cv2.fillConvexPoly(
+        frame,
+        np.rint(quad).astype(np.int32),
+        color=(55, 55, 55),
+    )
+    for point, color in zip(marker_points, _MARKER_COLORS_BGR, strict=True):
+        cv2.rectangle(
+            frame,
+            (int(point[0]) - 3, int(point[1]) - 3),
+            (int(point[0]) + 3, int(point[1]) + 3),
+            color=color,
+            thickness=-1,
+        )
+    assert cv2.imwrite(str(path), frame)
+    return path, frame
+
+
 def _transform_points(homography: np.ndarray, points_xy: np.ndarray) -> np.ndarray:
     homogeneous = np.column_stack(
         [points_xy, np.ones(points_xy.shape[0], dtype=np.float64)]
@@ -100,6 +159,66 @@ def _detect_spatial_marker_centers(frame: np.ndarray) -> np.ndarray:
         assert statistics[marker_index, cv2.CC_STAT_AREA] >= 5
         centers.append(centroids[marker_index])
     return np.asarray(centers, dtype=np.float64)
+
+
+def _visible_content_bounds(frame: np.ndarray) -> tuple[int, int, int, int]:
+    visible = np.max(frame, axis=2) > 20
+    rows, columns = np.nonzero(visible)
+    assert rows.size > 0
+    return (
+        int(columns.min()),
+        int(rows.min()),
+        int(columns.max()),
+        int(rows.max()),
+    )
+
+
+def _assert_canonical_padding_is_black(frame: np.ndarray, crop_plan) -> None:
+    canonical = crop_plan.canonical_geometry
+    assert canonical is not None
+    padding_regions = []
+    if canonical.padding_top > 2:
+        padding_regions.append(frame[: canonical.padding_top - 2])
+    if canonical.padding_bottom > 2:
+        padding_regions.append(frame[-canonical.padding_bottom + 2 :])
+    if canonical.padding_left > 2:
+        padding_regions.append(frame[:, : canonical.padding_left - 2])
+    if canonical.padding_right > 2:
+        padding_regions.append(frame[:, -canonical.padding_right + 2 :])
+    assert padding_regions
+    assert all(float(region.mean()) < 5.0 for region in padding_regions)
+
+
+def _accepted_automatic_parity_plan(
+    config: PreprocessConfig,
+    raw_frame: np.ndarray,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    detected = cage_detection._DetectedRectangle(
+        rectangle_in_search=((155.0, 120.0), (110.0, 190.0), 5.0),
+        quad_in_pre_crop=_AUTOMATIC_PARITY_QUAD,
+        fit_score=0.95,
+        rim_density=0.1,
+        contour_area=20_000.0,
+        coarse_search_roi=(0, 0, 320, 240),
+    )
+    background = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
+    monkeypatch.setattr(
+        cage_detection,
+        "_build_median_background_with_count",
+        lambda _path, _step: cage_detection._MedianBackground(
+            image=background,
+            sampled_frame_count=1,
+        ),
+    )
+    monkeypatch.setattr(
+        cage_detection,
+        "_detect_rotated_rectangle",
+        lambda _background, _config, _margin: detected,
+    )
+    pre_crop = resolve_pre_crop(config.pre_crop, raw_size_wh=(320, 240))
+    result = detect_cage_crop_plan(Path("unused.avi"), config, pre_crop)
+    return result.crop_plan.model_copy(update={"accepted_by_user": True})
 
 
 def _config(ffmpeg_binary: Path, ffprobe_binary: Path) -> PreprocessConfig:
@@ -296,6 +415,180 @@ def test_ffmpeg_prepare_matches_crop_plan_spatial_geometry(
     maximum_error = float(marker_errors.max())
     print(f"maximum marker-center error: {maximum_error:.6f} px")
     assert maximum_error <= MAX_MARKER_CENTER_ERROR_PX
+
+
+@pytest.mark.integration
+def test_ffmpeg_prepare_accepts_fractional_manual_perspective_crop(
+    tmp_path: Path,
+) -> None:
+    ffmpeg_binary, ffprobe_binary = _require_ffmpeg()
+    raw_path = _write_fractional_perspective_image(
+        tmp_path / "fractional_perspective.png"
+    )
+    output_path = tmp_path / "internal" / "fractional_perspective.mp4"
+    config = PreprocessConfig(
+        prepare=PrepareConfig(
+            canonical_resolution=CanonicalResolutionConfig(
+                enabled=True,
+                width=192,
+                height=192,
+            )
+        ),
+        encoding={
+            "ffmpeg": {
+                "ffmpeg_path": ffmpeg_binary,
+                "ffprobe_path": ffprobe_binary,
+            }
+        },
+    )
+    crop_plan = make_manual_crop_plan(
+        raw_frame_shape=(240, 320),
+        points_tl_tr_br_bl=_FRACTIONAL_PERSPECTIVE_POINTS,
+        pre_crop_roi=(10, 10, 300, 220),
+        canonical_resolution=config.prepare.canonical_resolution,
+    ).model_copy(update={"accepted_by_user": True})
+
+    result = run_ffmpeg_prepare(
+        raw_video_path=raw_path,
+        intermediate_path=output_path,
+        crop_plan=crop_plan,
+        config=config,
+        start_frame=0,
+        end_frame_exclusive=1,
+    )
+
+    frame_count, size_wh, _first_frame = _count_readable_frames(output_path)
+    assert frame_count == 1
+    assert size_wh == crop_plan.prepared_size_wh == (192, 192)
+    assert result.expected_output_size_wh == crop_plan.prepared_size_wh
+    assert result.filtergraph_metadata.rectified_content_size_wh == (254, 180)
+    assert "perspective_rectification" in result.filtergraph_metadata.stages
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("crop_origin", "expected_rotation"),
+    [("automatic", True), ("manual", False)],
+)
+def test_gui_preview_matches_stage_a_and_stage_b_geometry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crop_origin: str,
+    expected_rotation: bool,
+) -> None:
+    ffmpeg_binary, ffprobe_binary = _require_ffmpeg()
+    config = PreprocessConfig(
+        prepare=PrepareConfig(
+            perspective_interpolation="linear",
+            canonical_resolution=CanonicalResolutionConfig(
+                enabled=True,
+                width=240,
+                height=200,
+            ),
+        ),
+        encoding={
+            "ffmpeg": {
+                "ffmpeg_path": ffmpeg_binary,
+                "ffprobe_path": ffprobe_binary,
+            }
+        },
+    )
+    if crop_origin == "automatic":
+        quad = _AUTOMATIC_PARITY_QUAD
+        marker_points = _AUTOMATIC_PARITY_MARKERS
+    else:
+        quad = _FRACTIONAL_PERSPECTIVE_POINTS
+        marker_points = _MANUAL_PARITY_MARKERS
+    raw_path, raw_frame = _write_parity_image(
+        tmp_path / f"{crop_origin}_preview_source.png",
+        quad,
+        marker_points,
+    )
+    if crop_origin == "automatic":
+        crop_plan = _accepted_automatic_parity_plan(config, raw_frame, monkeypatch)
+    else:
+        crop_plan = make_manual_crop_plan(
+            raw_frame_shape=(240, 320),
+            points_tl_tr_br_bl=quad,
+            pre_crop_roi=None,
+            canonical_resolution=config.prepare.canonical_resolution,
+        ).model_copy(update={"accepted_by_user": True})
+
+    preview = build_crop_preview(
+        raw_frame,
+        crop_plan,
+        config.prepare.perspective_interpolation,
+    )
+    intermediate_path = tmp_path / f"{crop_origin}_stage_a.mp4"
+    run_ffmpeg_prepare(
+        raw_video_path=raw_path,
+        intermediate_path=intermediate_path,
+        crop_plan=crop_plan,
+        config=config,
+        start_frame=0,
+        end_frame_exclusive=1,
+    )
+    stage_count, stage_size_wh, stage_a_frame = _count_readable_frames(
+        intermediate_path
+    )
+    final_path = tmp_path / f"{crop_origin}_stage_b.mp4"
+    reencode_intermediate_with_opencv(
+        intermediate_video_path=intermediate_path,
+        prepared_video_path=final_path,
+        output_fps=10.0,
+        output_size_wh=crop_plan.prepared_size_wh,
+        config=config,
+    )
+    final_count, final_size_wh, stage_b_frame = _count_readable_frames(final_path)
+
+    expected_height = crop_plan.prepared_size_wh[1]
+    expected_width = crop_plan.prepared_size_wh[0]
+    assert preview.shape[:2] == (expected_height, expected_width)
+    assert stage_size_wh == crop_plan.prepared_size_wh
+    assert final_size_wh == crop_plan.prepared_size_wh
+    assert stage_count == final_count == 1
+    assert crop_plan.rotated_90 is expected_rotation
+
+    predicted_centers = _transform_points(
+        crop_plan.H_raw_to_prepared_3x3,
+        marker_points,
+    )
+    preview_centers = _detect_spatial_marker_centers(preview)
+    stage_a_centers = _detect_spatial_marker_centers(stage_a_frame)
+    stage_b_centers = _detect_spatial_marker_centers(stage_b_frame)
+    preview_stage_errors = np.linalg.norm(
+        preview_centers - stage_a_centers,
+        axis=1,
+    )
+    preview_final_errors = np.linalg.norm(
+        preview_centers - stage_b_centers,
+        axis=1,
+    )
+    predicted_stage_errors = np.linalg.norm(
+        predicted_centers - stage_a_centers,
+        axis=1,
+    )
+    maximum_marker_error = float(
+        max(
+            preview_stage_errors.max(),
+            preview_final_errors.max(),
+            predicted_stage_errors.max(),
+        )
+    )
+    print(
+        f"{crop_origin} preview/encoded maximum marker error: "
+        f"{maximum_marker_error:.6f} px"
+    )
+    assert maximum_marker_error <= PREVIEW_STAGE_MAX_MARKER_ERROR_PX
+
+    preview_bounds = np.asarray(_visible_content_bounds(preview))
+    stage_a_bounds = np.asarray(_visible_content_bounds(stage_a_frame))
+    stage_b_bounds = np.asarray(_visible_content_bounds(stage_b_frame))
+    assert np.max(np.abs(preview_bounds - stage_a_bounds)) <= VISIBLE_BOUNDS_MAX_ERROR_PX
+    assert np.max(np.abs(preview_bounds - stage_b_bounds)) <= VISIBLE_BOUNDS_MAX_ERROR_PX
+    _assert_canonical_padding_is_black(preview, crop_plan)
+    _assert_canonical_padding_is_black(stage_a_frame, crop_plan)
+    _assert_canonical_padding_is_black(stage_b_frame, crop_plan)
 
 
 @pytest.mark.integration

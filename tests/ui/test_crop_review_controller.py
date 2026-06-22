@@ -19,6 +19,7 @@ from ui.controllers.crop_review_controller import (
 )
 from ui.controllers.preprocess_setup_controller import PreprocessSetupController
 from ui.state import CropReviewMode, PreprocessSetupState, WorkflowStep
+from ui.widgets.video_frame_view import fit_image_target_rect
 
 FRAME = np.full((80, 100, 3), 120, dtype=np.uint8)
 POINTS = ((10.0, 10.0), (90.0, 10.0), (90.0, 70.0), (10.0, 70.0))
@@ -354,3 +355,30 @@ def test_preview_uses_crop_plan_transform_and_output_size(
     assert captured["size"] == plan.prepared_size_wh
     np.testing.assert_array_equal(captured["transform"], plan.H_raw_to_prepared_3x3)
     assert preview.shape[:2] == (plan.prepared_size_wh[1], plan.prepared_size_wh[0])
+
+
+def test_preview_blacks_pixels_outside_transformed_crop_footprint() -> None:
+    config = _config()
+    plan = _automatic_plan(config)
+    preview = build_crop_preview(np.full_like(FRAME, 180), plan, "linear")
+    canonical = plan.canonical_geometry
+
+    assert canonical is not None
+    assert canonical.padding_top > 0
+    assert canonical.padding_bottom > 0
+    assert np.count_nonzero(preview[: canonical.padding_top]) == 0
+    assert np.count_nonzero(preview[-canonical.padding_bottom :]) == 0
+    assert float(preview[canonical.padding_top + 3 : -canonical.padding_bottom - 3].mean()) > 100
+
+
+def test_viewer_letterboxing_is_display_only_and_not_preview_pixels() -> None:
+    preview_size_wh = (100, 80)
+
+    target = fit_image_target_rect(preview_size_wh, (500, 300))
+
+    assert target.width() / target.height() == pytest.approx(100 / 80)
+    assert target.left() > 0
+    assert target.right() < 500
+    assert target.top() == pytest.approx(4.0)
+    assert target.bottom() == pytest.approx(296.0)
+    assert preview_size_wh == (100, 80)

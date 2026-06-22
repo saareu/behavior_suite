@@ -8,6 +8,27 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPaintEvent
 from PySide6.QtWidgets import QWidget
 
 
+def fit_image_target_rect(
+    frame_size_wh: tuple[int, int],
+    widget_size_wh: tuple[int, int],
+) -> QRectF:
+    """Return the display-only fitted rectangle for an unchanged image array."""
+
+    frame_width, frame_height = frame_size_wh
+    widget_width, widget_height = widget_size_wh
+    available_width = max(1.0, float(widget_width - 8))
+    available_height = max(1.0, float(widget_height - 8))
+    scale = min(available_width / frame_width, available_height / frame_height)
+    width = frame_width * scale
+    height = frame_height * scale
+    return QRectF(
+        (widget_width - width) / 2,
+        (widget_height - height) / 2,
+        width,
+        height,
+    )
+
+
 class VideoFrameView(QWidget):
     """Display one grayscale, BGR, or BGRA NumPy frame without retaining video."""
 
@@ -45,13 +66,7 @@ class VideoFrameView(QWidget):
         size = self.frame_size_wh
         if size is None:
             return QRectF()
-        frame_width, frame_height = size
-        available_width = max(1.0, float(self.width() - 8))
-        available_height = max(1.0, float(self.height() - 8))
-        scale = min(available_width / frame_width, available_height / frame_height)
-        width = frame_width * scale
-        height = frame_height * scale
-        return QRectF((self.width() - width) / 2, (self.height() - height) / 2, width, height)
+        return fit_image_target_rect(size, (self.width(), self.height()))
 
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
         del event

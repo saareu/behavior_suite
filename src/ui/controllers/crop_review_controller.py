@@ -35,6 +35,7 @@ AutomaticDetector = Callable[[Path, PreprocessConfig, ResolvedPreCrop], CageDete
 ManualPlanBuilder = Callable[..., CropPlan]
 
 _POINT_LABELS = ("top-left", "top-right", "bottom-right", "bottom-left")
+_PREVIEW_MASK_COORDINATE_SHIFT = 8
 
 
 class CropReviewValidationError(ValueError):
@@ -88,7 +89,13 @@ def build_crop_preview(
     crop_plan: CropPlan,
     perspective_interpolation: str,
 ) -> np.ndarray:
-    """Transform one raw frame using only the validated CropPlan geometry."""
+    """Transform and clip one raw frame using validated CropPlan geometry.
+
+    A direct homography can map prepared padding pixels back to valid raw pixels
+    outside the accepted quadrilateral. Stage A instead inserts black
+    rectification/canonical padding. Clipping to the transformed crop footprint
+    preserves the CropPlan transform while matching that visible-content rule.
+    """
 
     frame = np.asarray(raw_frame)
     if frame.ndim not in {2, 3} or frame.size == 0:
@@ -119,7 +126,36 @@ def build_crop_preview(
         raise CropReviewValidationError(
             "Prepared crop preview dimensions do not match the CropPlan output size."
         )
-    return np.array(preview, copy=True)
+    homogeneous_quad = np.column_stack(
+        [
+            crop_plan.quad_raw_tl_tr_br_bl,
+            np.ones(4, dtype=np.float64),
+        ]
+    )
+    transformed_quad = (crop_plan.H_raw_to_prepared_3x3 @ homogeneous_quad.T).T
+    denominators = transformed_quad[:, 2]
+    if np.any(np.abs(denominators) <= np.finfo(np.float64).eps):
+        raise CropReviewValidationError(
+            "CropPlan maps a preview crop corner to infinity."
+        )
+    prepared_quad = transformed_quad[:, :2] / denominators[:, np.newaxis]
+    if not np.all(np.isfinite(prepared_quad)):
+        raise CropReviewValidationError(
+            "CropPlan maps preview crop corners to non-finite coordinates."
+        )
+    fixed_point_scale = 1 << _PREVIEW_MASK_COORDINATE_SHIFT
+    prepared_quad_fixed = np.rint(prepared_quad * fixed_point_scale).astype(np.int32)
+    footprint = np.zeros((height, width), dtype=np.uint8)
+    cv2.fillConvexPoly(
+        footprint,
+        prepared_quad_fixed,
+        color=255,
+        lineType=cv2.LINE_8,
+        shift=_PREVIEW_MASK_COORDINATE_SHIFT,
+    )
+    clipped_preview = np.array(preview, copy=True)
+    clipped_preview[footprint == 0] = 0
+    return clipped_preview
 
 
 def _copy_plan_with_acceptance(crop_plan: CropPlan, accepted: bool) -> CropPlan:
