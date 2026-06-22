@@ -274,13 +274,15 @@ Confirmed current gaps are:
 - MAT warnings are not surfaced in the GUI.
 
 The field report stated that a full count performed on Screen 2 was repeated on
-the Timing screen. Current source does reuse an in-memory
-`raw_probe.frame_count_opencv_readable` on the Timing page when it is present.
-However, the count is not persistent, has no source fingerprint, and is not
-reused by `PreprocessService`, which performs a fresh full probe whenever
-external timing is provided. The exact reported Screen-2-to-Timing repeat should
-therefore be reproduced against the current revision; persistent cross-workflow
-reuse remains a valid v2 requirement.
+the Timing screen. Current source retains and uses an in-memory
+`raw_probe.frame_count_opencv_readable` for Timing summaries and validation.
+However, the Timing page leaves `Count All Readable Raw Frames Now` enabled and
+the controller permits another count request even when that valid same-session
+count exists. Reuse is therefore partially working: the value is not lost, but
+the GUI still offers and can execute a redundant count. The count is also not
+persistent, has no source fingerprint, and is not reused by
+`PreprocessService`, which performs a fresh full probe whenever external timing
+is provided. Persistent cross-workflow reuse remains a v2 requirement.
 
 ## 12. Preview-versus-final-output discrepancy
 
@@ -349,7 +351,7 @@ The approved v1 scope and current implementation defer:
 | No writer-profile FPS representability preflight before Stage A | Confirmed and field-triggered | High operational cost; failure is loud, but occurs after lengthy work |
 | Preview/final visual discrepancy | Confirmed observation; cause unconfirmed | High until parity is demonstrated because crop review is an explicit scientific approval gate |
 | No persistent probe/readable-count cache; service re-counts with external timing | Confirmed | Medium usability and runtime cost; low direct scientific risk if fresh counts remain authoritative |
-| Screen-2-to-Timing repeat count report | Field report conflicts with current in-memory reuse path | Medium; reproduce before assigning cause |
+| Screen-2-to-Timing repeat count report | Partially working: stored value is reused, but the page and controller permit a redundant recount | Medium usability and runtime cost |
 | MAT warnings are console-only and `None`/duplicate candidates are not explicitly excluded | Confirmed implementation gap; exact workspace behavior unconfirmed | Medium observability and selection clarity |
 | No visual trim/pre-crop navigation | Confirmed | Medium usability and user-entry risk; core validation remains active |
 | No detector reset actions | Confirmed | Medium reproducibility/usability; current typed changes still invalidate crop acceptance |
