@@ -13,6 +13,14 @@ class VideoProbeError(PreprocessError):
     """Raised when a video cannot be opened or probed as requested."""
 
 
+class PreprocessCancelledError(PreprocessError):
+    """Raised when a caller cooperatively cancels a preprocessing operation."""
+
+
+class VideoProbeCancelledError(PreprocessCancelledError):
+    """Raised when raw-video probing stops after cooperative cancellation."""
+
+
 class ExternalTimingError(PreprocessError, ValueError):
     """Raised when a MATLAB workspace or selected timing vector is invalid."""
 

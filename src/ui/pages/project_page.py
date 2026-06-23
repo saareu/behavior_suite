@@ -30,6 +30,7 @@ class ProjectPage(QWidget):
     status_message = Signal(str)
     error_message = Signal(str)
     unexpected_error = Signal(str)
+    project_changed = Signal()
 
     def __init__(self, controller: PreprocessSetupController) -> None:
         super().__init__()
@@ -84,10 +85,13 @@ class ProjectPage(QWidget):
         self.summary_preprocess.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
+        self.summary_prior_run = QLabel("—")
+        self.summary_prior_run.setWordWrap(True)
         summary_form = QFormLayout(summary_group)
         summary_form.addRow("Project name", self.summary_name)
         summary_form.addRow("Project directory", self.summary_directory)
         summary_form.addRow("Preprocess directory", self.summary_preprocess)
+        summary_form.addRow("Prior preprocessing context", self.summary_prior_run)
 
         self.error_label = QLabel()
         self.error_label.setStyleSheet("color: #b00020;")
@@ -113,10 +117,14 @@ class ProjectPage(QWidget):
             self.summary_name.setText("—")
             self.summary_directory.setText("—")
             self.summary_preprocess.setText("—")
+            self.summary_prior_run.setText("—")
         else:
             self.summary_name.setText(state.project.name)
             self.summary_directory.setText(str(state.project_dir))
             self.summary_preprocess.setText(str(state.preprocess_dir))
+            self.summary_prior_run.setText(
+                state.project_hydration_message or "No prior context loaded."
+            )
         self.validity_changed.emit()
 
     def is_valid(self) -> bool:
@@ -171,7 +179,11 @@ class ProjectPage(QWidget):
             )
             self.error_label.clear()
             self.refresh_from_state()
-            self.status_message.emit("Project created successfully.")
+            self.project_changed.emit()
+            self.status_message.emit(
+                self.controller.state.project_hydration_message
+                or "Project created successfully."
+            )
         except SetupValidationError as exc:
             self._show_expected_error(str(exc))
         except Exception as exc:
@@ -182,7 +194,11 @@ class ProjectPage(QWidget):
             self.controller.open_project(Path(self.existing_directory.text()))
             self.error_label.clear()
             self.refresh_from_state()
-            self.status_message.emit("Project opened successfully.")
+            self.project_changed.emit()
+            self.status_message.emit(
+                self.controller.state.project_hydration_message
+                or "Project opened successfully."
+            )
         except SetupValidationError as exc:
             self._show_expected_error(str(exc))
         except Exception as exc:

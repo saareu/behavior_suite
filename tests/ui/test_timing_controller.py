@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from preprocess.exceptions import VideoProbeCancelledError
 from preprocess.models import (
     ExternalTimeSelection,
     MatWorkspace,
@@ -14,6 +15,11 @@ from ui.controllers.timing_controller import (
     TimingValidationError,
 )
 from ui.state import PreprocessSetupState, RawReadableCountStatus, TimingMode
+from ui.tasks import (
+    GuiTaskCoordinator,
+    GuiTaskKind,
+    TaskAlreadyRunningError,
+)
 
 
 def _probe_result(path: Path, *, readable_count: int | None) -> VideoProbeResult:
@@ -183,6 +189,38 @@ def test_existing_same_session_count_is_reused_without_second_probe(
     )
 
 
+def test_restored_prior_run_count_is_reused_without_second_probe(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    state = _state(tmp_path)
+    state.raw_readable_count_status = RawReadableCountStatus.RECORDED_PRIOR_RUN
+
+    def unexpected_probe(
+        _path: Path, *, require_sequential_count: bool
+    ) -> VideoProbeResult:
+        raise AssertionError(
+            f"restored count unexpectedly triggered probe: {require_sequential_count}"
+        )
+
+    controller = TimingController(
+        state,
+        workspace_loader=lambda _path: workspace,
+        probe_function=unexpected_probe,
+    )
+    controller.choose_matlab_timing()
+    controller.load_mat_file(workspace.source_path)
+    _select(controller)
+
+    controller.validate_selected_timing()
+
+    assert controller.reusable_raw_frame_count() == 4
+    assert (
+        state.raw_readable_count_status
+        is RawReadableCountStatus.RECORDED_PRIOR_RUN
+    )
+
+
 def test_existing_count_replaces_default_count_action_with_explicit_recount(
     tmp_path: Path,
 ) -> None:
@@ -201,6 +239,24 @@ def test_existing_count_replaces_default_count_action_with_explicit_recount(
     )
 
 
+def test_duplicate_count_for_same_project_and_video_is_rejected(
+    tmp_path: Path,
+) -> None:
+    state = _state(tmp_path, readable_count=None)
+    coordinator = GuiTaskCoordinator()
+    coordinator.begin(
+        task_kind=GuiTaskKind.RAW_SEQUENTIAL_COUNT,
+        project_dir=state.project_dir,
+        raw_video_path=state.raw_video_path,
+    )
+    controller = TimingController(state, task_coordinator=coordinator)
+
+    with pytest.raises(TaskAlreadyRunningError, match="already running"):
+        controller.begin_full_raw_frame_count()
+
+    assert state.raw_readable_count_status is RawReadableCountStatus.NOT_COUNTED
+
+
 def test_failed_diagnostic_recount_preserves_existing_count_and_no_timing_mode(
     tmp_path: Path,
 ) -> None:
@@ -217,6 +273,28 @@ def test_failed_diagnostic_recount_preserves_existing_count_and_no_timing_mode(
     assert controller.state.timing_mode is TimingMode.NO_EXTERNAL
     assert controller.state.timing_valid is True
     assert controller.state.timing_status == "not_provided"
+
+
+def test_current_generation_cancellation_has_distinct_nonfailure_status(
+    tmp_path: Path,
+) -> None:
+    state = _state(tmp_path, readable_count=None)
+    coordinator = GuiTaskCoordinator()
+    controller = TimingController(state, task_coordinator=coordinator)
+    _path, context = controller.begin_full_raw_frame_count()
+    context.request_cancellation()
+
+    applied = controller.record_full_raw_frame_count_failure(
+        VideoProbeCancelledError("cancelled"),
+        context=context,
+    )
+
+    assert applied is True
+    assert (
+        state.raw_readable_count_status
+        is RawReadableCountStatus.COUNT_CANCELLED
+    )
+    assert state.last_validation_error == "Raw readable-frame count cancelled."
 
 
 def test_full_raw_frame_count_updates_probe_and_requests_core_count(
@@ -254,6 +332,17 @@ def test_mismatched_probe_source_does_not_supply_timing_count(tmp_path: Path) ->
     assert (
         state.raw_readable_count_status is RawReadableCountStatus.NOT_COUNTED
     )
+
+
+def test_prior_run_count_is_ignored_after_selected_path_changes(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    state.raw_readable_count_status = RawReadableCountStatus.RECORDED_PRIOR_RUN
+    state.raw_video_path = tmp_path / "different.avi"
+
+    controller = TimingController(state)
+
+    assert controller.reusable_raw_frame_count() is None
+    assert state.raw_readable_count_status is RawReadableCountStatus.NOT_COUNTED
 
 
 def test_valid_seconds_timing_stores_selection_and_seconds_vector(

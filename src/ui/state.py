@@ -53,14 +53,16 @@ class TimingMode(StrEnum):
 
 
 class RawReadableCountStatus(StrEnum):
-    """Current-session status of the exact sequential raw-frame count."""
+    """Provenance or activity status of the exact sequential raw-frame count."""
 
     NOT_COUNTED = "not_counted"
     COUNTED_THIS_SESSION = "counted_this_session"
+    RECORDED_PRIOR_RUN = "recorded_prior_run"
     COUNTING = "counting"
     RECOUNTING = "recounting"
     COUNT_FAILED = "count_failed"
     RECOUNT_FAILED = "recount_failed"
+    COUNT_CANCELLED = "count_cancelled"
 
 
 class CropReviewMode(StrEnum):
@@ -77,6 +79,9 @@ class PreprocessSetupState:
     project: Project | None = None
     project_dir: Path | None = None
     preprocess_dir: Path | None = None
+    project_hydration_status: str = "not_checked"
+    project_hydration_message: str | None = None
+    prior_run_status: str | None = None
     raw_video_path: Path | None = None
     raw_probe: VideoProbeResult | None = None
     raw_readable_count_status: RawReadableCountStatus = (

@@ -25,7 +25,12 @@ from ui.controllers.preprocess_setup_controller import (
     SetupValidationError,
 )
 from ui.state import PreprocessSetupState, TimingMode, WorkflowStep
-from ui.tasks import TaskAlreadyRunningError
+from ui.tasks import (
+    GuiTaskContext,
+    GuiTaskCoordinator,
+    GuiTaskKind,
+    TaskAlreadyRunningError,
+)
 
 
 class RunPreprocessValidationError(ValueError):
@@ -45,6 +50,7 @@ class _TaskRunnerProtocol(Protocol):
         operation: Callable[[], Any],
         *,
         task_name: str = "background task",
+        context: GuiTaskContext | None = None,
         on_success: Callable[[Any], None] | None = None,
         on_error: Callable[[BaseException], None] | None = None,
         on_finished: Callable[[], None] | None = None,
@@ -119,10 +125,12 @@ class RunPreprocessController:
         *,
         service: _ServiceProtocol | None = None,
         folder_opener: FolderOpener = open_folder_in_platform_explorer,
+        task_coordinator: GuiTaskCoordinator | None = None,
     ) -> None:
         self.state = state
         self._service = service or PreprocessService()
         self._folder_opener = folder_opener
+        self.task_coordinator = task_coordinator or GuiTaskCoordinator()
         self._started_monotonic: float | None = None
 
     def validate_preconditions(self) -> None:
@@ -296,6 +304,14 @@ class RunPreprocessController:
             raise self._validation_error("A preprocessing task is already running.")
         self._set_stage("Preparing request", on_stage)
         request = self.build_request()
+        try:
+            context = self.task_coordinator.begin(
+                task_kind=GuiTaskKind.PREPROCESS_RUN,
+                project_dir=self.state.project_dir,
+                raw_video_path=self.state.raw_video_path,
+            )
+        except TaskAlreadyRunningError as exc:
+            raise self._validation_error(str(exc)) from exc
         self.state.preprocess_result = None
         self.state.run_error_message = None
         self.state.preprocess_task_running = True
@@ -303,8 +319,13 @@ class RunPreprocessController:
         self.state.run_elapsed_sec = 0.0
         self._started_monotonic = time.perf_counter()
         self._set_stage("Running preprocessing pipeline", on_stage)
-
         def handle_success(value: object) -> None:
+            if not self.task_coordinator.is_current(
+                context,
+                project_dir=self.state.project_dir,
+                raw_video_path=self.state.raw_video_path,
+            ):
+                return
             try:
                 if not isinstance(value, PreprocessResult):
                     raise TypeError("Preprocess task returned an unexpected result type.")
@@ -319,11 +340,18 @@ class RunPreprocessController:
                 on_complete(value)
 
         def handle_error(exc: BaseException) -> None:
+            if not self.task_coordinator.belongs_to_current_inputs(
+                context,
+                project_dir=self.state.project_dir,
+                raw_video_path=self.state.raw_video_path,
+            ):
+                return
             self.record_task_failure(exc, mark_task_finished=False)
             if on_error is not None:
                 on_error(exc)
 
         def handle_finished() -> None:
+            self.task_coordinator.finish(context)
             self._finish_task()
             self._set_stage("Finished", on_stage)
             if on_finished is not None:
@@ -333,11 +361,13 @@ class RunPreprocessController:
             task_runner.start(
                 lambda: self.execute_request(request),
                 task_name="preprocessing pipeline",
+                context=context,
                 on_success=handle_success,
                 on_error=handle_error,
                 on_finished=handle_finished,
             )
         except BaseException as exc:
+            self.task_coordinator.finish(context)
             self.record_task_failure(exc)
             if isinstance(exc, TaskAlreadyRunningError):
                 raise self._validation_error(str(exc)) from exc

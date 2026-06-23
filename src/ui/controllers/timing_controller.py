@@ -10,7 +10,7 @@ from typing import NoReturn
 
 import numpy as np
 
-from preprocess.exceptions import PreprocessError
+from preprocess.exceptions import PreprocessError, VideoProbeCancelledError
 from preprocess.mat_sync_reader import (
     convert_timing_vector_to_seconds,
     get_numeric_vector,
@@ -27,6 +27,12 @@ from preprocess.models import (
 )
 from preprocess.video_probe import probe_video
 from ui.state import PreprocessSetupState, RawReadableCountStatus, TimingMode
+from ui.tasks import (
+    GuiTaskContext,
+    GuiTaskCoordinator,
+    GuiTaskKind,
+    TaskAlreadyRunningError,
+)
 
 WorkspaceLoader = Callable[[Path], MatWorkspace]
 CandidateLister = Callable[[MatWorkspace], list[MatVectorCandidate]]
@@ -79,6 +85,7 @@ class TimingController:
         timing_validator: TimingValidator = validate_external_timing_vector,
         timing_converter: TimingConverter = convert_timing_vector_to_seconds,
         probe_function: Callable[..., VideoProbeResult] = probe_video,
+        task_coordinator: GuiTaskCoordinator | None = None,
     ) -> None:
         self.state = state
         self._workspace_loader = workspace_loader
@@ -87,6 +94,7 @@ class TimingController:
         self._timing_validator = timing_validator
         self._timing_converter = timing_converter
         self._probe_function = probe_function
+        self.task_coordinator = task_coordinator or GuiTaskCoordinator()
         self._workspace: MatWorkspace | None = None
         reusable_count = self.reusable_raw_frame_count()
         if (
@@ -102,6 +110,7 @@ class TimingController:
             and self.state.raw_readable_count_status
             in {
                 RawReadableCountStatus.COUNTED_THIS_SESSION,
+                RawReadableCountStatus.RECORDED_PRIOR_RUN,
                 RawReadableCountStatus.RECOUNTING,
                 RawReadableCountStatus.RECOUNT_FAILED,
             }
@@ -273,6 +282,26 @@ class TimingController:
             ) from exc
         return self.apply_full_raw_frame_count(result)
 
+    def begin_full_raw_frame_count(
+        self,
+        *,
+        force_recount: bool = False,
+    ) -> tuple[Path, GuiTaskContext]:
+        """Prepare and register one non-duplicated GUI count task."""
+
+        previous_status = self.state.raw_readable_count_status
+        path = self.prepare_full_raw_frame_count(force_recount=force_recount)
+        try:
+            context = self.task_coordinator.begin(
+                task_kind=GuiTaskKind.RAW_SEQUENTIAL_COUNT,
+                project_dir=self.state.project_dir,
+                raw_video_path=path,
+            )
+        except TaskAlreadyRunningError:
+            self.state.raw_readable_count_status = previous_status
+            raise
+        return path, context
+
     def prepare_full_raw_frame_count(self, *, force_recount: bool = False) -> Path:
         """Validate a sequential-count request before dispatching a worker."""
 
@@ -305,14 +334,39 @@ class TimingController:
         self.state.last_validation_error = None
         return raw_path
 
-    def compute_full_raw_frame_count(self, path: Path) -> VideoProbeResult:
+    def compute_full_raw_frame_count(
+        self,
+        path: Path,
+        context: GuiTaskContext | None = None,
+    ) -> VideoProbeResult:
         """Run a full raw-video probe without mutating GUI state."""
 
-        return self._probe_function(path, require_sequential_count=True)
+        arguments: dict[str, object] = {"require_sequential_count": True}
+        if context is not None:
+            arguments["cancellation_requested"] = (
+                context.is_cancellation_requested
+            )
+        return self._probe_function(path, **arguments)
 
-    def apply_full_raw_frame_count(self, result: VideoProbeResult) -> int:
+    def apply_full_raw_frame_count(
+        self,
+        result: VideoProbeResult,
+        *,
+        context: GuiTaskContext | None = None,
+    ) -> int | None:
         """Apply a completed full raw-video count on the GUI thread."""
 
+        if context is not None:
+            if not self._task_belongs_to_current_inputs(context):
+                return None
+            if context.cancellation_requested:
+                self.state.raw_readable_count_status = (
+                    RawReadableCountStatus.COUNT_CANCELLED
+                )
+                self.state.last_validation_error = (
+                    "Raw readable-frame count cancelled."
+                )
+                return None
         raw_path = self.state.raw_video_path
         if raw_path is None or not _same_video_source(raw_path, result.source_path):
             self._count_result_failure(
@@ -335,9 +389,22 @@ class TimingController:
         self.state.last_validation_error = None
         return readable_count
 
-    def record_full_raw_frame_count_failure(self, exc: BaseException) -> None:
+    def record_full_raw_frame_count_failure(
+        self,
+        exc: BaseException,
+        *,
+        context: GuiTaskContext | None = None,
+    ) -> bool:
         """Convert a worker-delivered failure into controller timing state."""
 
+        if context is not None and not self._task_belongs_to_current_inputs(context):
+            return False
+        if isinstance(exc, VideoProbeCancelledError):
+            self.state.raw_readable_count_status = (
+                RawReadableCountStatus.COUNT_CANCELLED
+            )
+            self.state.last_validation_error = "Raw readable-frame count cancelled."
+            return True
         recount_failed = (
             self.state.raw_readable_count_status
             is RawReadableCountStatus.RECOUNTING
@@ -357,7 +424,7 @@ class TimingController:
                  else "Could not count readable raw frames: ")
                 + str(exc)
             )
-            return
+            return True
         if not recount_failed:
             self._clear_timing_after_count_failure(status="error")
         self.state.last_validation_error = (
@@ -368,6 +435,26 @@ class TimingController:
         )
         self.state.unexpected_error_detail = "".join(
             traceback.format_exception(type(exc), exc, exc.__traceback__)
+        )
+        return True
+
+    def finish_task(self, context: GuiTaskContext) -> None:
+        """Release a completed GUI task identity."""
+
+        self.task_coordinator.finish(context)
+
+    def _task_is_current(self, context: GuiTaskContext) -> bool:
+        return self.task_coordinator.is_current(
+            context,
+            project_dir=self.state.project_dir,
+            raw_video_path=self.state.raw_video_path,
+        )
+
+    def _task_belongs_to_current_inputs(self, context: GuiTaskContext) -> bool:
+        return self.task_coordinator.belongs_to_current_inputs(
+            context,
+            project_dir=self.state.project_dir,
+            raw_video_path=self.state.raw_video_path,
         )
 
     def validate_selected_timing(self) -> ExternalTimeSelection:

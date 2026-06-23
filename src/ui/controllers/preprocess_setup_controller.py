@@ -15,7 +15,7 @@ from preprocess.config import (
     TrimConfig,
     load_preprocess_config,
 )
-from preprocess.exceptions import PreprocessError
+from preprocess.exceptions import PreprocessError, VideoProbeCancelledError
 from preprocess.models import VideoProbeResult
 from preprocess.pre_crop import PreCropMode, ResolvedPreCrop, resolve_pre_crop
 from preprocess.service import resolve_trim_range
@@ -24,12 +24,14 @@ from project.models import Project
 from project.paths import get_preprocess_dir
 from project.service import ProjectService
 from project.validation import ProjectError
+from ui.project_hydration import ProjectHydrationResult, load_project_hydration
 from ui.state import (
     PreprocessSetupState,
     RawReadableCountStatus,
     TimingMode,
     WorkflowStep,
 )
+from ui.tasks import GuiTaskContext, GuiTaskCoordinator, GuiTaskKind
 
 ConfigLoader = Callable[[Path], PreprocessConfig]
 PreCropResolver = Callable[[PreCropConfig, tuple[int, int]], ResolvedPreCrop]
@@ -58,12 +60,14 @@ class PreprocessSetupController:
         probe_function: Callable[..., VideoProbeResult] = probe_video,
         config_loader: ConfigLoader = load_preprocess_config,
         pre_crop_resolver: PreCropResolver = resolve_pre_crop,
+        task_coordinator: GuiTaskCoordinator | None = None,
     ) -> None:
         self.state = state or PreprocessSetupState()
         self._project_service = project_service or ProjectService()
         self._probe_function = probe_function
         self._config_loader = config_loader
         self._pre_crop_resolver = pre_crop_resolver
+        self.task_coordinator = task_coordinator or GuiTaskCoordinator()
 
     @staticmethod
     def default_config_path() -> Path:
@@ -112,6 +116,10 @@ class PreprocessSetupController:
         except (ProjectError, OSError, ValueError) as exc:
             self._validation_failure(f"Could not create project: {exc}", exc)
         self._set_project(project)
+        self.state.project_hydration_status = "new_project"
+        self.state.project_hydration_message = (
+            "New project created; no prior preprocessing metadata is expected."
+        )
         return project
 
     def open_project(self, project_dir: Path) -> Project:
@@ -122,25 +130,149 @@ class PreprocessSetupController:
         except (ProjectError, OSError, ValueError) as exc:
             self._validation_failure(f"Could not open project: {exc}", exc)
         self._set_project(project)
+        self._apply_project_hydration(
+            load_project_hydration(get_preprocess_dir(project))
+        )
         return project
 
     def _set_project(self, project: Project) -> None:
+        self.cancel_active_input_tasks()
         self.state.project = project
         self.state.project_dir = project.root_dir
         self.state.preprocess_dir = get_preprocess_dir(project)
+        self.state.project_hydration_status = "not_checked"
+        self.state.project_hydration_message = None
+        self.state.prior_run_status = None
         self.state.raw_video_path = None
         self.state.raw_probe = None
         self.state.raw_readable_count_status = RawReadableCountStatus.NOT_COUNTED
+        config = self.state.preprocess_config
+        self.state.start_frame = (
+            (config.trim.start_frame or 0) if config is not None else None
+        )
+        self.state.end_frame_exclusive = (
+            config.trim.end_frame if config is not None else None
+        )
+        self.state.pre_crop_config = config.pre_crop if config is not None else None
         self.state.resolved_pre_crop = None
         self.state.trim_pre_crop_valid = False
         self.state.invalidate_crop_review("Project changed; crop review is required.")
         self._reset_timing_state()
         self.state.last_validation_error = None
 
+    def _apply_project_hydration(self, result: ProjectHydrationResult) -> None:
+        """Apply compact prior-run context without restoring crop acceptance."""
+
+        self.state.project_hydration_status = result.status
+        self.state.project_hydration_message = result.message
+        self.state.prior_run_status = result.prior_run_status
+        self.state.raw_video_path = result.raw_video_path
+        self.state.raw_probe = result.raw_probe
+        self.state.raw_readable_count_status = (
+            RawReadableCountStatus.RECORDED_PRIOR_RUN
+            if result.raw_count_recorded_by_prior_run
+            else RawReadableCountStatus.NOT_COUNTED
+        )
+        if result.start_frame is not None:
+            self.state.start_frame = result.start_frame
+        self.state.end_frame_exclusive = result.end_frame_exclusive
+        if result.pre_crop_config is not None:
+            self.state.pre_crop_config = result.pre_crop_config
+        self.state.resolved_pre_crop = result.resolved_pre_crop
+        self.state.trim_pre_crop_valid = (
+            result.prior_run_status == "passed"
+            and result.raw_probe is not None
+            and result.start_frame is not None
+            and result.pre_crop_config is not None
+            and result.resolved_pre_crop is not None
+        )
+        config = self.state.preprocess_config
+        if (
+            config is not None
+            and result.start_frame is not None
+            and result.pre_crop_config is not None
+        ):
+            hydrated_config = PreprocessConfig.model_validate(
+                {
+                    **config.model_dump(mode="python"),
+                    "trim": TrimConfig(
+                        start_frame=result.start_frame,
+                        end_frame=result.end_frame_exclusive,
+                    ),
+                    "pre_crop": result.pre_crop_config,
+                }
+            )
+            self.state.store_preprocess_config(hydrated_config)
+        self.state.candidate_crop_plan = None
+        self.state.accepted_crop_plan = None
+        self.state.crop_review_status = (
+            "Prior run context loaded; crop review is required for a new run."
+        )
+        self.state.last_validation_error = None
+
+    def cancel_active_input_tasks(self) -> tuple[GuiTaskContext, ...]:
+        """Cancel probe/count work and invalidate all prior task generations."""
+
+        return self.task_coordinator.invalidate_inputs()
+
+    def request_current_input_task_cancellation(
+        self,
+    ) -> tuple[GuiTaskContext, ...]:
+        """Cancel current probe/count work while retaining the input generation."""
+
+        return self.task_coordinator.request_input_cancellation()
+
+    def cancel_all_tasks(self) -> tuple[GuiTaskContext, ...]:
+        """Request cooperative cancellation during application shutdown."""
+
+        return self.task_coordinator.request_all_cancellation()
+
+    def begin_task(
+        self,
+        task_kind: GuiTaskKind,
+        *,
+        raw_video_path: Path | None = None,
+    ) -> GuiTaskContext:
+        """Create a task identity for the current project and raw video."""
+
+        return self.task_coordinator.begin(
+            task_kind=task_kind,
+            project_dir=self.state.project_dir,
+            raw_video_path=(
+                raw_video_path
+                if raw_video_path is not None
+                else self.state.raw_video_path
+            ),
+        )
+
+    def task_is_current(self, context: GuiTaskContext) -> bool:
+        """Return whether a worker result still belongs to current inputs."""
+
+        return self.task_coordinator.is_current(
+            context,
+            project_dir=self.state.project_dir,
+            raw_video_path=self.state.raw_video_path,
+        )
+
+    def task_belongs_to_current_inputs(self, context: GuiTaskContext) -> bool:
+        """Return whether a task generation/identity still matches current inputs."""
+
+        return self.task_coordinator.belongs_to_current_inputs(
+            context,
+            project_dir=self.state.project_dir,
+            raw_video_path=self.state.raw_video_path,
+        )
+
+    def finish_task(self, context: GuiTaskContext) -> None:
+        """Release a completed task identity."""
+
+        self.task_coordinator.finish(context)
+
     def set_raw_video_path(self, path: Path) -> Path:
         """Store a selected raw-video path and invalidate downstream setup."""
 
         selected = Path(path).expanduser()
+        self.cancel_active_input_tasks()
         self.state.raw_video_path = selected
         self.state.raw_probe = None
         self.state.raw_readable_count_status = RawReadableCountStatus.NOT_COUNTED
@@ -154,6 +286,7 @@ class PreprocessSetupController:
     def clear_raw_video_path(self) -> None:
         """Clear an edited raw-video path and all dependent workflow state."""
 
+        self.cancel_active_input_tasks()
         self.state.raw_video_path = None
         self.state.raw_probe = None
         self.state.raw_readable_count_status = RawReadableCountStatus.NOT_COUNTED
@@ -193,24 +326,48 @@ class PreprocessSetupController:
         self,
         path: Path,
         require_sequential_count: bool,
+        context: GuiTaskContext | None = None,
     ) -> VideoProbeResult:
         """Run the core probe without mutating GUI state (worker-safe)."""
 
-        return self._probe_function(
-            path,
-            require_sequential_count=require_sequential_count,
-        )
+        arguments: dict[str, object] = {
+            "require_sequential_count": require_sequential_count,
+        }
+        if context is not None:
+            arguments["cancellation_requested"] = (
+                context.is_cancellation_requested
+            )
+        return self._probe_function(path, **arguments)
 
-    def apply_raw_video_probe(self, result: VideoProbeResult) -> VideoProbeResult:
+    def apply_raw_video_probe(
+        self,
+        result: VideoProbeResult,
+        *,
+        context: GuiTaskContext | None = None,
+    ) -> VideoProbeResult | None:
         """Apply a completed raw-video probe on the GUI thread."""
 
+        if context is not None:
+            if not self.task_belongs_to_current_inputs(context):
+                return None
+            if context.cancellation_requested:
+                self.state.raw_readable_count_status = (
+                    RawReadableCountStatus.COUNT_CANCELLED
+                )
+                self.state.last_validation_error = (
+                    "Raw readable-frame count cancelled."
+                )
+                return None
         previous_probe = self.state.raw_probe
+        previous_count_status = self.state.raw_readable_count_status
+        count_was_preserved = False
         if (
             result.frame_count_opencv_readable is None
             and previous_probe is not None
             and previous_probe.frame_count_opencv_readable is not None
             and _same_video_source(previous_probe.source_path, result.source_path)
         ):
+            count_was_preserved = True
             result = VideoProbeResult.model_validate(
                 {
                     **result.model_dump(mode="python"),
@@ -221,14 +378,14 @@ class PreprocessSetupController:
             )
         self.state.raw_video_path = result.source_path
         self.state.raw_probe = result
-        self.state.raw_readable_count_status = (
-            RawReadableCountStatus.COUNTED_THIS_SESSION
-            if (
-                result.frame_count_opencv_readable is not None
-                and result.frame_count_opencv_readable > 0
+        if result.frame_count_opencv_readable is None:
+            self.state.raw_readable_count_status = RawReadableCountStatus.NOT_COUNTED
+        elif count_was_preserved:
+            self.state.raw_readable_count_status = previous_count_status
+        else:
+            self.state.raw_readable_count_status = (
+                RawReadableCountStatus.COUNTED_THIS_SESSION
             )
-            else RawReadableCountStatus.NOT_COUNTED
-        )
         self.state.resolved_pre_crop = None
         self.state.trim_pre_crop_valid = False
         self.state.invalidate_crop_review("Raw video probe changed; crop review is required.")
@@ -236,16 +393,46 @@ class PreprocessSetupController:
         self.state.last_validation_error = None
         return result
 
-    def record_raw_video_probe_failure(self, exc: BaseException) -> str:
+    def record_raw_video_probe_failure(
+        self,
+        exc: BaseException,
+        *,
+        context: GuiTaskContext | None = None,
+    ) -> str | None:
         """Record a worker-delivered raw probe failure and return concise text."""
 
-        self.state.raw_probe = None
-        self.state.raw_readable_count_status = RawReadableCountStatus.NOT_COUNTED
-        self.state.resolved_pre_crop = None
-        self.state.trim_pre_crop_valid = False
-        self.state.invalidate_crop_review("Raw video probe failed.")
+        if context is not None and not self.task_belongs_to_current_inputs(context):
+            return None
+        if isinstance(exc, VideoProbeCancelledError):
+            self.state.raw_readable_count_status = (
+                RawReadableCountStatus.COUNT_CANCELLED
+            )
+            self.state.last_validation_error = "Raw readable-frame count cancelled."
+            return self.state.last_validation_error
+        recount_failed = (
+            self.state.raw_readable_count_status
+            is RawReadableCountStatus.RECOUNTING
+            and self.state.raw_probe is not None
+            and self.state.raw_probe.frame_count_opencv_readable is not None
+            and self.state.raw_probe.frame_count_opencv_readable > 0
+        )
+        if recount_failed:
+            self.state.raw_readable_count_status = (
+                RawReadableCountStatus.RECOUNT_FAILED
+            )
+        else:
+            self.state.raw_probe = None
+            self.state.raw_readable_count_status = RawReadableCountStatus.NOT_COUNTED
+            self.state.resolved_pre_crop = None
+            self.state.trim_pre_crop_valid = False
+            self.state.invalidate_crop_review("Raw video probe failed.")
         if isinstance(exc, (PreprocessError, OSError, ValueError)):
-            message = f"Could not probe raw video: {exc}"
+            message = (
+                "Readable raw-frame recount failed; the existing verified count "
+                f"was retained: {exc}"
+                if recount_failed
+                else f"Could not probe raw video: {exc}"
+            )
         else:
             self.record_unexpected_error(exc)
             message = "An unexpected error occurred while probing the raw video."

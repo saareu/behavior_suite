@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from preprocess.exceptions import PreprocessError
+from preprocess.exceptions import PreprocessError, VideoProbeCancelledError
 from preprocess.models import TimingUnit
 from ui.controllers.preprocess_setup_controller import PreprocessSetupController
 from ui.controllers.timing_controller import (
@@ -32,7 +32,7 @@ from ui.controllers.timing_controller import (
     TimingValidationError,
 )
 from ui.state import RawReadableCountStatus, TimingMode
-from ui.tasks import GuiTaskRunner, TaskAlreadyRunningError
+from ui.tasks import GuiTaskContext, GuiTaskRunner, TaskAlreadyRunningError
 
 _TABLE_HEADERS = (
     "Variable",
@@ -54,11 +54,15 @@ class TimingPage(QWidget):
     status_message = Signal(str)
     error_message = Signal(str)
     unexpected_error = Signal(str)
+    raw_probe_changed = Signal()
 
     def __init__(self, setup_controller: PreprocessSetupController) -> None:
         super().__init__()
         self.setup_controller = setup_controller
-        self.controller = TimingController(setup_controller.state)
+        self.controller = TimingController(
+            setup_controller.state,
+            task_coordinator=setup_controller.task_coordinator,
+        )
         self.task_runner = GuiTaskRunner(self)
         self._refreshing = False
 
@@ -274,46 +278,75 @@ class TimingPage(QWidget):
             self._show_expected_error(str(exc))
 
     def _count_raw_frames(self) -> None:
+        context: GuiTaskContext | None = None
         try:
             force_recount = self.controller.raw_frame_count_action() == "recount"
-            path = self.controller.prepare_full_raw_frame_count(
+            path, context = self.controller.begin_full_raw_frame_count(
                 force_recount=force_recount
             )
             self._set_busy(True)
             self.task_runner.start(
-                lambda: self.controller.compute_full_raw_frame_count(path),
+                lambda: self.controller.compute_full_raw_frame_count(path, context),
                 task_name=(
                     "sequential raw-frame recount"
                     if force_recount
                     else "sequential raw-frame count"
                 ),
-                on_success=self._raw_count_succeeded,
-                on_error=self._raw_count_failed,
-                on_finished=lambda: self._set_busy(False),
+                context=context,
+                on_success=lambda result: self._raw_count_succeeded(result, context),
+                on_error=lambda exc: self._raw_count_failed(exc, context),
+                on_finished=lambda: self._raw_count_finished(context),
             )
         except (TimingValidationError, TaskAlreadyRunningError) as exc:
+            if context is not None and not self.task_runner.is_running:
+                self.controller.finish_task(context)
             self._set_busy(False)
             self._show_expected_error(str(exc))
         except Exception as exc:
+            if context is not None and not self.task_runner.is_running:
+                self.controller.finish_task(context)
             self._set_busy(False)
             self._show_unexpected(exc)
 
-    def _raw_count_succeeded(self, result: object) -> None:
+    def _raw_count_succeeded(
+        self,
+        result: object,
+        context: GuiTaskContext,
+    ) -> None:
         try:
-            count = self.controller.apply_full_raw_frame_count(result)
+            count = self.controller.apply_full_raw_frame_count(
+                result,
+                context=context,
+            )
         except TimingValidationError as exc:
             self._show_expected_error(str(exc))
             return
         except Exception as exc:
             self._show_unexpected(exc)
             return
+        if count is None:
+            return
         self.error_label.clear()
         self.refresh_from_state()
         self.status_message.emit(f"Sequential readable-frame count completed: {count}.")
         self.validity_changed.emit()
 
-    def _raw_count_failed(self, exc: BaseException) -> None:
-        self.controller.record_full_raw_frame_count_failure(exc)
+    def _raw_count_failed(
+        self,
+        exc: BaseException,
+        context: GuiTaskContext,
+    ) -> None:
+        applied = self.controller.record_full_raw_frame_count_failure(
+            exc,
+            context=context,
+        )
+        if not applied:
+            return
+        if isinstance(exc, VideoProbeCancelledError):
+            self.refresh_from_state()
+            self.status_message.emit("Raw readable-frame count cancelled.")
+            self.validity_changed.emit()
+            return
         if isinstance(exc, (PreprocessError, OSError, ValueError)):
             self._show_expected_error(
                 self.controller.state.last_validation_error
@@ -325,6 +358,12 @@ class TimingPage(QWidget):
                     "An unexpected error occurred while counting readable raw frames."
                 )
             )
+
+    def _raw_count_finished(self, context: GuiTaskContext) -> None:
+        self.controller.finish_task(context)
+        self._set_busy(False)
+        self.refresh_from_state()
+        self.raw_probe_changed.emit()
 
     def _set_busy(self, busy: bool) -> None:
         self.busy_indicator.setVisible(busy)
@@ -387,21 +426,31 @@ class TimingPage(QWidget):
         }
         controls_blocked = busy or count_active
         if readable_count is not None:
-            status_lines = [
-                f"Verified readable raw-frame count: {readable_count:,}",
-                "Source: counted during this GUI session",
-            ]
             if status is RawReadableCountStatus.RECOUNTING:
-                status_lines.append("Diagnostic recount in progress…")
+                count_status = "Raw sequential readable-frame count: Recounting…"
             elif status is RawReadableCountStatus.RECOUNT_FAILED:
-                status_lines.append(
-                    "Diagnostic recount failed; the existing verified count is retained."
+                count_status = (
+                    "Raw sequential readable-frame count:\n"
+                    "Recount failed; existing verified count retained"
                 )
-            self.raw_count_status.setText("\n".join(status_lines))
+            elif status is RawReadableCountStatus.COUNT_CANCELLED:
+                count_status = "Raw sequential readable-frame count: Count cancelled"
+            elif status is RawReadableCountStatus.RECORDED_PRIOR_RUN:
+                count_status = (
+                    "Raw sequential readable-frame count:\n"
+                    "Recorded by prior completed preprocessing run: "
+                    f"{readable_count:,}"
+                )
+            else:
+                count_status = (
+                    "Raw sequential readable-frame count:\n"
+                    f"Verified during this GUI session: {readable_count:,}"
+                )
+            self.raw_count_status.setText(count_status)
             self.raw_count_explanation.setText(
-                "The verified same-session count is reused automatically for exact "
-                "TTL validation. A diagnostic recount decodes the entire video again "
-                "and may take substantial time."
+                "This source-matched sequential count is reused automatically for "
+                "exact TTL validation. A diagnostic recount decodes the entire video "
+                "again and may take substantial time."
             )
             self.count_button.setText("Recount Readable Raw Frames")
             self.validate_button.setEnabled(not controls_blocked and is_matlab)
@@ -410,8 +459,10 @@ class TimingPage(QWidget):
                 count_status = "Full sequential readable-frame count in progress…"
             elif status is RawReadableCountStatus.COUNT_FAILED:
                 count_status = "Readable raw-frame count failed."
+            elif status is RawReadableCountStatus.COUNT_CANCELLED:
+                count_status = "Raw sequential readable-frame count: Count cancelled"
             else:
-                count_status = "Readable raw-frame count: not yet counted."
+                count_status = "Raw sequential readable-frame count: Not measured"
             self.raw_count_status.setText(count_status)
             self.raw_count_explanation.setText(
                 "Exact TTL timing validation requires a full sequential readable-frame "

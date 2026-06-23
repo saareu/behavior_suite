@@ -37,7 +37,10 @@ class RunValidatePage(QWidget):
     def __init__(self, setup_controller: PreprocessSetupController) -> None:
         super().__init__()
         self.setup_controller = setup_controller
-        self.controller = RunPreprocessController(setup_controller.state)
+        self.controller = RunPreprocessController(
+            setup_controller.state,
+            task_coordinator=setup_controller.task_coordinator,
+        )
         self.task_runner = GuiTaskRunner(self)
 
         title = QLabel("Run and Validate")

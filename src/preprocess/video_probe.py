@@ -6,12 +6,13 @@ import json
 import math
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import cv2
 
-from preprocess.exceptions import VideoProbeError
+from preprocess.exceptions import VideoProbeCancelledError, VideoProbeError
 from preprocess.models import VideoProbeResult
 
 _FFPROBE_TIMEOUT_SECONDS = 30
@@ -149,7 +150,11 @@ def get_opencv_reported_frame_count(path: Path) -> int:
     return int(value)
 
 
-def count_opencv_readable_frames(path: Path) -> int:
+def count_opencv_readable_frames(
+    path: Path,
+    *,
+    cancellation_requested: Callable[[], bool] | None = None,
+) -> int:
     """Sequentially decode a video from the first frame and return the count.
 
     Raises:
@@ -160,6 +165,10 @@ def count_opencv_readable_frames(path: Path) -> int:
     readable_count = 0
     try:
         while True:
+            if cancellation_requested is not None and cancellation_requested():
+                raise VideoProbeCancelledError(
+                    f"Raw readable-frame count was cancelled for video: {path}"
+                )
             success, _frame = capture.read()
             if not success:
                 break
@@ -171,7 +180,12 @@ def count_opencv_readable_frames(path: Path) -> int:
     return readable_count
 
 
-def probe_video(path: Path, require_sequential_count: bool) -> VideoProbeResult:
+def probe_video(
+    path: Path,
+    require_sequential_count: bool,
+    *,
+    cancellation_requested: Callable[[], bool] | None = None,
+) -> VideoProbeResult:
     """Probe a readable video with OpenCV and ffprobe when available.
 
     OpenCV readability is mandatory. ffprobe failure is captured in the result
@@ -183,6 +197,8 @@ def probe_video(path: Path, require_sequential_count: bool) -> VideoProbeResult:
             frame can be decoded.
     """
 
+    if cancellation_requested is not None and cancellation_requested():
+        raise VideoProbeCancelledError(f"Raw-video probe was cancelled for: {path}")
     video_path = _validate_video_path(path)
     capture = _open_video(video_path)
     try:
@@ -200,9 +216,12 @@ def probe_video(path: Path, require_sequential_count: bool) -> VideoProbeResult:
         if math.isfinite(reported_count_value) and reported_count_value > 0
         else 0
     )
-    readable_count = (
-        count_opencv_readable_frames(video_path) if require_sequential_count else None
-    )
+    readable_count = None
+    if require_sequential_count:
+        readable_count = count_opencv_readable_frames(
+            video_path,
+            cancellation_requested=cancellation_requested,
+        )
 
     ffprobe_metadata: dict[str, Any] | None = None
     ffprobe_error: str | None = None

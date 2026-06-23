@@ -19,12 +19,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from preprocess.exceptions import PreprocessError
+from preprocess.exceptions import PreprocessError, VideoProbeCancelledError
 from ui.controllers.preprocess_setup_controller import (
     PreprocessSetupController,
     SetupValidationError,
 )
-from ui.tasks import GuiTaskRunner, TaskAlreadyRunningError
+from ui.state import RawReadableCountStatus
+from ui.tasks import (
+    GuiTaskContext,
+    GuiTaskKind,
+    GuiTaskRunner,
+    TaskAlreadyRunningError,
+)
 
 
 class RawVideoPage(QWidget):
@@ -34,6 +40,7 @@ class RawVideoPage(QWidget):
     status_message = Signal(str)
     error_message = Signal(str)
     unexpected_error = Signal(str)
+    raw_probe_changed = Signal()
 
     def __init__(self, controller: PreprocessSetupController) -> None:
         super().__init__()
@@ -67,7 +74,7 @@ class RawVideoPage(QWidget):
             "source": QLabel("—"),
             "size": QLabel("—"),
             "reported": QLabel("—"),
-            "readable": QLabel("Not counted"),
+            "readable": QLabel("Not measured"),
             "ffprobe_count": QLabel("—"),
             "fps": QLabel("—"),
             "codec": QLabel("—"),
@@ -77,7 +84,10 @@ class RawVideoPage(QWidget):
         summary_form.addRow("Source path", self.summary_values["source"])
         summary_form.addRow("Dimensions", self.summary_values["size"])
         summary_form.addRow("OpenCV-reported frames", self.summary_values["reported"])
-        summary_form.addRow("OpenCV-readable frames", self.summary_values["readable"])
+        summary_form.addRow(
+            "Raw sequential readable-frame count",
+            self.summary_values["readable"],
+        )
         summary_form.addRow("ffprobe frames", self.summary_values["ffprobe_count"])
         summary_form.addRow("FPS", self.summary_values["fps"])
         summary_form.addRow("Codec", self.summary_values["codec"])
@@ -117,8 +127,9 @@ class RawVideoPage(QWidget):
         """Refresh the selected path and any existing probe summary."""
 
         state = self.controller.state
-        if state.raw_video_path is not None:
-            self.video_path.setText(str(state.raw_video_path))
+        self.video_path.setText(
+            str(state.raw_video_path) if state.raw_video_path is not None else ""
+        )
         self._refresh_summary()
 
     def _browse_video(self) -> None:
@@ -161,40 +172,82 @@ class RawVideoPage(QWidget):
             self._show_unexpected(exc)
 
     def _probe_video_in_background(self) -> None:
+        context: GuiTaskContext | None = None
         try:
             path = self.controller.prepare_raw_video_probe(Path(self.video_path.text()))
+            context = self.controller.begin_task(
+                GuiTaskKind.RAW_SEQUENTIAL_COUNT,
+                raw_video_path=path,
+            )
+            self.controller.state.raw_readable_count_status = (
+                RawReadableCountStatus.RECOUNTING
+                if self.controller.state.raw_probe is not None
+                and self.controller.state.raw_probe.frame_count_opencv_readable
+                else RawReadableCountStatus.COUNTING
+            )
             self._set_busy(True)
             self.task_runner.start(
-                lambda: self.controller.compute_raw_video_probe(path, True),
+                lambda: self.controller.compute_raw_video_probe(path, True, context),
                 task_name="full raw-video probe",
-                on_success=self._raw_probe_succeeded,
-                on_error=self._raw_probe_failed,
-                on_finished=lambda: self._set_busy(False),
+                context=context,
+                on_success=lambda result: self._raw_probe_succeeded(result, context),
+                on_error=lambda exc: self._raw_probe_failed(exc, context),
+                on_finished=lambda: self._raw_probe_finished(context),
             )
         except (SetupValidationError, TaskAlreadyRunningError) as exc:
+            if context is not None and not self.task_runner.is_running:
+                self.controller.finish_task(context)
             self._set_busy(False)
             self._show_expected_error(str(exc))
         except Exception as exc:
+            if context is not None and not self.task_runner.is_running:
+                self.controller.finish_task(context)
             self._set_busy(False)
             self._show_unexpected(exc)
 
-    def _raw_probe_succeeded(self, result: object) -> None:
+    def _raw_probe_succeeded(
+        self,
+        result: object,
+        context: GuiTaskContext,
+    ) -> None:
         try:
-            self.controller.apply_raw_video_probe(result)
+            applied = self.controller.apply_raw_video_probe(result, context=context)
         except Exception as exc:
             self._show_unexpected(exc)
+            return
+        if applied is None:
             return
         self.error_label.clear()
         self._refresh_summary()
         self.status_message.emit("Raw video probe and sequential count completed.")
         self.validity_changed.emit()
 
-    def _raw_probe_failed(self, exc: BaseException) -> None:
-        message = self.controller.record_raw_video_probe_failure(exc)
+    def _raw_probe_failed(
+        self,
+        exc: BaseException,
+        context: GuiTaskContext,
+    ) -> None:
+        message = self.controller.record_raw_video_probe_failure(
+            exc,
+            context=context,
+        )
+        if message is None:
+            return
+        if isinstance(exc, VideoProbeCancelledError):
+            self._refresh_summary()
+            self.status_message.emit("Raw readable-frame count cancelled.")
+            self.validity_changed.emit()
+            return
         if isinstance(exc, (PreprocessError, OSError, ValueError)):
             self._show_expected_error(message)
         else:
             self._show_unexpected(exc)
+
+    def _raw_probe_finished(self, context: GuiTaskContext) -> None:
+        self.controller.finish_task(context)
+        self._set_busy(False)
+        self._refresh_summary()
+        self.raw_probe_changed.emit()
 
     def _set_busy(self, busy: bool) -> None:
         self.busy_indicator.setVisible(busy)
@@ -202,22 +255,24 @@ class RawVideoPage(QWidget):
         self.probe_button.setEnabled(not busy)
         self.full_count.setEnabled(not busy)
         self.video_path.setEnabled(not busy)
+        self._refresh_summary()
 
     def _refresh_summary(self) -> None:
         probe = self.controller.state.raw_probe
         if probe is None:
             for key, label in self.summary_values.items():
-                label.setText("Not counted" if key == "readable" else "—")
+                if key == "readable":
+                    label.setText(self._raw_count_text())
+                elif key == "source" and self.controller.state.raw_video_path:
+                    label.setText(str(self.controller.state.raw_video_path))
+                else:
+                    label.setText("—")
             return
         fps = probe.raw_fps_effective or probe.opencv_fps
         self.summary_values["source"].setText(str(probe.source_path))
         self.summary_values["size"].setText(f"{probe.width} × {probe.height}")
         self.summary_values["reported"].setText(str(probe.frame_count_opencv_reported))
-        self.summary_values["readable"].setText(
-            str(probe.frame_count_opencv_readable)
-            if probe.frame_count_opencv_readable is not None
-            else "Not counted"
-        )
+        self.summary_values["readable"].setText(self._raw_count_text())
         self.summary_values["ffprobe_count"].setText(
             str(probe.frame_count_ffprobe)
             if probe.frame_count_ffprobe is not None
@@ -228,6 +283,25 @@ class RawVideoPage(QWidget):
         self.summary_values["duration"].setText(
             f"{probe.duration_sec:.3f} s" if probe.duration_sec is not None else "Unavailable"
         )
+
+    def _raw_count_text(self) -> str:
+        state = self.controller.state
+        probe = state.raw_probe
+        count = probe.frame_count_opencv_readable if probe is not None else None
+        status = state.raw_readable_count_status
+        if status is RawReadableCountStatus.COUNTING:
+            return "Counting…"
+        if status is RawReadableCountStatus.RECOUNTING:
+            return "Recounting…"
+        if status is RawReadableCountStatus.RECOUNT_FAILED:
+            return "Recount failed; existing verified count retained"
+        if status is RawReadableCountStatus.COUNT_CANCELLED:
+            return "Count cancelled"
+        if count is not None and count > 0:
+            if status is RawReadableCountStatus.RECORDED_PRIOR_RUN:
+                return f"Recorded by prior completed preprocessing run: {count:,}"
+            return f"Verified during this GUI session: {count:,}"
+        return "Not measured"
 
     def _show_expected_error(self, message: str) -> None:
         self.error_label.setText(message)

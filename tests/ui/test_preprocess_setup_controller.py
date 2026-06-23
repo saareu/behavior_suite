@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from ui.controllers.preprocess_setup_controller import (
     SetupValidationError,
 )
 from ui.state import RawReadableCountStatus, WorkflowStep
+from ui.tasks import GuiTaskKind
 
 
 def _probe_result(path: Path, *, readable_count: int | None = None) -> VideoProbeResult:
@@ -68,6 +70,51 @@ def _ready_controller(
     return controller
 
 
+def _write_prepare_metadata(
+    project_dir: Path,
+    raw_path: Path,
+    *,
+    readable_count: int | None,
+    start_frame: int = 3,
+) -> Path:
+    metadata = {
+        "schema_version": "prepare_meta_v1",
+        "raw_video": {
+            "source_path": str(raw_path),
+            "width": 100,
+            "height": 80,
+            "codec": "mjpeg",
+            "pixel_format": "yuvj420p",
+            "duration_sec": 2.0,
+            "avg_frame_rate": "10/1",
+            "r_frame_rate": "10/1",
+            "time_base": "1/10",
+            "frame_count_ffprobe": 20,
+            "frame_count_opencv_reported": 20,
+            "frame_count_opencv_readable": readable_count,
+            "fps_effective": 10.0,
+            "fps_effective_method": "ffprobe_avg_frame_rate",
+            "pts_status": "not_extracted",
+        },
+        "trim": {
+            "start_frame": start_frame,
+            "end_frame_exclusive": 18,
+            "end_frame_semantics": "exclusive",
+            "expected_trimmed_frame_count": 15,
+        },
+        "pre_crop": {
+            "enabled": False,
+            "mode": "none",
+            "roi": {"x": 0, "y": 0, "width": 100, "height": 80},
+            "raw_size_wh": [100, 80],
+        },
+        "validation": {"status": "passed"},
+    }
+    path = project_dir / "preprocess" / "prepare_meta.json"
+    path.write_text(json.dumps(metadata), encoding="utf-8")
+    return path
+
+
 def test_create_project_updates_gui_state(tmp_path: Path) -> None:
     controller = _controller_with_probe()
 
@@ -88,6 +135,86 @@ def test_open_project_updates_gui_state(tmp_path: Path) -> None:
     assert opened == project
     assert controller.state.project_dir == project.root_dir
     assert controller.state.preprocess_dir == project.root_dir / "preprocess"
+
+
+def test_open_completed_project_hydrates_raw_path_trim_and_pre_crop(
+    tmp_path: Path,
+) -> None:
+    project = ProjectService().create_project(tmp_path, "HydratedProject")
+    raw_path = tmp_path / "recorded_raw.avi"
+    _write_prepare_metadata(project.root_dir, raw_path, readable_count=20)
+    controller = _controller_with_probe()
+
+    controller.open_project(project.root_dir)
+
+    assert controller.state.raw_video_path == raw_path
+    assert controller.state.start_frame == 3
+    assert controller.state.end_frame_exclusive == 18
+    assert controller.state.pre_crop_config is not None
+    assert controller.state.pre_crop_config.mode == "none"
+    assert controller.state.resolved_pre_crop is not None
+    assert controller.state.accepted_crop_plan is None
+    assert controller.state.prior_run_status == "passed"
+
+
+def test_open_completed_project_restores_prior_run_raw_count_provenance(
+    tmp_path: Path,
+) -> None:
+    project = ProjectService().create_project(tmp_path, "CountedProject")
+    raw_path = tmp_path / "recorded_raw.avi"
+    _write_prepare_metadata(project.root_dir, raw_path, readable_count=20)
+    controller = _controller_with_probe()
+
+    controller.open_project(project.root_dir)
+
+    assert controller.state.raw_probe is not None
+    assert controller.state.raw_probe.frame_count_opencv_readable == 20
+    assert (
+        controller.state.raw_readable_count_status
+        is RawReadableCountStatus.RECORDED_PRIOR_RUN
+    )
+
+
+def test_open_no_ttl_project_keeps_raw_sequential_count_not_measured(
+    tmp_path: Path,
+) -> None:
+    project = ProjectService().create_project(tmp_path, "NoTtlProject")
+    raw_path = tmp_path / "recorded_raw.avi"
+    _write_prepare_metadata(project.root_dir, raw_path, readable_count=None)
+    controller = _controller_with_probe()
+
+    controller.open_project(project.root_dir)
+
+    assert controller.state.raw_probe is not None
+    assert controller.state.raw_probe.frame_count_opencv_readable is None
+    assert (
+        controller.state.raw_readable_count_status
+        is RawReadableCountStatus.NOT_COUNTED
+    )
+
+
+@pytest.mark.parametrize("metadata_contents", [None, "{not-json"])
+def test_missing_or_malformed_project_metadata_is_nonfatal(
+    tmp_path: Path,
+    metadata_contents: str | None,
+) -> None:
+    project = ProjectService().create_project(tmp_path, "NonfatalMetadataProject")
+    if metadata_contents is not None:
+        (project.root_dir / "preprocess" / "prepare_meta.json").write_text(
+            metadata_contents,
+            encoding="utf-8",
+        )
+    controller = _controller_with_probe()
+
+    opened = controller.open_project(project.root_dir)
+
+    assert opened == project
+    assert controller.state.project is not None
+    assert controller.state.project_hydration_status in {
+        "metadata_absent",
+        "metadata_invalid",
+    }
+    assert controller.state.project_hydration_message
 
 
 def test_invalid_project_is_rejected(tmp_path: Path) -> None:
@@ -205,6 +332,71 @@ def test_same_source_metadata_reprobe_preserves_sequential_count(
         controller.state.raw_readable_count_status
         is RawReadableCountStatus.COUNTED_THIS_SESSION
     )
+
+
+def test_changing_raw_video_cancels_task_and_discards_stale_result(
+    tmp_path: Path,
+) -> None:
+    controller = _ready_controller(tmp_path)
+    old_path = controller.state.raw_video_path
+    assert old_path is not None
+    context = controller.begin_task(
+        GuiTaskKind.RAW_SEQUENTIAL_COUNT,
+        raw_video_path=old_path,
+    )
+    stale_result = _probe_result(old_path, readable_count=20)
+
+    new_path = tmp_path / "new_raw.avi"
+    controller.set_raw_video_path(new_path)
+    applied = controller.apply_raw_video_probe(stale_result, context=context)
+
+    assert context.cancellation_requested is True
+    assert applied is None
+    assert controller.state.raw_video_path == new_path
+    assert controller.state.raw_probe is None
+
+
+def test_changing_project_cancels_task_and_discards_stale_result(
+    tmp_path: Path,
+) -> None:
+    controller = _ready_controller(tmp_path)
+    old_path = controller.state.raw_video_path
+    assert old_path is not None
+    context = controller.begin_task(
+        GuiTaskKind.RAW_SEQUENTIAL_COUNT,
+        raw_video_path=old_path,
+    )
+    stale_result = _probe_result(old_path, readable_count=20)
+    replacement = ProjectService().create_project(tmp_path, "ReplacementProject")
+
+    controller.open_project(replacement.root_dir)
+    applied = controller.apply_raw_video_probe(stale_result, context=context)
+
+    assert context.cancellation_requested is True
+    assert applied is None
+    assert controller.state.project == replacement
+    assert controller.state.raw_probe is None
+
+
+def test_current_generation_count_result_updates_shared_probe_immediately(
+    tmp_path: Path,
+) -> None:
+    controller = _ready_controller(tmp_path)
+    raw_path = controller.state.raw_video_path
+    assert raw_path is not None
+    context = controller.begin_task(
+        GuiTaskKind.RAW_SEQUENTIAL_COUNT,
+        raw_video_path=raw_path,
+    )
+
+    applied = controller.apply_raw_video_probe(
+        _probe_result(raw_path, readable_count=20),
+        context=context,
+    )
+
+    assert applied is not None
+    assert controller.state.raw_probe is applied
+    assert controller.state.raw_probe.frame_count_opencv_readable == 20
 
 
 @pytest.mark.parametrize(

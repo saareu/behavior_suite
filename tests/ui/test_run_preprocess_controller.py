@@ -28,6 +28,7 @@ from ui.controllers.run_preprocess_controller import (
 )
 from ui.controllers.timing_controller import TimingController
 from ui.state import PreprocessSetupState, TimingMode
+from ui.tasks import GuiTaskContext
 
 
 def _config() -> PreprocessConfig:
@@ -162,11 +163,12 @@ class _ImmediateRunner:
         operation: Callable[[], Any],
         *,
         task_name: str = "background task",
+        context: GuiTaskContext | None = None,
         on_success: Callable[[Any], None] | None = None,
         on_error: Callable[[BaseException], None] | None = None,
         on_finished: Callable[[], None] | None = None,
     ) -> None:
-        del task_name
+        del context, task_name
         self.operations.append(operation)
         try:
             value = operation()

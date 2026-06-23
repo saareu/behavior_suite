@@ -35,7 +35,12 @@ from ui.controllers.preprocess_setup_controller import (
     SetupValidationError,
 )
 from ui.state import CropReviewMode, WorkflowStep
-from ui.tasks import GuiTaskRunner, TaskAlreadyRunningError
+from ui.tasks import (
+    GuiTaskContext,
+    GuiTaskKind,
+    GuiTaskRunner,
+    TaskAlreadyRunningError,
+)
 from ui.widgets.crop_overlay_view import CropOverlayView
 from ui.widgets.video_frame_view import VideoFrameView
 
@@ -393,25 +398,38 @@ class CropReviewPage(QWidget):
             self._show_unexpected(exc)
 
     def _run_detection(self) -> None:
+        context: GuiTaskContext | None = None
         try:
             request = self.controller.begin_automatic_detection()
+            context = self.setup_controller.begin_task(GuiTaskKind.CAGE_DETECTION)
             self._set_busy(True)
             self.refresh_from_state()
             self.task_runner.start(
                 lambda: self.controller.compute_automatic_detection(request),
                 task_name="automatic cage detection",
-                on_success=self._detection_succeeded,
-                on_error=self._detection_failed,
-                on_finished=lambda: self._set_busy(False),
+                context=context,
+                on_success=lambda result: self._detection_succeeded(result, context),
+                on_error=lambda exc: self._detection_failed(exc, context),
+                on_finished=lambda: self._detection_finished(context),
             )
         except (CropReviewValidationError, TaskAlreadyRunningError) as exc:
+            if context is not None and not self.task_runner.is_running:
+                self.setup_controller.finish_task(context)
             self._set_busy(False)
             self._show_expected_error(str(exc))
         except Exception as exc:
+            if context is not None and not self.task_runner.is_running:
+                self.setup_controller.finish_task(context)
             self._set_busy(False)
             self._show_unexpected(exc)
 
-    def _detection_succeeded(self, result: object) -> None:
+    def _detection_succeeded(
+        self,
+        result: object,
+        context: GuiTaskContext,
+    ) -> None:
+        if not self.setup_controller.task_is_current(context):
+            return
         try:
             if not isinstance(result, CropReviewComputation):
                 raise TypeError("Automatic detection returned an unexpected result type.")
@@ -428,7 +446,13 @@ class CropReviewPage(QWidget):
             "Automatic crop candidate is ready for review; it is not accepted."
         )
 
-    def _detection_failed(self, exc: BaseException) -> None:
+    def _detection_failed(
+        self,
+        exc: BaseException,
+        context: GuiTaskContext,
+    ) -> None:
+        if not self.setup_controller.task_belongs_to_current_inputs(context):
+            return
         self.controller.record_automatic_detection_failure(exc)
         if isinstance(
             exc,
@@ -440,6 +464,10 @@ class CropReviewPage(QWidget):
             )
         else:
             self._show_unexpected(exc)
+
+    def _detection_finished(self, context: GuiTaskContext) -> None:
+        self.setup_controller.finish_task(context)
+        self._set_busy(False)
         self.refresh_from_state()
 
     def _settings_changed(self) -> None:
