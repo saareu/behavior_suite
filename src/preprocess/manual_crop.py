@@ -8,10 +8,12 @@ from pydantic import ValidationError
 
 from preprocess.config import CanonicalResolutionConfig
 from preprocess.crop_plan import (
+    PERSPECTIVE_REPROJECTION_ATOL_PX,
     CropMode,
     CropPlan,
     build_canonical_transform,
     build_clockwise_rotation_transform,
+    build_perspective_homography,
     compute_native_rectified_size,
     validate_quad_tl_tr_br_bl,
 )
@@ -104,12 +106,40 @@ def _build_rectification_geometry(
             [rectified_width - 1.0, rectified_height - 1.0],
             [0.0, rectified_height - 1.0],
         ],
-        dtype=np.float32,
+        dtype=np.float64,
     )
-    homography_rectify = cv2.getPerspectiveTransform(
-        points_in_pre_crop.astype(np.float32),
-        destination,
+    points_float32 = points_in_pre_crop.astype(np.float32)
+    destination_float32 = destination.astype(np.float32)
+    legacy_homography = cv2.getPerspectiveTransform(
+        points_float32,
+        destination_float32,
     ).astype(np.float64)
+    homogeneous_points = np.column_stack(
+        [
+            points_in_pre_crop,
+            np.ones(points_in_pre_crop.shape[0], dtype=np.float64),
+        ]
+    )
+    legacy_destination = (legacy_homography @ homogeneous_points.T).T
+    legacy_destination = (
+        legacy_destination[:, :2] / legacy_destination[:, 2, np.newaxis]
+    )
+    if np.allclose(
+        legacy_destination,
+        destination,
+        rtol=0.0,
+        atol=PERSPECTIVE_REPROJECTION_ATOL_PX,
+    ):
+        # Preserve the established automatic/manual numeric parity when the
+        # legacy float32 solve already reproduces the authoritative points.
+        homography_rectify = legacy_homography
+    else:
+        # Avoid storing float64 points with a homography fitted to materially
+        # different float32 coordinates, which Stage A cannot reproduce.
+        homography_rectify = build_perspective_homography(
+            points_in_pre_crop,
+            destination,
+        )
     homography_rotate, output_size, rotated_90 = (
         build_clockwise_rotation_transform((rectified_width, rectified_height))
     )
@@ -160,23 +190,20 @@ def make_manual_crop_plan(
 
     homography_raw_to_pre_crop = build_pre_crop_translation_homography(roi)
     points_in_pre_crop = points - np.array([roi.x, roi.y], dtype=np.float64)
-    try:
-        homography_rectify, homography_rotate, native_size_wh, rotated_90 = (
-            _build_rectification_geometry(points_in_pre_crop)
+    homography_rectify, homography_rotate, native_size_wh, rotated_90 = (
+        _build_rectification_geometry(points_in_pre_crop)
+    )
+    canonical_size_wh = (
+        (canonical_resolution.width, canonical_resolution.height)
+        if canonical_resolution.enabled
+        else None
+    )
+    homography_canonical, canonical_geometry, output_size_wh = (
+        build_canonical_transform(
+            native_size_wh,
+            canonical_size_wh,
         )
-        canonical_size_wh = (
-            (canonical_resolution.width, canonical_resolution.height)
-            if canonical_resolution.enabled
-            else None
-        )
-        homography_canonical, canonical_geometry, output_size_wh = (
-            build_canonical_transform(
-                native_size_wh,
-                canonical_size_wh,
-            )
-        )
-    except cv2.error as exc:
-        raise CropPlanError(f"Could not compute manual crop homography: {exc}") from exc
+    )
 
     homography_raw_to_prepared = (
         homography_canonical

@@ -26,6 +26,15 @@ from project.service import ProjectService
 _RAW_FRAME_COUNT = 8
 _RAW_SIZE_WH = (64, 48)
 _RAW_FPS = 10.0
+_FRACTIONAL_PERSPECTIVE_POINTS = np.array(
+    [
+        [25.05680077762755, 20.132692876841816],
+        [276.7875596244743, 34.75081456266568],
+        [268.4005883911093, 201.01696844513665],
+        [32.9860241236059, 198.31592465770703],
+    ],
+    dtype=np.float64,
+)
 
 
 def _require_ffmpeg() -> tuple[Path, Path]:
@@ -67,6 +76,25 @@ def _crop_plan(config: PreprocessConfig, *, accepted: bool):
         canonical_resolution=config.prepare.canonical_resolution,
     )
     return plan.model_copy(update={"accepted_by_user": accepted})
+
+
+def _write_perspective_raw_video(path: Path, frame_count: int = 6) -> Path:
+    writer = cv2.VideoWriter(
+        str(path),
+        cv2.VideoWriter_fourcc(*"MJPG"),
+        _RAW_FPS,
+        (320, 240),
+    )
+    if not writer.isOpened():
+        pytest.skip("This OpenCV build cannot create an MJPG AVI fixture.")
+    try:
+        for index in range(frame_count):
+            frame = np.full((240, 320, 3), 35 + index * 10, dtype=np.uint8)
+            cv2.circle(frame, (60 + index * 12, 100), 8, (220, 40, 40), thickness=-1)
+            writer.write(frame)
+    finally:
+        writer.release()
+    return path
 
 
 @pytest.mark.integration
@@ -127,6 +155,74 @@ def test_complete_preprocess_service_run_produces_valid_official_artifacts(tmp_p
     log_text = outputs.processing_log_path.read_text(encoding="utf-8")
     assert "stage=ffmpeg_stage_a" in log_text
     assert "run completed status=success" in log_text
+    assert not list((outputs.preprocess_dir / ".internal").glob("*"))
+
+
+@pytest.mark.integration
+def test_manual_fractional_perspective_service_run_completes_all_stages(
+    tmp_path: Path,
+) -> None:
+    ffmpeg, ffprobe = _require_ffmpeg()
+    project = ProjectService().create_project(tmp_path, "ManualPerspectiveProject")
+    raw_path = _write_perspective_raw_video(tmp_path / "perspective_raw.avi")
+    config = PreprocessConfig(
+        prepare=PrepareConfig(
+            canonical_resolution=CanonicalResolutionConfig(
+                enabled=True,
+                width=192,
+                height=192,
+            )
+        ),
+        encoding={"ffmpeg": {"ffmpeg_path": ffmpeg, "ffprobe_path": ffprobe}},
+        background=BackgroundConfig(method="median", sample_every_n=1, max_samples=6),
+    )
+    crop_plan = make_manual_crop_plan(
+        raw_frame_shape=(240, 320),
+        points_tl_tr_br_bl=_FRACTIONAL_PERSPECTIVE_POINTS,
+        pre_crop_roi=(10, 10, 300, 220),
+        canonical_resolution=config.prepare.canonical_resolution,
+    ).model_copy(update={"accepted_by_user": True})
+    request = PreprocessRequest(
+        project_dir=project.root_dir,
+        raw_video_path=raw_path,
+        config=config,
+        start_frame=1,
+        end_frame_exclusive=5,
+        crop_plan=crop_plan,
+        crop_accepted_by_user=True,
+    )
+
+    result = PreprocessService().run(request)
+
+    assert result.success is True, result.message
+    assert result.outputs is not None
+    assert result.prepared_validation is not None
+    assert result.prepared_validation.is_valid is True
+    assert result.prepared_validation.opencv_readable_frame_count == 4
+    assert result.prepared_validation.opencv_reported_size_wh == crop_plan.prepared_size_wh
+    outputs = result.outputs
+    assert all(
+        path.is_file()
+        for path in (
+            outputs.prepared_video_path,
+            outputs.prepare_meta_path,
+            outputs.prepared_sync_path,
+            outputs.cropped_background_path,
+            outputs.settings_used_path,
+            outputs.processing_log_path,
+        )
+    )
+    sync = load_prepared_sync_npz(outputs.prepared_sync_path)
+    assert sync.raw_decode_frame_idx.tolist() == [1, 2, 3, 4]
+    assert sync.frame_count_used_for_sleap == 4
+    background = cv2.imread(str(outputs.cropped_background_path), cv2.IMREAD_UNCHANGED)
+    assert background is not None
+    validate_background(background, crop_plan.prepared_size_wh)
+    with outputs.prepare_meta_path.open("r", encoding="utf-8") as stream:
+        metadata = json.load(stream)
+    validate_prepare_metadata(metadata)
+    assert metadata["manual_crop"]["used"] is True
+    assert metadata["validation"]["status"] == "passed"
     assert not list((outputs.preprocess_dir / ".internal").glob("*"))
 
 

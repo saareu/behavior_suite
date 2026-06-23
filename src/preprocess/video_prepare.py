@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from preprocess.config import PreprocessConfig
 from preprocess.crop_plan import (
+    PERSPECTIVE_REPROJECTION_ATOL_PX,
     CanonicalGeometry,
     CropPlan,
     build_clockwise_rotation_transform,
@@ -32,7 +33,10 @@ from preprocess.validation import (
 )
 
 _BINARY_DIRECTORY_NAME = "bin"
-_GEOMETRY_ATOL = 1e-5
+# Stage A decomposes a composed float64 CropPlan transform. This local integer
+# tolerance admits only floating-point solve/composition noise; it is not a
+# tolerance on the user's raw quadrilateral or a license to alter crop geometry.
+_INTEGER_COORDINATE_ATOL_PX = 1e-5
 _SCALE_FLAG_MAP = {
     "linear": "bilinear",
     "cubic": "bicubic",
@@ -191,7 +195,12 @@ def _transform_points(homography: np.ndarray, points: np.ndarray) -> np.ndarray:
 
 def _integer_coordinate(name: str, value: float) -> int:
     rounded = int(round(value))
-    if not math.isclose(value, rounded, rel_tol=0.0, abs_tol=_GEOMETRY_ATOL):
+    if not math.isclose(
+        value,
+        rounded,
+        rel_tol=0.0,
+        abs_tol=_INTEGER_COORDINATE_ATOL_PX,
+    ):
         raise VideoPreparationError(
             f"CropPlan {name} coordinate must resolve to an integer pixel; got {value}."
         )
@@ -266,10 +275,13 @@ def _extract_rectification_geometry(
         destination,
         expected_destination,
         rtol=0.0,
-        atol=_GEOMETRY_ATOL,
+        atol=PERSPECTIVE_REPROJECTION_ATOL_PX,
     ):
+        maximum_error = float(np.max(np.abs(destination - expected_destination)))
         raise VideoPreparationError(
-            "CropPlan pre-rotation quadrilateral is not an axis-aligned rectangle."
+            "CropPlan homography cannot be reproduced by the Stage A "
+            "rectification path: transformed crop corners differ from the "
+            f"expected rectified rectangle by up to {maximum_error:.9g} pixels."
         )
 
     left_px = _integer_coordinate("rectified left", left)

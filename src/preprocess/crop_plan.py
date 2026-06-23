@@ -22,6 +22,7 @@ from preprocess.pre_crop import PreCropROI
 
 HOMOGRAPHY_INVERSE_RTOL = 1e-6
 HOMOGRAPHY_INVERSE_ATOL = 1e-6
+PERSPECTIVE_REPROJECTION_ATOL_PX = 1e-5
 QUAD_GEOMETRY_ATOL = 1e-9
 
 
@@ -138,6 +139,114 @@ def validate_quad_tl_tr_br_bl(value: Any) -> np.ndarray:
     _validate_quad_geometry(validated)
     validated.setflags(write=False)
     return validated
+
+
+def _normalize_homography_points(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Normalize points for a numerically stable float64 DLT solve."""
+
+    center = np.mean(points, axis=0)
+    centered = points - center
+    mean_distance = float(np.mean(np.linalg.norm(centered, axis=1)))
+    if not math.isfinite(mean_distance) or mean_distance <= np.finfo(np.float64).eps:
+        raise CropPlanError("Perspective points cannot define a stable homography.")
+    scale = math.sqrt(2.0) / mean_distance
+    normalization = np.array(
+        [
+            [scale, 0.0, -scale * center[0]],
+            [0.0, scale, -scale * center[1]],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    homogeneous = np.column_stack(
+        [points, np.ones(points.shape[0], dtype=np.float64)]
+    )
+    normalized_homogeneous = (normalization @ homogeneous.T).T
+    return normalized_homogeneous[:, :2], normalization
+
+
+def build_perspective_homography(
+    source_tl_tr_br_bl: np.ndarray,
+    destination_tl_tr_br_bl: np.ndarray,
+) -> np.ndarray:
+    """Fit an exact float64 four-corner perspective homography.
+
+    Both point sets remain in their validated TL, TR, BR, BL representation.
+    A normalized direct-linear-transform solve avoids OpenCV's float32-only
+    Python binding for ``getPerspectiveTransform`` and therefore keeps the
+    stored manual points and their authoritative homography in one numeric
+    representation.
+
+    Raises:
+        CropPlanError: If either point set is invalid or the correspondence does
+            not define one finite, invertible homography.
+    """
+
+    source = validate_quad_tl_tr_br_bl(source_tl_tr_br_bl)
+    destination = validate_quad_tl_tr_br_bl(destination_tl_tr_br_bl)
+    source_normalized, source_transform = _normalize_homography_points(source)
+    destination_normalized, destination_transform = _normalize_homography_points(
+        destination
+    )
+
+    equations: list[list[float]] = []
+    for (source_x, source_y), (destination_x, destination_y) in zip(
+        source_normalized,
+        destination_normalized,
+        strict=True,
+    ):
+        equations.append(
+            [
+                -source_x,
+                -source_y,
+                -1.0,
+                0.0,
+                0.0,
+                0.0,
+                destination_x * source_x,
+                destination_x * source_y,
+                destination_x,
+            ]
+        )
+        equations.append(
+            [
+                0.0,
+                0.0,
+                0.0,
+                -source_x,
+                -source_y,
+                -1.0,
+                destination_y * source_x,
+                destination_y * source_y,
+                destination_y,
+            ]
+        )
+    equation_matrix = np.asarray(equations, dtype=np.float64)
+    if np.linalg.matrix_rank(equation_matrix) < 8:
+        raise CropPlanError("Perspective points do not define a unique homography.")
+    try:
+        _left, _singular_values, right_transpose = np.linalg.svd(
+            equation_matrix,
+            full_matrices=True,
+        )
+        normalized_homography = right_transpose[-1].reshape(3, 3)
+        homography = (
+            np.linalg.inv(destination_transform)
+            @ normalized_homography
+            @ source_transform
+        )
+    except np.linalg.LinAlgError as exc:
+        raise CropPlanError("Could not solve the perspective homography.") from exc
+
+    scale = float(homography[2, 2])
+    if abs(scale) <= np.finfo(np.float64).eps:
+        scale = float(np.linalg.norm(homography))
+    if not math.isfinite(scale) or abs(scale) <= np.finfo(np.float64).eps:
+        raise CropPlanError("Perspective homography has an invalid numeric scale.")
+    homography = homography / scale
+    if not np.all(np.isfinite(homography)) or np.linalg.matrix_rank(homography) < 3:
+        raise CropPlanError("Perspective homography must be finite and invertible.")
+    return homography
 
 
 class CropPlan(BaseModel):

@@ -10,6 +10,7 @@ from preprocess.config import (
     PrepareConfig,
     PreprocessConfig,
 )
+from preprocess.crop_plan import CropPlan
 from preprocess.exceptions import VideoPreparationError
 from preprocess.manual_crop import make_manual_crop_plan
 from preprocess.video_prepare import (
@@ -56,6 +57,22 @@ def _portrait_plan(config: PreprocessConfig):
             [[0.0, 0.0], [239.0, 0.0], [239.0, 319.0], [0.0, 319.0]]
         ),
         pre_crop_roi=None,
+        canonical_resolution=config.prepare.canonical_resolution,
+    )
+
+
+def _fractional_perspective_plan(config: PreprocessConfig) -> CropPlan:
+    return make_manual_crop_plan(
+        raw_frame_shape=(240, 320),
+        points_tl_tr_br_bl=np.array(
+            [
+                [25.05680077762755, 20.132692876841816],
+                [276.7875596244743, 34.75081456266568],
+                [268.4005883911093, 201.01696844513665],
+                [32.9860241236059, 198.31592465770703],
+            ]
+        ),
+        pre_crop_roi=(10, 10, 300, 220),
         canonical_resolution=config.prepare.canonical_resolution,
     )
 
@@ -153,6 +170,39 @@ def test_filtergraph_applies_pre_crop_and_preserves_local_quad_metadata() -> Non
     assert "perspective=" in filtergraph
     assert metadata.pre_crop_roi_xywh == (40, 30, 240, 180)
     assert metadata.quad_pre_crop_tl_tr_br_bl[0] == (10.0, 20.0)
+
+
+def test_filtergraph_accepts_fractional_non_axis_aligned_manual_crop() -> None:
+    config = _config(canonical_size_wh=(192, 192))
+    plan = _fractional_perspective_plan(config)
+
+    filtergraph, metadata = build_prepare_filtergraph(plan, config)
+
+    assert "crop=300:220:10:10" in filtergraph
+    assert "perspective=" in filtergraph
+    assert metadata.rectified_content_size_wh == (254, 180)
+    assert metadata.rectification_padding_lrtb == (0, 0, 0, 0)
+    assert metadata.expected_output_size_wh == plan.prepared_size_wh == (192, 192)
+    assert metadata.quad_pre_crop_tl_tr_br_bl[0][1] != pytest.approx(
+        metadata.quad_pre_crop_tl_tr_br_bl[1][1]
+    )
+    assert metadata.quad_pre_crop_tl_tr_br_bl[1][0] != pytest.approx(
+        metadata.quad_pre_crop_tl_tr_br_bl[2][0]
+    )
+
+
+def test_filtergraph_rejects_crop_plan_homography_inconsistent_with_quad() -> None:
+    config = _config(canonical_size_wh=(192, 192))
+    plan = _fractional_perspective_plan(config)
+    malformed_forward = np.array(plan.H_raw_to_prepared_3x3, copy=True)
+    malformed_forward[0, 1] += 0.05
+    metadata = plan.to_metadata_dict()
+    metadata["H_raw_to_prepared_3x3"] = malformed_forward.tolist()
+    metadata["H_prepared_to_raw_3x3"] = np.linalg.inv(malformed_forward).tolist()
+    malformed_plan = CropPlan.from_metadata_dict(metadata)
+
+    with pytest.raises(VideoPreparationError, match="cannot be reproduced"):
+        build_prepare_filtergraph(malformed_plan, config)
 
 
 def test_canonical_enabled_uses_crop_plan_scale_and_centered_padding() -> None:

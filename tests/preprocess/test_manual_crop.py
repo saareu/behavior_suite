@@ -15,6 +15,15 @@ WIDE_POINTS = np.array(
         [100.0, 300.0],
     ]
 )
+FRACTIONAL_PERSPECTIVE_POINTS = np.array(
+    [
+        [25.05680077762755, 20.132692876841816],
+        [276.7875596244743, 34.75081456266568],
+        [268.4005883911093, 201.01696844513665],
+        [32.9860241236059, 198.31592465770703],
+    ],
+    dtype=np.float64,
+)
 
 
 def _canonical_config(
@@ -105,6 +114,40 @@ def test_pre_crop_is_retained_and_translation_is_composed() -> None:
         _transform_points(plan.H_raw_to_prepared_3x3, WIDE_POINTS),
         [[0.0, 0.0], [399.0, 0.0], [399.0, 199.0], [0.0, 199.0]],
         atol=1e-5,
+    )
+
+
+def test_fractional_perspective_points_and_homography_share_float64_geometry() -> None:
+    plan = make_manual_crop_plan(
+        raw_frame_shape=(240, 320),
+        points_tl_tr_br_bl=FRACTIONAL_PERSPECTIVE_POINTS,
+        pre_crop_roi=(10, 10, 300, 220),
+        canonical_resolution=_canonical_config(enabled=False),
+    )
+    expected_destination = np.array(
+        [[0.0, 0.0], [253.0, 0.0], [253.0, 179.0], [0.0, 179.0]]
+    )
+
+    np.testing.assert_array_equal(
+        plan.quad_raw_tl_tr_br_bl,
+        FRACTIONAL_PERSPECTIVE_POINTS,
+    )
+    assert not np.isclose(
+        plan.quad_raw_tl_tr_br_bl[0, 1],
+        plan.quad_raw_tl_tr_br_bl[1, 1],
+    )
+    assert not np.isclose(
+        plan.quad_raw_tl_tr_br_bl[1, 0],
+        plan.quad_raw_tl_tr_br_bl[2, 0],
+    )
+    np.testing.assert_allclose(
+        _transform_points(
+            plan.H_raw_to_prepared_3x3,
+            FRACTIONAL_PERSPECTIVE_POINTS,
+        ),
+        expected_destination,
+        rtol=0.0,
+        atol=1e-9,
     )
 
 
