@@ -26,6 +26,7 @@ from ui.pages.run_validate_page import RunValidatePage
 from ui.pages.timing_page import TimingPage
 from ui.pages.trim_precrop_page import TrimPreCropPage
 from ui.state import WORKFLOW_STEP_LABELS, WorkflowStep
+from ui.tasks import GuiTaskRunner
 
 
 class PreprocessWizard(QWidget):
@@ -69,6 +70,9 @@ class PreprocessWizard(QWidget):
             page.status_message.connect(self._set_status)
             page.error_message.connect(self._set_error)
             page.unexpected_error.connect(self.unexpected_error.emit)
+        self.project_page.project_changed.connect(self._refresh_probe_pages)
+        self.raw_video_page.raw_probe_changed.connect(self._refresh_probe_pages)
+        self.timing_page.raw_probe_changed.connect(self._refresh_probe_pages)
 
         self.status_label = QLabel("Select or create a project.")
         self.status_label.setWordWrap(True)
@@ -98,6 +102,31 @@ class PreprocessWizard(QWidget):
         """Display a startup configuration error without crashing the GUI."""
 
         self._set_error(message)
+
+    def request_task_cancellation(self) -> None:
+        """Request cooperative cancellation for tasks owned by wizard pages."""
+
+        self.controller.cancel_all_tasks()
+        for runner in self._task_runners():
+            runner.request_cancellation()
+
+    def has_running_tasks(self) -> bool:
+        """Return whether any wizard page still owns a worker thread."""
+
+        return any(runner.is_running for runner in self._task_runners())
+
+    def _task_runners(self) -> tuple[GuiTaskRunner, ...]:
+        return (
+            self.raw_video_page.task_runner,
+            self.timing_page.task_runner,
+            self.crop_review_page.task_runner,
+            self.run_validate_page.task_runner,
+        )
+
+    def _refresh_probe_pages(self) -> None:
+        self.raw_video_page.on_activated()
+        self.timing_page.refresh_from_state()
+        self._update_buttons()
 
     def _current_interactive_page(self):
         index = self.pages.currentIndex()
@@ -150,6 +179,7 @@ class PreprocessWizard(QWidget):
             return
         index = self.pages.currentIndex()
         if index > 0:
+            self.controller.request_current_input_task_cancellation()
             self._set_page(index - 1)
 
     def _set_page(self, index: int) -> None:

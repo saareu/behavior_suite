@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from preprocess import video_probe
-from preprocess.exceptions import VideoProbeError
+from preprocess.exceptions import VideoProbeCancelledError, VideoProbeError
 
 
 def _write_tiny_video(path: Path, frame_count: int = 5) -> Path:
@@ -85,3 +85,39 @@ def test_unreadable_video_raises_domain_error(tmp_path: Path) -> None:
 
     with pytest.raises(VideoProbeError, match="OpenCV"):
         video_probe.probe_video(unreadable_path, require_sequential_count=False)
+
+
+def test_sequential_count_cancellation_never_returns_partial_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCapture:
+        def __init__(self) -> None:
+            self.read_count = 0
+            self.released = False
+
+        def read(self) -> tuple[bool, np.ndarray]:
+            self.read_count += 1
+            return True, np.zeros((2, 2, 3), dtype=np.uint8)
+
+        def release(self) -> None:
+            self.released = True
+
+    capture = FakeCapture()
+    cancellation_checks = 0
+
+    def cancellation_requested() -> bool:
+        nonlocal cancellation_checks
+        cancellation_checks += 1
+        return cancellation_checks >= 4
+
+    monkeypatch.setattr(video_probe, "_open_video", lambda _path: capture)
+
+    with pytest.raises(VideoProbeCancelledError, match="cancelled"):
+        video_probe.count_opencv_readable_frames(
+            tmp_path / "raw.avi",
+            cancellation_requested=cancellation_requested,
+        )
+
+    assert capture.read_count == 3
+    assert capture.released is True

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import QTimer
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QMainWindow, QMessageBox
 
 from ui.controllers.preprocess_setup_controller import PreprocessSetupController
@@ -19,6 +21,7 @@ class MainWindow(QMainWindow):
         self.wizard = PreprocessWizard(controller)
         self.wizard.unexpected_error.connect(self._show_unexpected_error)
         self.setCentralWidget(self.wizard)
+        self._shutdown_requested = False
         self.statusBar().showMessage(
             "Full preprocessing setup, explicit crop acceptance, and validated Run are available."
         )
@@ -36,3 +39,18 @@ class MainWindow(QMainWindow):
             "An unexpected error occurred. Detailed information was preserved "
             f"for future logging.\n\n{message}",
         )
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Cancel cooperatively and keep Qt objects alive until workers exit."""
+
+        if self.wizard.has_running_tasks():
+            if not self._shutdown_requested:
+                self._shutdown_requested = True
+                self.wizard.request_task_cancellation()
+                self.statusBar().showMessage(
+                    "Cancelling background work before closing…"
+                )
+            event.ignore()
+            QTimer.singleShot(100, self.close)
+            return
+        super().closeEvent(event)
