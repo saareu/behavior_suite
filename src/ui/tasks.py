@@ -68,6 +68,7 @@ class GuiTaskProgressEvent:
     estimated_remaining_sec: float | None
     is_indeterminate: bool
     cancellation_requested: bool
+    processed_video_time_sec: float | None
 
 
 class GuiTaskProgressTracker:
@@ -88,17 +89,27 @@ class GuiTaskProgressTracker:
         self._clock = clock
         self._started_at = clock()
         self._samples: deque[tuple[float, int]] = deque(maxlen=5)
+        self._phase: str | None = None
+        self._phase_started_at_elapsed = 0.0
 
     def build(self, progress: OperationProgress) -> GuiTaskProgressEvent:
         """Build one GUI event without inventing progress unavailable from core."""
 
         elapsed = max(0.0, self._clock() - self._started_at)
+        if progress.phase != self._phase:
+            self._samples.clear()
+            self._phase = progress.phase
+            self._phase_started_at_elapsed = elapsed
         completed = progress.completed_units
         if completed is not None and (
             not self._samples or completed >= self._samples[-1][1]
         ):
             self._samples.append((elapsed, completed))
-        eta = self._estimate_remaining(progress, elapsed)
+        eta = self._estimate_remaining(
+            progress,
+            elapsed,
+            elapsed - self._phase_started_at_elapsed,
+        )
         return GuiTaskProgressEvent(
             task_id=self._context.task_id,
             task_kind=self._context.task_kind,
@@ -112,12 +123,14 @@ class GuiTaskProgressTracker:
             estimated_remaining_sec=eta,
             is_indeterminate=progress.is_indeterminate,
             cancellation_requested=self._context.cancellation_requested,
+            processed_video_time_sec=progress.processed_video_time_sec,
         )
 
     def _estimate_remaining(
         self,
         progress: OperationProgress,
         elapsed: float,
+        phase_elapsed: float,
     ) -> float | None:
         completed = progress.completed_units
         total = progress.total_units
@@ -128,7 +141,7 @@ class GuiTaskProgressTracker:
             or progress.is_indeterminate
             or completed >= total
             or completed < self._ETA_MIN_COMPLETED_UNITS
-            or elapsed < self._ETA_MIN_ELAPSED_SEC
+            or phase_elapsed < self._ETA_MIN_ELAPSED_SEC
             or len(self._samples) < self._ETA_RATE_INTERVALS + 1
         ):
             return None
@@ -188,6 +201,26 @@ def format_raw_count_progress(event: GuiTaskProgressEvent) -> str:
             f"{qualifier}{event.total_units:,}"
         )
     lines = [first_line, f"Elapsed: {format_task_duration(event.elapsed_sec)}"]
+    if event.estimated_remaining_sec is not None:
+        lines.append(
+            "Estimated remaining: "
+            f"{format_task_duration(event.estimated_remaining_sec)}"
+        )
+    return "\n".join(lines)
+
+
+def format_pipeline_progress(event: GuiTaskProgressEvent) -> str:
+    """Render pipeline details without fabricating units, totals, or ETA."""
+
+    lines: list[str] = []
+    if event.message != event.phase:
+        lines.append(event.message)
+    if event.processed_video_time_sec is not None:
+        lines.append(
+            "Processed video time: "
+            f"{format_task_duration(event.processed_video_time_sec)}"
+        )
+    lines.append(f"Elapsed: {format_task_duration(event.elapsed_sec)}")
     if event.estimated_remaining_sec is not None:
         lines.append(
             "Estimated remaining: "
@@ -262,6 +295,7 @@ class GuiTaskCoordinator:
                 GuiTaskKind.RAW_PROBE,
                 GuiTaskKind.RAW_SEQUENTIAL_COUNT,
                 GuiTaskKind.CAGE_DETECTION,
+                GuiTaskKind.PREPROCESS_RUN,
             }:
                 context.request_cancellation()
                 cancelled.append(context)
@@ -276,6 +310,7 @@ class GuiTaskCoordinator:
                 GuiTaskKind.RAW_PROBE,
                 GuiTaskKind.RAW_SEQUENTIAL_COUNT,
                 GuiTaskKind.CAGE_DETECTION,
+                GuiTaskKind.PREPROCESS_RUN,
             }:
                 context.request_cancellation()
                 cancelled.append(context)

@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import math
+import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import cv2
 from pydantic import BaseModel, ConfigDict
 
-from preprocess.exceptions import VideoValidationError
+from preprocess.exceptions import PreprocessCancelledError, VideoValidationError
+
+if TYPE_CHECKING:
+    from preprocess.models import OperationProgress
+
+_PROGRESS_FRAME_INTERVAL = 250
+_PROGRESS_TIME_INTERVAL_SEC = 0.25
 
 
 class PreparedVideoValidationResult(BaseModel):
@@ -109,6 +117,9 @@ def validate_prepared_video(
     prepared_video_path: Path,
     expected_frame_count: int,
     expected_size_wh: tuple[int, int],
+    *,
+    progress_callback: Callable[[OperationProgress], None] | None = None,
+    cancellation_requested: Callable[[], bool] | None = None,
 ) -> PreparedVideoValidationResult:
     """Validate final prepared-video count, geometry, and FPS using OpenCV.
 
@@ -122,6 +133,11 @@ def validate_prepared_video(
             exception's result attribute contains the populated invalid
             PreparedVideoValidationResult.
     """
+
+    if cancellation_requested is not None and cancellation_requested():
+        raise PreprocessCancelledError(
+            "Preprocessing cancelled during prepared-video validation."
+        )
 
     normalized_count, normalized_size, errors = _validate_expected_inputs(
         expected_frame_count,
@@ -171,8 +187,30 @@ def validate_prepared_video(
     reported_fps = _positive_reported_fps(capture.get(cv2.CAP_PROP_FPS))
     readable_count = 0
     decode_error: str | None = None
+    last_emitted_count = 0
+    last_emitted_at = time.perf_counter()
+
+    def emit(message: str) -> None:
+        if progress_callback is not None:
+            from preprocess.models import OperationProgress
+
+            progress_callback(
+                OperationProgress(
+                    phase="Validating prepared video",
+                    message=message,
+                    completed_units=readable_count,
+                    total_units=normalized_count,
+                    is_indeterminate=False,
+                )
+            )
+
+    emit(f"{readable_count:,} / {normalized_count:,} frames checked")
     try:
         while True:
+            if cancellation_requested is not None and cancellation_requested():
+                raise PreprocessCancelledError(
+                    "Preprocessing cancelled during prepared-video validation."
+                )
             try:
                 success, frame = capture.read()
             except cv2.error as exc:
@@ -184,6 +222,14 @@ def validate_prepared_video(
                 decode_error = "OpenCV reported a successful decode without a frame"
                 break
             readable_count += 1
+            now = time.perf_counter()
+            if (
+                readable_count - last_emitted_count >= _PROGRESS_FRAME_INTERVAL
+                or now - last_emitted_at >= _PROGRESS_TIME_INTERVAL_SEC
+            ):
+                emit(f"{readable_count:,} / {normalized_count:,} frames checked")
+                last_emitted_count = readable_count
+                last_emitted_at = now
     finally:
         capture.release()
 
@@ -224,6 +270,7 @@ def validate_prepared_video(
             expected_frame_count=normalized_count,
             expected_size_wh=normalized_size,
         )
+    emit(f"{readable_count:,} / {normalized_count:,} frames checked")
     return PreparedVideoValidationResult(
         is_valid=True,
         errors=(),

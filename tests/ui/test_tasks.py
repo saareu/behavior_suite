@@ -199,6 +199,7 @@ def test_progressive_task_returns_typed_progress_to_main_thread(
                 total_units=1000,
                 total_is_estimate=True,
                 is_indeterminate=False,
+                processed_video_time_sec=1.5,
             )
         )
         return 250
@@ -222,6 +223,7 @@ def test_progressive_task_returns_typed_progress_to_main_thread(
     assert event.total_units == 1000
     assert event.total_is_estimate is True
     assert event.is_indeterminate is False
+    assert event.processed_video_time_sec == pytest.approx(1.5)
 
 
 def test_progress_eta_is_hidden_until_rate_is_stable(tmp_path) -> None:
@@ -266,6 +268,43 @@ def test_progress_eta_is_hidden_until_rate_is_stable(tmp_path) -> None:
     assert stable.estimated_remaining_sec == pytest.approx(8.0)
     assert estimated_total.estimated_remaining_sec is None
     assert unknown_total.estimated_remaining_sec is None
+
+
+def test_progress_eta_rate_window_resets_between_pipeline_phases(tmp_path) -> None:
+    context = GuiTaskCoordinator().begin(
+        task_kind=GuiTaskKind.PREPROCESS_RUN,
+        project_dir=tmp_path,
+        raw_video_path=tmp_path / "raw.avi",
+    )
+    now = [0.0]
+    tracker = GuiTaskProgressTracker(context, clock=lambda: now[0])
+
+    def update(phase: str, completed: int) -> OperationProgress:
+        return OperationProgress(
+            phase=phase,
+            message=phase,
+            completed_units=completed,
+            total_units=1000,
+            is_indeterminate=False,
+        )
+
+    tracker.build(update("Stage A", 0))
+    now[0] = 1.0
+    tracker.build(update("Stage A", 100))
+    now[0] = 2.0
+    assert tracker.build(update("Stage A", 200)).estimated_remaining_sec is not None
+    now[0] = 3.0
+    first_stage_b = tracker.build(update("Stage B", 100))
+    now[0] = 4.0
+    tracker.build(update("Stage B", 200))
+    now[0] = 4.5
+    too_early_stage_b = tracker.build(update("Stage B", 250))
+    now[0] = 5.0
+    stable_stage_b = tracker.build(update("Stage B", 300))
+
+    assert first_stage_b.estimated_remaining_sec is None
+    assert too_early_stage_b.estimated_remaining_sec is None
+    assert stable_stage_b.estimated_remaining_sec is not None
 
 
 def test_coordinator_rejects_stale_progress_generation(tmp_path) -> None:

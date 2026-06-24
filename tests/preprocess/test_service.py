@@ -15,10 +15,15 @@ from preprocess.config import (
     TrimConfig,
 )
 from preprocess.crop_plan import CropMode
-from preprocess.exceptions import PreprocessServiceError, VideoPreparationError
+from preprocess.exceptions import (
+    PreprocessCancelledError,
+    PreprocessServiceError,
+    VideoPreparationError,
+)
 from preprocess.manual_crop import make_manual_crop_plan
 from preprocess.models import (
     ExternalTimeSelection,
+    PreprocessExecutionContext,
     PreprocessRequest,
     SoftwareEnvironmentInfo,
     TimingUnit,
@@ -451,3 +456,159 @@ def test_non_temporal_timing_is_not_convertible(
     sync = load_prepared_sync_npz(result.outputs.prepared_sync_path)
     assert sync.external_time_status == "not_convertible_to_seconds"
     assert np.all(np.isnan(sync.external_time_sec))
+
+
+def test_service_emits_pipeline_phases_in_required_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = _project(tmp_path)
+    raw_path = tmp_path / "raw.avi"
+    raw_path.write_bytes(b"raw")
+    _install_probe(monkeypatch, _probe(raw_path))
+    _install_fake_success_pipeline(monkeypatch, _validation())
+    progress = []
+
+    result = PreprocessService().run(
+        _request(project_dir, raw_path),
+        PreprocessExecutionContext(progress_callback=progress.append),
+    )
+
+    assert result.success is True
+    assert [event.phase for event in progress] == [
+        "Preparing preprocessing run",
+        "Stage A: preparing video geometry",
+        "Stage B: writing SLEAP-compatible video",
+        "Validating prepared video",
+        "Writing synchronization artifact",
+        "Generating cropped background",
+        "Writing metadata and settings",
+        "Validating final artifacts",
+        "Completed",
+    ]
+    phase_only = {
+        "Writing synchronization artifact",
+        "Writing metadata and settings",
+        "Validating final artifacts",
+    }
+    assert all(
+        event.completed_units is None
+        and event.total_units is None
+        and event.is_indeterminate
+        for event in progress
+        if event.phase in phase_only
+    )
+
+
+def test_stage_a_cancellation_writes_no_valid_official_output_set(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = _project(tmp_path)
+    raw_path = tmp_path / "raw.avi"
+    raw_path.write_bytes(b"raw")
+    _install_probe(monkeypatch, _probe(raw_path))
+
+    def cancel_stage_a(**arguments: Any) -> None:
+        Path(arguments["intermediate_path"]).write_bytes(b"partial")
+        raise PreprocessCancelledError("cancelled in Stage A")
+
+    monkeypatch.setattr(service_module, "run_ffmpeg_prepare", cancel_stage_a)
+
+    progress = []
+    result = PreprocessService().run(
+        _request(project_dir, raw_path),
+        PreprocessExecutionContext(progress_callback=progress.append),
+    )
+
+    preprocess_dir = project_dir / "preprocess"
+    assert result.success is False
+    assert result.cancelled is True
+    assert progress[-1].phase == "Cancelled"
+    assert not any(
+        (preprocess_dir / name).exists()
+        for name in (
+            "prepared_video.mp4",
+            "prepare_meta.json",
+            "prepared_sync.npz",
+            "cropped_background.png",
+            "settings_used.yaml",
+        )
+    )
+    assert "status=cancelled" in (
+        preprocess_dir / "processing_log.txt"
+    ).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("cancel_stage", ["validation", "background"])
+def test_cancellation_after_stage_b_never_marks_run_successful(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_stage: str,
+) -> None:
+    project_dir = _project(tmp_path)
+    raw_path = tmp_path / "raw.avi"
+    raw_path.write_bytes(b"raw")
+    _install_probe(monkeypatch, _probe(raw_path))
+    _install_fake_success_pipeline(monkeypatch, _validation())
+
+    if cancel_stage == "validation":
+        monkeypatch.setattr(
+            service_module,
+            "validate_prepared_video",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                PreprocessCancelledError("cancelled in validation")
+            ),
+        )
+    else:
+        monkeypatch.setattr(
+            service_module,
+            "estimate_prepared_background",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                PreprocessCancelledError("cancelled in background")
+            ),
+        )
+
+    result = PreprocessService().run(_request(project_dir, raw_path))
+
+    assert result.success is False
+    assert result.cancelled is True
+    assert result.outputs is None
+    assert not (project_dir / "preprocess" / "prepare_meta.json").exists()
+
+
+def test_cancelled_rerun_preserves_previous_successful_official_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = _project(tmp_path)
+    raw_path = tmp_path / "raw.avi"
+    raw_path.write_bytes(b"raw")
+    _install_probe(monkeypatch, _probe(raw_path))
+    _install_fake_success_pipeline(monkeypatch, _validation())
+    request = _request(project_dir, raw_path)
+    first = PreprocessService().run(request)
+    assert first.success is True
+    assert first.outputs is not None
+    protected_paths = (
+        first.outputs.prepared_video_path,
+        first.outputs.prepare_meta_path,
+        first.outputs.prepared_sync_path,
+        first.outputs.cropped_background_path,
+        first.outputs.settings_used_path,
+    )
+    protected_content = {path: path.read_bytes() for path in protected_paths}
+
+    def cancel_stage_b(**arguments: Any) -> None:
+        Path(arguments["prepared_video_path"]).write_bytes(b"partial replacement")
+        raise PreprocessCancelledError("cancelled in Stage B")
+
+    monkeypatch.setattr(
+        service_module,
+        "reencode_intermediate_with_opencv",
+        cancel_stage_b,
+    )
+    cancelled = PreprocessService().run(request)
+
+    assert cancelled.cancelled is True
+    assert {path: path.read_bytes() for path in protected_paths} == protected_content

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import math
 import os
+import queue
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import cv2
@@ -24,9 +27,11 @@ from preprocess.crop_plan import (
 )
 from preprocess.exceptions import (
     CropPlanError,
+    PreprocessCancelledError,
     VideoPreparationError,
     VideoValidationError,
 )
+from preprocess.models import OperationProgress
 from preprocess.validation import (
     PreparedVideoValidationResult,
     validate_prepared_video,
@@ -42,6 +47,9 @@ _SCALE_FLAG_MAP = {
     "cubic": "bicubic",
     "lanczos": "lanczos",
 }
+_PROGRESS_FRAME_INTERVAL = 250
+_PROGRESS_TIME_INTERVAL_SEC = 0.25
+_FFMPEG_TERMINATE_TIMEOUT_SEC = 2.0
 
 
 class FiltergraphMetadata(BaseModel):
@@ -86,6 +94,8 @@ class IntermediatePrepareResult(BaseModel):
     stdout: str
     stderr: str
     elapsed_sec: float = Field(ge=0.0)
+    frames_processed: int | None = Field(default=None, ge=0)
+    processed_video_time_sec: float | None = Field(default=None, ge=0.0)
 
 
 class FinalReencodeResult(BaseModel):
@@ -597,6 +607,9 @@ def build_ffmpeg_prepare_command(
         "-hide_banner",
         "-loglevel",
         "error",
+        "-progress",
+        "pipe:1",
+        "-nostats",
         "-n",
         "-fflags",
         "+genpts",
@@ -635,6 +648,65 @@ def _error_excerpt(stderr: str | None, limit: int = 2000) -> str:
     return detail[-limit:]
 
 
+def _ffmpeg_time_seconds(progress: dict[str, str]) -> float | None:
+    for key in ("out_time_us", "out_time_ms"):
+        value = progress.get(key)
+        if value is not None:
+            try:
+                microseconds = int(value)
+            except ValueError:
+                continue
+            if microseconds >= 0:
+                return microseconds / 1_000_000.0
+    value = progress.get("out_time")
+    if value is None:
+        return None
+    try:
+        hours_text, minutes_text, seconds_text = value.split(":", maxsplit=2)
+        seconds = (
+            int(hours_text) * 3600
+            + int(minutes_text) * 60
+            + float(seconds_text)
+        )
+    except (TypeError, ValueError):
+        return None
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
+
+
+def _ffmpeg_frame_count(progress: dict[str, str]) -> int | None:
+    value = progress.get("frame")
+    if value is None:
+        return None
+    try:
+        count = int(value)
+    except ValueError:
+        return None
+    return count if count >= 0 else None
+
+
+def _terminate_ffmpeg(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=_FFMPEG_TERMINATE_TIMEOUT_SEC)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=_FFMPEG_TERMINATE_TIMEOUT_SEC)
+
+
+def _drain_text_stream(
+    stream_name: str,
+    stream,
+    events: queue.Queue[tuple[str, str | None]],
+) -> None:
+    try:
+        for line in stream:
+            events.put((stream_name, line))
+    finally:
+        events.put((stream_name, None))
+
+
 def run_ffmpeg_prepare(
     raw_video_path: Path,
     intermediate_path: Path,
@@ -642,6 +714,10 @@ def run_ffmpeg_prepare(
     config: PreprocessConfig,
     start_frame: int,
     end_frame_exclusive: int | None,
+    *,
+    expected_frame_count: int | None = None,
+    progress_callback: Callable[[OperationProgress], None] | None = None,
+    cancellation_requested: Callable[[], bool] | None = None,
 ) -> IntermediatePrepareResult:
     """Run ffmpeg Stage A and return its command, geometry, and diagnostics.
 
@@ -683,23 +759,130 @@ def run_ffmpeg_prepare(
         start_frame,
         end_frame_exclusive,
     )
+    if expected_frame_count is not None and (
+        isinstance(expected_frame_count, bool)
+        or not isinstance(expected_frame_count, int)
+        or expected_frame_count <= 0
+    ):
+        raise VideoPreparationError(
+            "expected_frame_count must be a positive integer when supplied."
+        )
+    if cancellation_requested is not None and cancellation_requested():
+        raise PreprocessCancelledError(
+            "Preprocessing cancelled during Stage A ffmpeg preparation."
+        )
+
     started = time.perf_counter()
+    process: subprocess.Popen[str] | None = None
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    latest_progress: dict[str, str] = {}
+    frames_processed: int | None = None
+    processed_video_time_sec: float | None = None
+
+    def emit() -> None:
+        if progress_callback is None:
+            return
+        message_parts: list[str] = []
+        if frames_processed is not None:
+            if expected_frame_count is None:
+                message_parts.append(f"{frames_processed:,} frames processed")
+            else:
+                message_parts.append(
+                    f"{frames_processed:,} / {expected_frame_count:,} frames processed"
+                )
+        progress_callback(
+            OperationProgress(
+                phase="Stage A: preparing video geometry",
+                message="; ".join(message_parts) or "ffmpeg is processing video geometry",
+                completed_units=frames_processed,
+                total_units=(
+                    expected_frame_count if frames_processed is not None else None
+                ),
+                is_indeterminate=(
+                    frames_processed is None or expected_frame_count is None
+                ),
+                processed_video_time_sec=processed_video_time_sec,
+            )
+        )
+
+    emit()
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            check=False,
+            bufsize=1,
         )
     except OSError as exc:
         raise VideoPreparationError(f"Could not execute ffmpeg: {exc}") from exc
+    assert process.stdout is not None
+    assert process.stderr is not None
+    events: queue.Queue[tuple[str, str | None]] = queue.Queue()
+    readers = (
+        threading.Thread(
+            target=_drain_text_stream,
+            args=("stdout", process.stdout, events),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=_drain_text_stream,
+            args=("stderr", process.stderr, events),
+            daemon=True,
+        ),
+    )
+    for reader in readers:
+        reader.start()
+    closed_streams: set[str] = set()
+    try:
+        while process.poll() is None or len(closed_streams) < 2:
+            if cancellation_requested is not None and cancellation_requested():
+                _terminate_ffmpeg(process)
+                raise PreprocessCancelledError(
+                    "Preprocessing cancelled during Stage A ffmpeg preparation."
+                )
+            try:
+                stream_name, line = events.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if line is None:
+                closed_streams.add(stream_name)
+                continue
+            if stream_name == "stderr":
+                stderr_lines.append(line)
+                continue
+            stdout_lines.append(line)
+            text = line.strip()
+            if "=" not in text:
+                continue
+            key, value = text.split("=", maxsplit=1)
+            latest_progress[key] = value
+            if key != "progress":
+                continue
+            frames_processed = _ffmpeg_frame_count(latest_progress)
+            processed_video_time_sec = _ffmpeg_time_seconds(latest_progress)
+            emit()
+            latest_progress.clear()
+    except BaseException:
+        _terminate_ffmpeg(process)
+        output_path.unlink(missing_ok=True)
+        raise
+    finally:
+        for reader in readers:
+            reader.join(timeout=1.0)
+        process.stdout.close()
+        process.stderr.close()
+
     elapsed_sec = time.perf_counter() - started
-    if completed.returncode != 0:
+    return_code = process.wait()
+    if return_code != 0:
+        output_path.unlink(missing_ok=True)
         rendered_command = subprocess.list2cmdline(command)
         raise VideoPreparationError(
             "ffmpeg preparation failed with exit code "
-            f"{completed.returncode}. Command: {rendered_command}. "
-            f"Error: {_error_excerpt(completed.stderr)}"
+            f"{return_code}. Command: {rendered_command}. "
+            f"Error: {_error_excerpt(''.join(stderr_lines))}"
         )
     if not output_path.is_file():
         raise VideoPreparationError(
@@ -714,10 +897,12 @@ def run_ffmpeg_prepare(
         expected_output_size_wh=crop_plan.prepared_size_wh,
         start_frame=start_frame,
         end_frame_exclusive=end_frame_exclusive,
-        return_code=completed.returncode,
-        stdout=completed.stdout or "",
-        stderr=completed.stderr or "",
+        return_code=return_code,
+        stdout="".join(stdout_lines),
+        stderr="".join(stderr_lines),
         elapsed_sec=elapsed_sec,
+        frames_processed=frames_processed,
+        processed_video_time_sec=processed_video_time_sec,
     )
 
 
@@ -786,6 +971,10 @@ def reencode_intermediate_with_opencv(
     output_fps: float,
     output_size_wh: tuple[int, int],
     config: PreprocessConfig,
+    *,
+    expected_frame_count: int | None = None,
+    progress_callback: Callable[[OperationProgress], None] | None = None,
+    cancellation_requested: Callable[[], bool] | None = None,
 ) -> FinalReencodeResult:
     """Sequentially re-encode an ffmpeg intermediate through OpenCV.
 
@@ -804,6 +993,18 @@ def reencode_intermediate_with_opencv(
 
     fps = _validate_stage_b_fps(output_fps)
     expected_size = _validate_stage_b_geometry(output_size_wh)
+    if expected_frame_count is not None and (
+        isinstance(expected_frame_count, bool)
+        or not isinstance(expected_frame_count, int)
+        or expected_frame_count <= 0
+    ):
+        raise VideoPreparationError(
+            "expected_frame_count must be a positive integer when supplied."
+        )
+    if cancellation_requested is not None and cancellation_requested():
+        raise PreprocessCancelledError(
+            "Preprocessing cancelled during Stage B OpenCV re-encoding."
+        )
     intermediate_path = Path(intermediate_video_path).expanduser()
     if not intermediate_path.is_file():
         raise VideoPreparationError(
@@ -834,6 +1035,25 @@ def reencode_intermediate_with_opencv(
     capture: cv2.VideoCapture | None = None
     writer: cv2.VideoWriter | None = None
     frames_written = 0
+    last_emitted_count = 0
+    last_emitted_at = time.perf_counter()
+
+    def emit(message: str) -> None:
+        if progress_callback is not None:
+            progress_callback(
+                OperationProgress(
+                    phase="Stage B: writing SLEAP-compatible video",
+                    message=message,
+                    completed_units=frames_written,
+                    total_units=expected_frame_count,
+                    is_indeterminate=expected_frame_count is None,
+                )
+            )
+
+    if expected_frame_count is None:
+        emit("0 frames written")
+    else:
+        emit(f"0 / {expected_frame_count:,} frames written")
     try:
         capture = cv2.VideoCapture(str(intermediate_path))
         if not capture.isOpened():
@@ -854,6 +1074,10 @@ def reencode_intermediate_with_opencv(
             )
 
         while True:
+            if cancellation_requested is not None and cancellation_requested():
+                raise PreprocessCancelledError(
+                    "Preprocessing cancelled during Stage B OpenCV re-encoding."
+                )
             try:
                 success, frame = capture.read()
             except cv2.error as exc:
@@ -880,6 +1104,20 @@ def reencode_intermediate_with_opencv(
                     f"OpenCV failed while writing prepared frame {frames_written}: {exc}"
                 ) from exc
             frames_written += 1
+            now = time.perf_counter()
+            if (
+                frames_written - last_emitted_count >= _PROGRESS_FRAME_INTERVAL
+                or now - last_emitted_at >= _PROGRESS_TIME_INTERVAL_SEC
+            ):
+                if expected_frame_count is None:
+                    message = f"{frames_written:,} frames written"
+                else:
+                    message = (
+                        f"{frames_written:,} / {expected_frame_count:,} frames written"
+                    )
+                emit(message)
+                last_emitted_count = frames_written
+                last_emitted_at = now
     except cv2.error as exc:
         raise VideoPreparationError(
             f"OpenCV could not initialize or complete Stage B re-encoding: {exc}"
@@ -898,20 +1136,42 @@ def reencode_intermediate_with_opencv(
             raise VideoPreparationError(
                 "No frames were written during Stage B OpenCV re-encoding."
             )
+        if (
+            expected_frame_count is not None
+            and frames_written != expected_frame_count
+        ):
+            raise VideoPreparationError(
+                f"Stage B wrote {frames_written} frames; expected "
+                f"{expected_frame_count}."
+            )
+        validation_arguments = {
+            "expected_frame_count": frames_written,
+            "expected_size_wh": expected_size,
+        }
+        if cancellation_requested is not None:
+            validation_arguments["cancellation_requested"] = cancellation_requested
         validation_result = validate_prepared_video(
             temporary_path,
-            expected_frame_count=frames_written,
-            expected_size_wh=expected_size,
+            **validation_arguments,
         )
+        if cancellation_requested is not None and cancellation_requested():
+            raise PreprocessCancelledError(
+                "Preprocessing cancelled during Stage B OpenCV re-encoding."
+            )
         try:
             temporary_path.replace(prepared_path)
         except OSError as exc:
             raise VideoPreparationError(
                 f"Could not replace prepared-video output atomically: {exc}"
             ) from exc
-    except (VideoPreparationError, VideoValidationError):
+    except (PreprocessCancelledError, VideoPreparationError, VideoValidationError):
         _remove_temporary_video(temporary_path)
         raise
+
+    if expected_frame_count is None:
+        emit(f"{frames_written:,} frames written")
+    else:
+        emit(f"{frames_written:,} / {expected_frame_count:,} frames written")
 
     return FinalReencodeResult(
         temporary_output_path=temporary_path,

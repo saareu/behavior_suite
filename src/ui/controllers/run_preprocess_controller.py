@@ -16,8 +16,14 @@ from typing import Any, Protocol
 from pydantic import ValidationError
 
 from preprocess.config import PreprocessConfig, TrimConfig
-from preprocess.exceptions import PreprocessError
-from preprocess.models import PreprocessOutputs, PreprocessRequest, PreprocessResult
+from preprocess.exceptions import PreprocessCancelledError, PreprocessError
+from preprocess.models import (
+    OperationProgress,
+    PreprocessExecutionContext,
+    PreprocessOutputs,
+    PreprocessRequest,
+    PreprocessResult,
+)
 from preprocess.service import PreprocessService
 from project.validation import ProjectError, validate_project_root
 from ui.controllers.preprocess_setup_controller import (
@@ -29,6 +35,7 @@ from ui.tasks import (
     GuiTaskContext,
     GuiTaskCoordinator,
     GuiTaskKind,
+    GuiTaskProgressEvent,
     TaskAlreadyRunningError,
 )
 
@@ -38,19 +45,24 @@ class RunPreprocessValidationError(ValueError):
 
 
 class _ServiceProtocol(Protocol):
-    def run(self, request: PreprocessRequest) -> PreprocessResult: ...
+    def run(
+        self,
+        request: PreprocessRequest,
+        execution_context: PreprocessExecutionContext | None = None,
+    ) -> PreprocessResult: ...
 
 
 class _TaskRunnerProtocol(Protocol):
     @property
     def is_running(self) -> bool: ...
 
-    def start(
+    def start_progressive(
         self,
-        operation: Callable[[], Any],
+        operation: Callable[[Callable[[OperationProgress], None]], Any],
         *,
         task_name: str = "background task",
-        context: GuiTaskContext | None = None,
+        context: GuiTaskContext,
+        on_progress: Callable[[GuiTaskProgressEvent], None] | None = None,
         on_success: Callable[[Any], None] | None = None,
         on_error: Callable[[BaseException], None] | None = None,
         on_finished: Callable[[], None] | None = None,
@@ -297,12 +309,13 @@ class RunPreprocessController:
         on_error: Callable[[BaseException], None] | None = None,
         on_finished: Callable[[], None] | None = None,
         on_stage: Callable[[str], None] | None = None,
+        on_progress: Callable[[GuiTaskProgressEvent], None] | None = None,
     ) -> PreprocessRequest:
         """Dispatch PreprocessService.run through the reusable GUI task runner."""
 
         if self.state.preprocess_task_running or task_runner.is_running:
             raise self._validation_error("A preprocessing task is already running.")
-        self._set_stage("Preparing request", on_stage)
+        self._set_stage("Preparing preprocessing run", on_stage)
         request = self.build_request()
         try:
             context = self.task_coordinator.begin(
@@ -318,9 +331,21 @@ class RunPreprocessController:
         self.state.run_started_at = datetime.now(UTC)
         self.state.run_elapsed_sec = 0.0
         self._started_monotonic = time.perf_counter()
-        self._set_stage("Running preprocessing pipeline", on_stage)
+
+        def handle_progress(event: GuiTaskProgressEvent) -> None:
+            if not self.task_coordinator.progress_is_current(
+                event,
+                context,
+                project_dir=self.state.project_dir,
+                raw_video_path=self.state.raw_video_path,
+            ):
+                return
+            self._set_stage(event.phase, on_stage)
+            if on_progress is not None:
+                on_progress(event)
+
         def handle_success(value: object) -> None:
-            if not self.task_coordinator.is_current(
+            if not self.task_coordinator.belongs_to_current_inputs(
                 context,
                 project_dir=self.state.project_dir,
                 raw_video_path=self.state.raw_video_path,
@@ -329,7 +354,10 @@ class RunPreprocessController:
             try:
                 if not isinstance(value, PreprocessResult):
                     raise TypeError("Preprocess task returned an unexpected result type.")
-                self._set_stage("Validating outputs", on_stage)
+                if context.cancellation_requested and not value.cancelled:
+                    raise PreprocessCancelledError(
+                        "Preprocessing completed after cancellation was requested."
+                    )
                 self.apply_service_result(value, mark_task_finished=False)
             except BaseException as exc:
                 self.record_task_failure(exc, mark_task_finished=False)
@@ -353,15 +381,21 @@ class RunPreprocessController:
         def handle_finished() -> None:
             self.task_coordinator.finish(context)
             self._finish_task()
-            self._set_stage("Finished", on_stage)
             if on_finished is not None:
                 on_finished()
 
         try:
-            task_runner.start(
-                lambda: self.execute_request(request),
+            task_runner.start_progressive(
+                lambda report: self.execute_request(
+                    request,
+                    PreprocessExecutionContext(
+                        progress_callback=report,
+                        cancellation_requested=context.is_cancellation_requested,
+                    ),
+                ),
                 task_name="preprocessing pipeline",
                 context=context,
+                on_progress=handle_progress,
                 on_success=handle_success,
                 on_error=handle_error,
                 on_finished=handle_finished,
@@ -374,10 +408,14 @@ class RunPreprocessController:
             raise
         return request
 
-    def execute_request(self, request: PreprocessRequest) -> PreprocessResult:
+    def execute_request(
+        self,
+        request: PreprocessRequest,
+        execution_context: PreprocessExecutionContext | None = None,
+    ) -> PreprocessResult:
         """Call the existing service without mutating GUI state (worker-safe)."""
 
-        return self._service.run(request)
+        return self._service.run(request, execution_context)
 
     def apply_service_result(
         self,
@@ -394,9 +432,13 @@ class RunPreprocessController:
                 "Successful preprocessing result is missing outputs or validation details."
             )
         self.state.preprocess_result = result
-        self.state.run_error_message = None if result.success else result.message
+        self.state.run_error_message = (
+            None if result.success or result.cancelled else result.message
+        )
         self.state.run_elapsed_sec = result.elapsed_sec
-        self.state.run_status = "Finished"
+        self.state.run_status = (
+            "Completed" if result.success else "Cancelled" if result.cancelled else "Failed"
+        )
         if mark_task_finished:
             self.state.preprocess_task_running = False
             self._started_monotonic = None
@@ -409,6 +451,22 @@ class RunPreprocessController:
     ) -> None:
         """Record a worker exception as readable state while preserving diagnostics."""
 
+        if isinstance(exc, PreprocessCancelledError):
+            self.state.preprocess_result = PreprocessResult(
+                success=False,
+                cancelled=True,
+                message=(
+                    "Preprocessing cancelled. No incomplete outputs were marked "
+                    "as valid."
+                ),
+                elapsed_sec=self.update_elapsed_time(),
+            )
+            self.state.run_error_message = None
+            self.state.run_status = "Cancelled"
+            if mark_task_finished:
+                self.state.preprocess_task_running = False
+                self._started_monotonic = None
+            return
         if isinstance(exc, (PreprocessError, OSError, ValueError)):
             message = f"Preprocessing failed: {exc}"
         else:
@@ -418,7 +476,7 @@ class RunPreprocessController:
             )
         self.state.preprocess_result = None
         self.state.run_error_message = message
-        self.state.run_status = "Finished"
+        self.state.run_status = "Failed"
         self.update_elapsed_time()
         if mark_task_finished:
             self.state.preprocess_task_running = False
@@ -453,6 +511,19 @@ class RunPreprocessController:
                 artifacts_validated=False,
             )
         if not result.success:
+            if result.cancelled:
+                return RunResultSummary(
+                    status="CANCELLED",
+                    message=result.message,
+                    official_outputs=(),
+                    prepared_frame_count=None,
+                    prepared_size_wh=None,
+                    prepared_fps=None,
+                    elapsed_sec=result.elapsed_sec,
+                    warnings=tuple(result.warnings),
+                    processing_log_path=self._existing_processing_log_path(),
+                    artifacts_validated=False,
+                )
             return RunResultSummary(
                 status="FAILED",
                 message=result.message,

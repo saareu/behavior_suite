@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pytest
+from PySide6.QtWidgets import QApplication
 
 from preprocess.config import CanonicalResolutionConfig, PrepareConfig, PreprocessConfig
 from preprocess.crop_plan import CropPlan
 from preprocess.manual_crop import make_manual_crop_plan
 from preprocess.models import (
     ExternalTimeSelection,
+    OperationProgress,
+    PreprocessExecutionContext,
     PreprocessOutputs,
     PreprocessRequest,
     PreprocessResult,
@@ -22,13 +26,22 @@ from preprocess.pre_crop import resolve_pre_crop
 from preprocess.validation import PreparedVideoValidationResult
 from project.models import Project
 from ui.controllers.encode_settings_controller import EncodeSettingsController
+from ui.controllers.preprocess_setup_controller import PreprocessSetupController
 from ui.controllers.run_preprocess_controller import (
     RunPreprocessController,
     RunPreprocessValidationError,
 )
 from ui.controllers.timing_controller import TimingController
+from ui.pages.run_validate_page import RunValidatePage
 from ui.state import PreprocessSetupState, TimingMode
-from ui.tasks import GuiTaskContext
+from ui.tasks import (
+    GuiTaskContext,
+    GuiTaskProgressEvent,
+    GuiTaskProgressTracker,
+)
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+_APPLICATION = QApplication.instance() or QApplication([])
 
 
 def _config() -> PreprocessConfig:
@@ -147,8 +160,20 @@ class _FakeService:
         self.result = result
         self.requests: list[PreprocessRequest] = []
 
-    def run(self, request: PreprocessRequest) -> PreprocessResult:
+    def run(
+        self,
+        request: PreprocessRequest,
+        execution_context: PreprocessExecutionContext | None = None,
+    ) -> PreprocessResult:
         self.requests.append(request)
+        if execution_context is not None:
+            execution_context.report(
+                OperationProgress(
+                    phase="Stage A: preparing video geometry",
+                    message="Stage A running",
+                    is_indeterminate=True,
+                )
+            )
         return self.result
 
 
@@ -156,22 +181,30 @@ class _ImmediateRunner:
     is_running = False
 
     def __init__(self) -> None:
-        self.operations: list[Callable[[], Any]] = []
+        self.operations: list[Callable[..., Any]] = []
 
-    def start(
+    def start_progressive(
         self,
-        operation: Callable[[], Any],
+        operation,
         *,
         task_name: str = "background task",
-        context: GuiTaskContext | None = None,
+        context: GuiTaskContext,
+        on_progress: Callable[[GuiTaskProgressEvent], None] | None = None,
         on_success: Callable[[Any], None] | None = None,
         on_error: Callable[[BaseException], None] | None = None,
         on_finished: Callable[[], None] | None = None,
     ) -> None:
-        del context, task_name
+        del task_name
         self.operations.append(operation)
         try:
-            value = operation()
+            tracker = GuiTaskProgressTracker(context)
+            value = operation(
+                lambda progress: (
+                    on_progress(tracker.build(progress))
+                    if on_progress is not None
+                    else None
+                )
+            )
         except BaseException as exc:
             if on_error is not None:
                 on_error(exc)
@@ -186,11 +219,13 @@ class _ImmediateRunner:
 class _DeferredRunner:
     def __init__(self) -> None:
         self.is_running = False
-        self.operation: Callable[[], Any] | None = None
+        self.operation = None
+        self.kwargs: dict[str, Any] = {}
 
-    def start(self, operation: Callable[[], Any], **_kwargs: Any) -> None:
+    def start_progressive(self, operation, **kwargs: Any) -> None:
         self.is_running = True
         self.operation = operation
+        self.kwargs = kwargs
 
 
 def test_run_is_blocked_without_accepted_crop(tmp_path: Path) -> None:
@@ -268,11 +303,10 @@ def test_run_action_uses_task_runner_and_service(tmp_path: Path) -> None:
     assert state.preprocess_result is service.result
     assert state.preprocess_task_running is False
     assert stages == [
-        "Preparing request",
-        "Running preprocessing pipeline",
-        "Validating outputs",
-        "Finished",
+        "Preparing preprocessing run",
+        "Stage A: preparing video geometry",
     ]
+    assert state.run_status == "Completed"
 
 
 def test_duplicate_run_is_rejected_while_active(tmp_path: Path) -> None:
@@ -332,6 +366,78 @@ def test_failure_summary_never_claims_success_or_valid_outputs(tmp_path: Path) -
     assert "validation failed" in summary.message.lower()
     assert summary.artifacts_validated is False
     assert summary.official_outputs == ()
+
+
+def test_cancelled_summary_is_distinct_from_failure(tmp_path: Path) -> None:
+    state = _ready_state(tmp_path)
+    controller = RunPreprocessController(state)
+    controller.apply_service_result(
+        PreprocessResult(
+            success=False,
+            cancelled=True,
+            message=(
+                "Preprocessing cancelled. No incomplete outputs were marked as valid."
+            ),
+            elapsed_sec=1.5,
+        )
+    )
+
+    summary = controller.result_summary()
+
+    assert summary.status == "CANCELLED"
+    assert summary.artifacts_validated is False
+    assert summary.official_outputs == ()
+    assert state.run_error_message is None
+
+
+def test_stale_pipeline_progress_and_completion_are_ignored(
+    tmp_path: Path,
+) -> None:
+    state = _ready_state(tmp_path)
+    service = _FakeService(_success_result(state))
+    runner = _DeferredRunner()
+    visible_progress: list[GuiTaskProgressEvent] = []
+    controller = RunPreprocessController(state, service=service)
+    controller.start_run(runner, on_progress=visible_progress.append)
+    context = runner.kwargs["context"]
+    assert isinstance(context, GuiTaskContext)
+    tracker = GuiTaskProgressTracker(context)
+    stale_event = tracker.build(
+        OperationProgress(
+            phase="Stage B: writing SLEAP-compatible video",
+            message="1 / 16 frames written",
+            completed_units=1,
+            total_units=16,
+            is_indeterminate=False,
+        )
+    )
+
+    controller.task_coordinator.invalidate_inputs()
+    state.raw_video_path = tmp_path / "replacement.avi"
+    runner.kwargs["on_progress"](stale_event)
+    runner.kwargs["on_success"](_success_result(state))
+
+    assert context.cancellation_requested is True
+    assert visible_progress == []
+    assert state.preprocess_result is None
+
+
+def test_run_page_shows_cancel_only_while_pipeline_is_active(tmp_path: Path) -> None:
+    state = _ready_state(tmp_path)
+    page = RunValidatePage(PreprocessSetupController(state=state))
+
+    page.refresh_from_state()
+    assert page.cancel_button.isHidden() is True
+
+    state.preprocess_task_running = True
+    page.refresh_from_state()
+    assert page.cancel_button.isHidden() is False
+    assert page.cancel_button.isEnabled() is True
+
+    state.preprocess_task_running = False
+    page.refresh_from_state()
+    assert page.cancel_button.isHidden() is True
+    page.close()
 
 
 def test_changing_timing_clears_result_but_preserves_crop(tmp_path: Path) -> None:

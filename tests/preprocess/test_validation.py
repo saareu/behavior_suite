@@ -4,9 +4,13 @@ import cv2
 import numpy as np
 import pytest
 
-from preprocess import validation
+from preprocess import validation, video_prepare
 from preprocess.config import PreprocessConfig
-from preprocess.exceptions import VideoPreparationError, VideoValidationError
+from preprocess.exceptions import (
+    PreprocessCancelledError,
+    VideoPreparationError,
+    VideoValidationError,
+)
 from preprocess.validation import (
     PreparedVideoValidationResult,
     validate_prepared_video,
@@ -58,6 +62,23 @@ class _FakeCapture:
         self.released = True
 
 
+class _FakeWriter:
+    def __init__(self, path: str) -> None:
+        self.path = Path(path)
+        self.frames_written = 0
+        self.released = False
+
+    def isOpened(self) -> bool:
+        return True
+
+    def write(self, _frame: np.ndarray) -> None:
+        self.frames_written += 1
+
+    def release(self) -> None:
+        self.released = True
+        self.path.write_bytes(b"partial encoded video")
+
+
 def _prepared_path(tmp_path: Path) -> Path:
     path = tmp_path / "prepared.mp4"
     path.write_bytes(b"test fixture placeholder")
@@ -84,10 +105,12 @@ def test_valid_prepared_video_passes_validation(
     capture = _FakeCapture()
     _install_capture(monkeypatch, capture)
 
+    progress = []
     result = validate_prepared_video(
         _prepared_path(tmp_path),
         expected_frame_count=3,
         expected_size_wh=(64, 48),
+        progress_callback=progress.append,
     )
 
     assert result.is_valid is True
@@ -97,6 +120,30 @@ def test_valid_prepared_video_passes_validation(
     assert result.opencv_reported_size_wh == (64, 48)
     assert result.opencv_reported_fps == pytest.approx(10.0)
     assert capture.released is True
+    assert [event.completed_units for event in progress] == [0, 3]
+    assert all(event.total_units == 3 for event in progress)
+    assert all(event.is_indeterminate is False for event in progress)
+
+
+def test_validation_cancellation_releases_capture_without_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = _FakeCapture(readable_count=5, reported_count=5)
+    _install_capture(monkeypatch, capture)
+    progress = []
+
+    with pytest.raises(PreprocessCancelledError, match="validation"):
+        validate_prepared_video(
+            _prepared_path(tmp_path),
+            expected_frame_count=5,
+            expected_size_wh=(64, 48),
+            progress_callback=progress.append,
+            cancellation_requested=lambda: capture._index >= 2,
+        )
+
+    assert capture.released is True
+    assert progress[-1].completed_units != 5
 
 
 def test_missing_file_fails_validation(tmp_path: Path) -> None:
@@ -286,3 +333,84 @@ def test_nonpositive_or_nonfinite_stage_b_output_fps_fails(
             output_size_wh=(64, 48),
             config=PreprocessConfig(),
         )
+
+
+def test_stage_b_reports_monotonic_exact_frame_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intermediate = tmp_path / "intermediate.mp4"
+    intermediate.write_bytes(b"intermediate")
+    capture = _FakeCapture(readable_count=3, reported_count=3)
+    writers: list[_FakeWriter] = []
+    monkeypatch.setattr(video_prepare.cv2, "VideoCapture", lambda _path: capture)
+    monkeypatch.setattr(
+        video_prepare.cv2,
+        "VideoWriter",
+        lambda path, *_args: writers.append(_FakeWriter(path)) or writers[-1],
+    )
+    monkeypatch.setattr(video_prepare.cv2, "VideoWriter_fourcc", lambda *_args: 0)
+    monkeypatch.setattr(
+        video_prepare,
+        "validate_prepared_video",
+        lambda *_args, **_kwargs: PreparedVideoValidationResult(
+            is_valid=True,
+            errors=(),
+            opencv_reported_frame_count=3,
+            opencv_readable_frame_count=3,
+            opencv_reported_size_wh=(64, 48),
+            opencv_reported_fps=10.0,
+            expected_frame_count=3,
+            expected_size_wh=(64, 48),
+        ),
+    )
+    progress = []
+
+    result = reencode_intermediate_with_opencv(
+        intermediate_video_path=intermediate,
+        prepared_video_path=tmp_path / "prepared.mp4",
+        output_fps=10.0,
+        output_size_wh=(64, 48),
+        config=PreprocessConfig(),
+        expected_frame_count=3,
+        progress_callback=progress.append,
+    )
+
+    completed = [event.completed_units for event in progress]
+    assert completed == sorted(completed)
+    assert completed == [0, 3]
+    assert all(event.total_units == 3 for event in progress)
+    assert result.frames_written == 3
+
+
+def test_stage_b_cancellation_preserves_existing_prepared_video(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intermediate = tmp_path / "intermediate.mp4"
+    intermediate.write_bytes(b"intermediate")
+    prepared = tmp_path / "prepared.mp4"
+    prepared.write_bytes(b"previous validated video")
+    capture = _FakeCapture(readable_count=5, reported_count=5)
+    monkeypatch.setattr(video_prepare.cv2, "VideoCapture", lambda _path: capture)
+    monkeypatch.setattr(
+        video_prepare.cv2,
+        "VideoWriter",
+        lambda path, *_args: _FakeWriter(path),
+    )
+    monkeypatch.setattr(video_prepare.cv2, "VideoWriter_fourcc", lambda *_args: 0)
+
+    with pytest.raises(PreprocessCancelledError, match="Stage B"):
+        reencode_intermediate_with_opencv(
+            intermediate_video_path=intermediate,
+            prepared_video_path=prepared,
+            output_fps=10.0,
+            output_size_wh=(64, 48),
+            config=PreprocessConfig(),
+            expected_frame_count=5,
+            cancellation_requested=lambda: capture._index >= 2,
+        )
+
+    assert capture.released is True
+    assert prepared.read_bytes() == b"previous validated video"
+    assert list(tmp_path.glob(".prepared.stage-b-*.mp4")) == []

@@ -11,13 +11,14 @@ from preprocess.config import (
     PreprocessConfig,
 )
 from preprocess.crop_plan import CropPlan
-from preprocess.exceptions import VideoPreparationError
+from preprocess.exceptions import PreprocessCancelledError, VideoPreparationError
 from preprocess.manual_crop import make_manual_crop_plan
 from preprocess.video_prepare import (
     build_ffmpeg_prepare_command,
     build_prepare_filtergraph,
     resolve_ffmpeg_binary,
     resolve_ffprobe_binary,
+    run_ffmpeg_prepare,
 )
 
 
@@ -286,5 +287,121 @@ def test_command_is_argument_list_and_uses_configured_encoding() -> None:
     assert command[command.index("-x264-params") + 1] == "bframes=0"
     assert command[command.index("-fps_mode") + 1] == "passthrough"
     assert "-n" in command
+    assert command[command.index("-progress") + 1] == "pipe:1"
+    assert "-nostats" in command
     assert "+faststart" in command
     assert metadata.expected_output_size_wh == plan.prepared_size_wh
+
+
+class _FakeTextStream(list[str]):
+    def close(self) -> None:
+        pass
+
+
+class _CompletedProgressProcess:
+    def __init__(self, command, **_kwargs) -> None:
+        Path(command[-1]).write_bytes(b"intermediate")
+        self.stdout = _FakeTextStream(
+            ["out_time_us=2500000\n", "progress=end\n"]
+        )
+        self.stderr = _FakeTextStream()
+        self.returncode = 0
+
+    def poll(self) -> int:
+        return self.returncode
+
+    def wait(self, timeout=None) -> int:
+        del timeout
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.returncode = 143
+
+    def kill(self) -> None:
+        self.returncode = 137
+
+
+def test_stage_a_partial_progress_does_not_claim_false_percentage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_path = tmp_path / "raw.avi"
+    raw_path.write_bytes(b"raw")
+    config = _config(canonical_enabled=False, canonical_size_wh=(320, 240))
+    plan = _landscape_plan(config).model_copy(update={"accepted_by_user": True})
+    monkeypatch.setattr(video_prepare.subprocess, "Popen", _CompletedProgressProcess)
+    progress = []
+
+    result = run_ffmpeg_prepare(
+        raw_video_path=raw_path,
+        intermediate_path=tmp_path / "intermediate.mp4",
+        crop_plan=plan,
+        config=config,
+        start_frame=0,
+        end_frame_exclusive=None,
+        expected_frame_count=None,
+        progress_callback=progress.append,
+    )
+
+    assert result.processed_video_time_sec == pytest.approx(2.5)
+    assert all(event.completed_units is None for event in progress)
+    assert all(event.total_units is None for event in progress)
+    assert all(event.is_indeterminate is True for event in progress)
+
+
+class _CancellableProcess:
+    instance = None
+
+    def __init__(self, command, **_kwargs) -> None:
+        type(self).instance = self
+        Path(command[-1]).write_bytes(b"partial")
+        self.stdout = _FakeTextStream()
+        self.stderr = _FakeTextStream()
+        self.returncode = None
+        self.terminated = False
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None) -> int:
+        del timeout
+        return 143 if self.returncode is None else self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = 143
+
+    def kill(self) -> None:
+        self.returncode = 137
+
+
+def test_stage_a_cancellation_terminates_process_and_removes_partial_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_path = tmp_path / "raw.avi"
+    raw_path.write_bytes(b"raw")
+    output_path = tmp_path / "intermediate.mp4"
+    config = _config(canonical_enabled=False, canonical_size_wh=(320, 240))
+    plan = _landscape_plan(config).model_copy(update={"accepted_by_user": True})
+    monkeypatch.setattr(video_prepare.subprocess, "Popen", _CancellableProcess)
+    checks = 0
+
+    def cancellation_requested() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks > 1
+
+    with pytest.raises(PreprocessCancelledError, match="Stage A"):
+        run_ffmpeg_prepare(
+            raw_video_path=raw_path,
+            intermediate_path=output_path,
+            crop_plan=plan,
+            config=config,
+            start_frame=0,
+            end_frame_exclusive=None,
+            cancellation_requested=cancellation_requested,
+        )
+
+    assert _CancellableProcess.instance.terminated is True
+    assert output_path.exists() is False

@@ -23,7 +23,11 @@ from ui.controllers.run_preprocess_controller import (
     RunPreprocessValidationError,
     RunResultSummary,
 )
-from ui.tasks import GuiTaskRunner
+from ui.tasks import (
+    GuiTaskProgressEvent,
+    GuiTaskRunner,
+    format_pipeline_progress,
+)
 
 
 class RunValidatePage(QWidget):
@@ -86,10 +90,14 @@ class RunValidatePage(QWidget):
 
         self.run_button = QPushButton("Run Preprocessing")
         self.run_button.clicked.connect(self._run_preprocessing)
+        self.cancel_button = QPushButton("Cancel preprocessing")
+        self.cancel_button.clicked.connect(self._cancel_preprocessing)
+        self.cancel_button.setVisible(False)
         self.open_folder_button = QPushButton("Open Preprocess Folder")
         self.open_folder_button.clicked.connect(self._open_preprocess_folder)
         action_row = QHBoxLayout()
         action_row.addWidget(self.run_button)
+        action_row.addWidget(self.cancel_button)
         action_row.addWidget(self.open_folder_button)
         action_row.addStretch(1)
 
@@ -98,6 +106,8 @@ class RunValidatePage(QWidget):
         self.activity.setVisible(False)
         self.stage_label = QLabel("Not started")
         self.elapsed_label = QLabel("Elapsed: 0.0 s")
+        self.progress_details = QLabel()
+        self.progress_details.setWordWrap(True)
         activity_row = QHBoxLayout()
         activity_row.addWidget(self.activity)
         activity_row.addWidget(self.stage_label, 1)
@@ -133,6 +143,7 @@ class RunValidatePage(QWidget):
         content_layout.addWidget(output_group)
         content_layout.addLayout(action_row)
         content_layout.addLayout(activity_row)
+        content_layout.addWidget(self.progress_details)
         content_layout.addWidget(result_group)
         content_layout.addStretch(1)
         scroll = QScrollArea()
@@ -182,6 +193,8 @@ class RunValidatePage(QWidget):
             self._clear_review()
         running = self.controller.state.preprocess_task_running
         self.activity.setVisible(running)
+        self.cancel_button.setVisible(running)
+        self.cancel_button.setEnabled(running)
         self.run_button.setEnabled(self.controller.can_run())
         self.open_folder_button.setEnabled(
             not running and self.controller.can_open_preprocess_folder()
@@ -227,6 +240,7 @@ class RunValidatePage(QWidget):
                 on_error=self._task_error,
                 on_finished=self._task_finished,
                 on_stage=self._stage_changed,
+                on_progress=self._progress_changed,
             )
         except RunPreprocessValidationError as exc:
             self._show_expected_error(str(exc))
@@ -238,7 +252,10 @@ class RunValidatePage(QWidget):
             )
             return
         self.error_label.clear()
+        self.progress_details.clear()
         self.activity.setVisible(True)
+        self.cancel_button.setVisible(True)
+        self.cancel_button.setEnabled(True)
         self.elapsed_timer.start()
         self.run_button.setEnabled(False)
         self.open_folder_button.setEnabled(False)
@@ -258,6 +275,31 @@ class RunValidatePage(QWidget):
         self.refresh_from_state()
         self.status_message.emit(self.result_status.text())
 
+    def _progress_changed(self, event: GuiTaskProgressEvent) -> None:
+        self.stage_label.setText(event.phase)
+        self.progress_details.setText(format_pipeline_progress(event))
+        if event.total_units is None or event.is_indeterminate:
+            self.activity.setRange(0, 0)
+        else:
+            self.activity.setRange(0, 1000)
+            completed = event.completed_units or 0
+            fraction = min(max(completed / event.total_units, 0.0), 1.0)
+            value = round(fraction * 1000)
+            if event.phase != "Completed":
+                value = min(value, 999)
+            self.activity.setValue(value)
+            self.activity.setFormat("%p%")
+        self.validity_changed.emit()
+
+    def _cancel_preprocessing(self) -> None:
+        self.task_runner.request_cancellation()
+        self.cancel_button.setEnabled(False)
+        self.stage_label.setText("Cancelling preprocessing…")
+        self.progress_details.setText(
+            "Cancellation requested. The active stage will stop at a safe boundary."
+        )
+        self.status_message.emit("Cancelling preprocessing…")
+
     def _stage_changed(self, stage: str) -> None:
         self.stage_label.setText(stage)
         self.status_message.emit(stage)
@@ -273,6 +315,8 @@ class RunValidatePage(QWidget):
             self.result_status.setStyleSheet("font-weight: 600; color: #176b2c;")
         elif summary.status == "FAILED":
             self.result_status.setStyleSheet("font-weight: 600; color: #b00020;")
+        elif summary.status == "CANCELLED":
+            self.result_status.setStyleSheet("font-weight: 600; color: #7a4b00;")
         else:
             self.result_status.setStyleSheet("font-weight: 600;")
         self.result_message.setText(summary.message)
@@ -294,7 +338,10 @@ class RunValidatePage(QWidget):
             else ""
         )
         paths = [f"{name}: {path}" for name, path in summary.official_outputs]
-        if summary.status == "FAILED" and summary.processing_log_path is not None:
+        if (
+            summary.status in {"FAILED", "CANCELLED"}
+            and summary.processing_log_path is not None
+        ):
             paths.append(f"Processing log: {summary.processing_log_path}")
         self.result_paths.setText("\n".join(paths))
 

@@ -9,7 +9,7 @@ from preprocess.background import (
     validate_background,
     write_background_png,
 )
-from preprocess.exceptions import BackgroundGenerationError
+from preprocess.exceptions import BackgroundGenerationError, PreprocessCancelledError
 
 
 class _FakeCapture:
@@ -113,15 +113,43 @@ def test_sampled_indices_follow_every_n_behavior(
     frames = [_color_frame(index * 10) for index in range(7)]
     _install_capture(monkeypatch, _FakeCapture(frames))
 
+    progress = []
     result = estimate_prepared_background(
         _prepared_video_placeholder(tmp_path),
         sample_every_n=2,
         max_samples=10,
+        expected_frame_count=7,
+        progress_callback=progress.append,
     )
 
     assert result.sampled_frame_indices == (0, 2, 4, 6)
     assert result.sampled_frame_count == 4
     np.testing.assert_array_equal(result.background, _color_frame(30))
+    sample_events = [
+        event for event in progress if event.completed_units is not None
+    ]
+    assert [event.completed_units for event in sample_events] == [0, 4, 4]
+    assert all(event.total_units == 4 for event in sample_events)
+    assert any(event.message == "Calculating median background" for event in progress)
+
+
+def test_background_cancellation_releases_capture_without_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = _FakeCapture([_color_frame(index) for index in range(8)])
+    _install_capture(monkeypatch, capture)
+
+    with pytest.raises(PreprocessCancelledError, match="background"):
+        estimate_prepared_background(
+            _prepared_video_placeholder(tmp_path),
+            sample_every_n=1,
+            max_samples=8,
+            expected_frame_count=8,
+            cancellation_requested=lambda: capture.read_count >= 2,
+        )
+
+    assert capture.released is True
 
 
 def test_sample_limit_stops_sequential_decoding(

@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import cv2
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
-from preprocess.exceptions import BackgroundGenerationError
+from preprocess.exceptions import BackgroundGenerationError, PreprocessCancelledError
+from preprocess.models import OperationProgress
 
 _SUPPORTED_METHOD = "median"
 _PNG_CHANNEL_COUNTS = {1, 3, 4}
+_PROGRESS_SAMPLE_INTERVAL = 10
+_PROGRESS_TIME_INTERVAL_SEC = 0.25
 
 
 class BackgroundEstimateResult(BaseModel):
@@ -114,6 +119,10 @@ def estimate_prepared_background(
     sample_every_n: int,
     max_samples: int,
     method: str = "median",
+    *,
+    expected_frame_count: int | None = None,
+    progress_callback: Callable[[OperationProgress], None] | None = None,
+    cancellation_requested: Callable[[], bool] | None = None,
 ) -> BackgroundEstimateResult:
     """Estimate a pixelwise median from sequential prepared-video samples.
 
@@ -129,7 +138,21 @@ def estimate_prepared_background(
 
     sample_step = _positive_sampling_integer("sample_every_n", sample_every_n)
     sample_limit = _positive_sampling_integer("max_samples", max_samples)
+    if expected_frame_count is not None:
+        expected_count = _positive_sampling_integer(
+            "expected_frame_count", expected_frame_count
+        )
+        planned_sample_count = min(
+            sample_limit,
+            (expected_count + sample_step - 1) // sample_step,
+        )
+    else:
+        planned_sample_count = None
     resolved_method = _validate_method(method)
+    if cancellation_requested is not None and cancellation_requested():
+        raise PreprocessCancelledError(
+            "Preprocessing cancelled during background generation."
+        )
     source_path = Path(prepared_video_path).expanduser()
     if not source_path.is_file():
         raise BackgroundGenerationError(
@@ -153,8 +176,34 @@ def estimate_prepared_background(
     sampled_indices: list[int] = []
     decoded_index = 0
     sample_shape: tuple[int, ...] | None = None
+    last_emitted_count = 0
+    last_emitted_at = time.perf_counter()
+
+    def emit(message: str, *, calculating: bool = False) -> None:
+        if progress_callback is None:
+            return
+        completed = None if calculating else len(samples)
+        total = None if calculating else planned_sample_count
+        progress_callback(
+            OperationProgress(
+                phase="Generating cropped background",
+                message=message,
+                completed_units=completed,
+                total_units=total,
+                is_indeterminate=calculating or total is None,
+            )
+        )
+
+    if planned_sample_count is None:
+        emit("0 samples collected")
+    else:
+        emit(f"0 / {planned_sample_count:,} samples collected")
     try:
         while len(samples) < sample_limit:
+            if cancellation_requested is not None and cancellation_requested():
+                raise PreprocessCancelledError(
+                    "Preprocessing cancelled during background generation."
+                )
             try:
                 success, frame = capture.read()
             except cv2.error as exc:
@@ -181,6 +230,22 @@ def estimate_prepared_background(
                     )
                 samples.append(np.array(frame, copy=True))
                 sampled_indices.append(decoded_index)
+                now = time.perf_counter()
+                if (
+                    len(samples) - last_emitted_count >= _PROGRESS_SAMPLE_INTERVAL
+                    or now - last_emitted_at >= _PROGRESS_TIME_INTERVAL_SEC
+                    or len(samples) == planned_sample_count
+                ):
+                    if planned_sample_count is None:
+                        message = f"{len(samples):,} samples collected"
+                    else:
+                        message = (
+                            f"{len(samples):,} / {planned_sample_count:,} "
+                            "samples collected"
+                        )
+                    emit(message)
+                    last_emitted_count = len(samples)
+                    last_emitted_at = now
             decoded_index += 1
     finally:
         capture.release()
@@ -189,6 +254,11 @@ def estimate_prepared_background(
         raise BackgroundGenerationError(
             "Prepared video contains no readable frames to sample."
         )
+    if cancellation_requested is not None and cancellation_requested():
+        raise PreprocessCancelledError(
+            "Preprocessing cancelled during background generation."
+        )
+    emit("Calculating median background", calculating=True)
     try:
         stacked = np.stack(samples, axis=0)
         background = np.median(stacked, axis=0).astype(np.uint8)
@@ -200,6 +270,12 @@ def estimate_prepared_background(
     validate_background(background, source_size)
     background = np.array(background, copy=True)
     background.setflags(write=False)
+    if planned_sample_count is None:
+        emit(f"{len(samples):,} samples collected")
+    else:
+        emit(
+            f"{len(samples):,} / {planned_sample_count:,} samples collected"
+        )
     return BackgroundEstimateResult(
         background=background,
         sampled_frame_indices=tuple(sampled_indices),

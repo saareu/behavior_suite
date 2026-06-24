@@ -1,5 +1,7 @@
 """Typed data models shared by first-sprint preprocessing modules."""
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
@@ -55,6 +57,29 @@ class OperationProgress(BaseModel):
     total_units: int | None = Field(default=None, gt=0)
     total_is_estimate: bool = False
     is_indeterminate: bool
+    processed_video_time_sec: float | None = Field(default=None, ge=0.0)
+
+
+@dataclass(frozen=True, slots=True)
+class PreprocessExecutionContext:
+    """Execution-only progress and cancellation hooks for one pipeline run."""
+
+    progress_callback: Callable[[OperationProgress], None] | None = None
+    cancellation_requested: Callable[[], bool] | None = None
+
+    def report(self, progress: OperationProgress) -> None:
+        """Forward a typed progress update when a caller supplied an observer."""
+
+        if self.progress_callback is not None:
+            self.progress_callback(progress)
+
+    def is_cancellation_requested(self) -> bool:
+        """Return the current cooperative cancellation state."""
+
+        return bool(
+            self.cancellation_requested is not None
+            and self.cancellation_requested()
+        )
 
 
 class VideoProbeResult(BaseModel):
@@ -194,6 +219,7 @@ class PreprocessResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     success: bool
+    cancelled: bool = False
     outputs: PreprocessOutputs | None = None
     raw_probe: VideoProbeResult | None = None
     prepared_validation: PreparedVideoValidationResult | None = None

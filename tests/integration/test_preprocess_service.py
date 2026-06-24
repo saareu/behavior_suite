@@ -16,7 +16,7 @@ from preprocess.config import (
 from preprocess.exceptions import VideoPreparationError
 from preprocess.manual_crop import make_manual_crop_plan
 from preprocess.metadata import validate_prepare_metadata
-from preprocess.models import PreprocessRequest
+from preprocess.models import PreprocessExecutionContext, PreprocessRequest
 from preprocess.service import PreprocessService
 from preprocess.sync_writer import load_prepared_sync_npz
 from preprocess.validation import validate_prepared_video
@@ -113,7 +113,11 @@ def test_complete_preprocess_service_run_produces_valid_official_artifacts(tmp_p
         crop_accepted_by_user=True,
     )
 
-    result = PreprocessService().run(request)
+    progress = []
+    result = PreprocessService().run(
+        request,
+        PreprocessExecutionContext(progress_callback=progress.append),
+    )
 
     assert result.success is True, result.message
     assert result.outputs is not None
@@ -156,6 +160,32 @@ def test_complete_preprocess_service_run_produces_valid_official_artifacts(tmp_p
     assert "stage=ffmpeg_stage_a" in log_text
     assert "run completed status=success" in log_text
     assert not list((outputs.preprocess_dir / ".internal").glob("*"))
+    phases = [event.phase for event in progress]
+    required_phases = [
+        "Preparing preprocessing run",
+        "Stage A: preparing video geometry",
+        "Stage B: writing SLEAP-compatible video",
+        "Validating prepared video",
+        "Writing synchronization artifact",
+        "Generating cropped background",
+        "Writing metadata and settings",
+        "Validating final artifacts",
+        "Completed",
+    ]
+    assert list(dict.fromkeys(phases)) == required_phases
+    assert any(
+        event.processed_video_time_sec is not None
+        for event in progress
+        if event.phase == "Stage A: preparing video geometry"
+    )
+    stage_a_frame_events = [
+        event
+        for event in progress
+        if event.phase == "Stage A: preparing video geometry"
+        and event.completed_units is not None
+    ]
+    assert stage_a_frame_events
+    assert all(event.total_units == 4 for event in stage_a_frame_events)
 
 
 @pytest.mark.integration

@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import platform
+import shutil
 import subprocess
 import time
 import uuid
@@ -23,7 +24,11 @@ from preprocess.background import (
 )
 from preprocess.cage_detection import detect_cage_crop_plan
 from preprocess.config import PreprocessConfig
-from preprocess.exceptions import PreprocessError, PreprocessServiceError
+from preprocess.exceptions import (
+    PreprocessCancelledError,
+    PreprocessError,
+    PreprocessServiceError,
+)
 from preprocess.logging_utils import create_processing_logger
 from preprocess.metadata import (
     build_prepare_metadata,
@@ -34,6 +39,8 @@ from preprocess.metadata import (
 from preprocess.models import (
     ExternalTimeSelection,
     FPSHeaderSource,
+    OperationProgress,
+    PreprocessExecutionContext,
     PreprocessOutputs,
     PreprocessRequest,
     PreprocessResult,
@@ -420,25 +427,82 @@ def _remove_file(path: Path, warnings: list[str]) -> None:
         warnings.append(f"Could not remove temporary file {path}: {exc}")
 
 
-def _cleanup_new_official_outputs(
-    outputs: PreprocessOutputs, preexisting: set[Path], warnings: list[str]
+def _artifact_pairs(
+    staged: PreprocessOutputs,
+    official: PreprocessOutputs,
+) -> tuple[tuple[Path, Path], ...]:
+    return (
+        (staged.prepared_video_path, official.prepared_video_path),
+        (staged.prepare_meta_path, official.prepare_meta_path),
+        (staged.prepared_sync_path, official.prepared_sync_path),
+        (staged.cropped_background_path, official.cropped_background_path),
+        (staged.settings_used_path, official.settings_used_path),
+    )
+
+
+def _commit_staged_outputs(
+    staged: PreprocessOutputs,
+    official: PreprocessOutputs,
 ) -> None:
-    for path in (
-        outputs.prepared_video_path,
-        outputs.prepare_meta_path,
-        outputs.prepared_sync_path,
-        outputs.cropped_background_path,
-        outputs.settings_used_path,
-    ):
-        resolved = path.resolve()
-        if resolved not in preexisting:
-            _remove_file(resolved, warnings)
+    """Promote a validated five-artifact set with rollback on filesystem failure."""
+
+    backup_dir = staged.preprocess_dir / ".previous"
+    backup_dir.mkdir(parents=True, exist_ok=False)
+    backups: list[tuple[Path, Path]] = []
+    promoted: list[Path] = []
+    remove_backups = False
+    try:
+        for _staged_path, official_path in _artifact_pairs(staged, official):
+            if official_path.exists():
+                backup_path = backup_dir / official_path.name
+                official_path.replace(backup_path)
+                backups.append((backup_path, official_path))
+        for staged_path, official_path in _artifact_pairs(staged, official):
+            staged_path.replace(official_path)
+            promoted.append(official_path)
+        remove_backups = True
+    except OSError as exc:
+        rollback_errors: list[str] = []
+        for promoted_path in promoted:
+            try:
+                promoted_path.unlink(missing_ok=True)
+            except OSError as rollback_exc:
+                rollback_errors.append(str(rollback_exc))
+        for backup_path, official_path in backups:
+            try:
+                backup_path.replace(official_path)
+            except OSError as rollback_exc:
+                rollback_errors.append(str(rollback_exc))
+        remove_backups = not rollback_errors
+        detail = f" Rollback errors: {rollback_errors}" if rollback_errors else ""
+        raise PreprocessServiceError(
+            f"Could not promote validated preprocessing artifacts: {exc}.{detail}"
+        ) from exc
+    finally:
+        if remove_backups:
+            shutil.rmtree(backup_dir, ignore_errors=True)
+
+
+def _remove_staging_dir(path: Path, warnings: list[str]) -> None:
+    if (path / ".previous").exists():
+        warnings.append(
+            f"Pipeline staging retained for artifact rollback recovery: {path}"
+        )
+        return
+    try:
+        shutil.rmtree(path, ignore_errors=False)
+    except OSError as exc:
+        warnings.append(f"Could not remove pipeline staging directory {path}: {exc}")
 
 
 class PreprocessService:
     """Coordinate existing preprocessing modules for one accepted crop run."""
 
-    def run(self, request: PreprocessRequest) -> PreprocessResult:
+    def run(
+        self,
+        request: PreprocessRequest,
+        execution_context: PreprocessExecutionContext | None = None,
+    ) -> PreprocessResult:
         """Execute one preprocess run and return success or an expected failure.
 
         Scientific operations remain delegated to their existing modules. A
@@ -446,10 +510,13 @@ class PreprocessService:
         been written, reloaded where applicable, and validated.
         """
 
+        execution = execution_context or PreprocessExecutionContext()
         started = time.perf_counter()
         warnings: list[str] = []
         logger: logging.Logger | None = None
         outputs: PreprocessOutputs | None = None
+        staged_outputs: PreprocessOutputs | None = None
+        staging_dir: Path | None = None
         internal_path: Path | None = None
         raw_probe: VideoProbeResult | None = None
         prepared_validation: PreparedVideoValidationResult | None = None
@@ -457,24 +524,37 @@ class PreprocessService:
         fps: FPSSelection | None = None
         current_stage = "project validation"
         succeeded = False
-        preexisting_official: set[Path] = set()
+
+        def report(
+            phase: str,
+            message: str | None = None,
+        ) -> None:
+            execution.report(
+                OperationProgress(
+                    phase=phase,
+                    message=message or phase,
+                    completed_units=None,
+                    total_units=None,
+                    is_indeterminate=True,
+                )
+            )
+
+        def raise_if_cancelled() -> None:
+            if execution.is_cancellation_requested():
+                raise PreprocessCancelledError(
+                    f"Preprocessing cancelled during {current_stage}."
+                )
 
         try:
+            report("Preparing preprocessing run")
+            raise_if_cancelled()
             project = ProjectService().open_project(request.project_dir)
             outputs = PreprocessOutputs.from_preprocess_dir(get_preprocess_dir(project))
-            preexisting_official = {
-                path.resolve()
-                for path in (
-                    outputs.prepared_video_path,
-                    outputs.prepare_meta_path,
-                    outputs.prepared_sync_path,
-                    outputs.cropped_background_path,
-                    outputs.settings_used_path,
-                )
-                if path.exists()
-            }
             internal_dir = outputs.preprocess_dir / ".internal"
             internal_dir.mkdir(parents=True, exist_ok=True)
+            staging_dir = internal_dir / f"pipeline_{uuid.uuid4().hex}"
+            staging_dir.mkdir(parents=True, exist_ok=False)
+            staged_outputs = PreprocessOutputs.from_preprocess_dir(staging_dir)
             logger = create_processing_logger(outputs.processing_log_path)
             logger.info("run started project=%s", project.name)
 
@@ -492,7 +572,9 @@ class PreprocessService:
                 and request.external_time_selection.provided
             )
             raw_probe = probe_video(
-                request.raw_video_path, require_sequential_count=requires_raw_count
+                request.raw_video_path,
+                require_sequential_count=requires_raw_count,
+                cancellation_requested=execution.cancellation_requested,
             )
 
             current_stage = "trim resolution"
@@ -534,6 +616,16 @@ class PreprocessService:
             if not request.crop_accepted_by_user:
                 raise PreprocessServiceError("The request must explicitly confirm crop acceptance.")
 
+            assert staged_outputs is not None
+            raise_if_cancelled()
+            expected_pipeline_count = trim.expected_frame_count
+            if (
+                expected_pipeline_count is None
+                and raw_probe.frame_count_opencv_readable is not None
+            ):
+                expected_pipeline_count = (
+                    raw_probe.frame_count_opencv_readable - trim.start_frame
+                )
             suffix = config.encoding.ffmpeg.container
             base_internal_path = internal_dir / f"stage_a_intermediate.{suffix}"
             internal_path = (
@@ -543,6 +635,7 @@ class PreprocessService:
             )
             current_stage = "Stage A ffmpeg preparation"
             logger.info("stage=ffmpeg_stage_a output=%s", internal_path)
+            report("Stage A: preparing video geometry")
             stage_a_result = run_ffmpeg_prepare(
                 raw_video_path=raw_probe.source_path,
                 intermediate_path=internal_path,
@@ -550,35 +643,54 @@ class PreprocessService:
                 config=config,
                 start_frame=trim.start_frame,
                 end_frame_exclusive=trim.end_frame_exclusive,
+                expected_frame_count=expected_pipeline_count,
+                progress_callback=execution.progress_callback,
+                cancellation_requested=execution.cancellation_requested,
             )
 
             current_stage = "Stage B OpenCV re-encoding"
-            logger.info("stage=opencv_stage_b output=%s", outputs.prepared_video_path)
+            raise_if_cancelled()
+            expected_count = expected_pipeline_count or getattr(
+                stage_a_result, "frames_processed", None
+            )
+            logger.info(
+                "stage=opencv_stage_b output=%s", staged_outputs.prepared_video_path
+            )
+            report("Stage B: writing SLEAP-compatible video")
             stage_b_result = reencode_intermediate_with_opencv(
                 intermediate_video_path=stage_a_result.intermediate_path,
-                prepared_video_path=outputs.prepared_video_path,
+                prepared_video_path=staged_outputs.prepared_video_path,
                 output_fps=fps.fps_header,
                 output_size_wh=crop_plan.prepared_size_wh,
                 config=config,
+                expected_frame_count=expected_count,
+                progress_callback=execution.progress_callback,
+                cancellation_requested=execution.cancellation_requested,
             )
 
             current_stage = "prepared video validation"
+            raise_if_cancelled()
             logger.info("stage=prepared_video_validation")
             expected_count = (
-                trim.expected_frame_count
-                if trim.expected_frame_count is not None
+                expected_pipeline_count
+                if expected_pipeline_count is not None
                 else stage_b_result.frames_written
             )
+            report("Validating prepared video")
             prepared_validation = validate_prepared_video(
-                outputs.prepared_video_path,
+                staged_outputs.prepared_video_path,
                 expected_frame_count=expected_count,
                 expected_size_wh=crop_plan.prepared_size_wh,
+                progress_callback=execution.progress_callback,
+                cancellation_requested=execution.cancellation_requested,
             )
             if not prepared_validation.is_valid:
                 raise PreprocessServiceError("Prepared video validation did not pass.")
 
             current_stage = "prepared sync writing"
+            raise_if_cancelled()
             logger.info("stage=prepared_sync_write")
+            report("Writing synchronization artifact")
             sync = _build_sync(
                 validation=prepared_validation,
                 trim=trim,
@@ -586,21 +698,35 @@ class PreprocessService:
                 raw_probe=raw_probe,
                 timing=timing,
             )
-            write_prepared_sync_npz(outputs.prepared_sync_path, sync)
+            write_prepared_sync_npz(staged_outputs.prepared_sync_path, sync)
 
             current_stage = "background generation"
+            raise_if_cancelled()
             logger.info("stage=background_generation")
+            report("Generating cropped background")
             background_result = estimate_prepared_background(
-                outputs.prepared_video_path,
+                staged_outputs.prepared_video_path,
                 sample_every_n=config.background.sample_every_n,
                 max_samples=config.background.max_samples,
                 method=config.background.method,
+                expected_frame_count=prepared_validation.opencv_readable_frame_count,
+                progress_callback=execution.progress_callback,
+                cancellation_requested=execution.cancellation_requested,
             )
             validate_background(background_result.background, crop_plan.prepared_size_wh)
-            write_background_png(background_result.background, outputs.cropped_background_path)
+            raise_if_cancelled()
+            write_background_png(
+                background_result.background,
+                staged_outputs.cropped_background_path,
+            )
+            background_result = background_result.model_copy(
+                update={"source_video_path": outputs.prepared_video_path.resolve()}
+            )
 
             current_stage = "metadata construction"
+            raise_if_cancelled()
             logger.info("stage=metadata_build")
+            report("Writing metadata and settings")
             ffmpeg_executable = (
                 Path(stage_a_result.ffmpeg_command[0]) if stage_a_result.ffmpeg_command else None
             )
@@ -633,28 +759,30 @@ class PreprocessService:
 
             current_stage = "settings writing"
             logger.info("stage=settings_write")
-            write_settings_used_yaml(outputs.settings_used_path, config)
+            write_settings_used_yaml(staged_outputs.settings_used_path, config)
 
             current_stage = "metadata writing"
             logger.info("stage=metadata_write")
-            write_prepare_meta_json(outputs.prepare_meta_path, metadata)
+            write_prepare_meta_json(staged_outputs.prepare_meta_path, metadata)
 
             current_stage = "final artifact validation"
+            raise_if_cancelled()
             logger.info("stage=final_artifact_validation")
-            official_paths = (
-                outputs.prepared_video_path,
-                outputs.prepare_meta_path,
-                outputs.prepared_sync_path,
-                outputs.cropped_background_path,
-                outputs.settings_used_path,
+            report("Validating final artifacts")
+            staged_paths = (
+                staged_outputs.prepared_video_path,
+                staged_outputs.prepare_meta_path,
+                staged_outputs.prepared_sync_path,
+                staged_outputs.cropped_background_path,
+                staged_outputs.settings_used_path,
                 outputs.processing_log_path,
             )
-            missing = [str(path) for path in official_paths if not path.is_file()]
+            missing = [str(path) for path in staged_paths if not path.is_file()]
             if missing:
                 raise PreprocessServiceError(
                     f"Successful run is missing official artifacts: {missing}"
                 )
-            reloaded_sync = load_prepared_sync_npz(outputs.prepared_sync_path)
+            reloaded_sync = load_prepared_sync_npz(staged_outputs.prepared_sync_path)
             if (
                 reloaded_sync.frame_count_used_for_sleap
                 != prepared_validation.opencv_readable_frame_count
@@ -663,7 +791,9 @@ class PreprocessService:
                     "Reloaded sync frame count differs from prepared video."
                 )
             try:
-                with outputs.prepare_meta_path.open("r", encoding="utf-8") as stream:
+                with staged_outputs.prepare_meta_path.open(
+                    "r", encoding="utf-8"
+                ) as stream:
                     reloaded_metadata = json.load(stream)
             except (OSError, json.JSONDecodeError) as exc:
                 raise PreprocessServiceError(f"Could not reload prepare metadata: {exc}") from exc
@@ -673,12 +803,15 @@ class PreprocessService:
             validate_background(
                 background_result.background, prepared_validation.opencv_reported_size_wh
             )
+            raise_if_cancelled()
+            _commit_staged_outputs(staged_outputs, outputs)
 
             succeeded = True
             logger.info(
                 "run completed status=success frames=%d",
                 prepared_validation.opencv_readable_frame_count,
             )
+            report("Completed")
             result = PreprocessResult(
                 success=True,
                 outputs=outputs,
@@ -695,9 +828,40 @@ class PreprocessService:
                 external_fps_effective=fps.external_fps_effective,
                 external_fps_effective_method=fps.external_fps_effective_method,
             )
+        except PreprocessCancelledError:
+            if logger is not None:
+                logger.info("run completed status=cancelled stage=%s", current_stage)
+            report("Cancelled", "Preprocessing cancelled")
+            result = PreprocessResult(
+                success=False,
+                cancelled=True,
+                outputs=None,
+                raw_probe=raw_probe,
+                prepared_validation=prepared_validation,
+                crop_plan=crop_plan,
+                message=(
+                    "Preprocessing cancelled. No incomplete outputs were marked "
+                    "as valid."
+                ),
+                warnings=warnings,
+                elapsed_sec=time.perf_counter() - started,
+                fps_header=fps.fps_header if fps is not None else None,
+                fps_header_source=fps.fps_header_source if fps is not None else None,
+                raw_fps_effective=fps.raw_fps_effective if fps is not None else None,
+                raw_fps_effective_method=(
+                    fps.raw_fps_effective_method if fps is not None else None
+                ),
+                external_fps_effective=(
+                    fps.external_fps_effective if fps is not None else None
+                ),
+                external_fps_effective_method=(
+                    fps.external_fps_effective_method if fps is not None else None
+                ),
+            )
         except (PreprocessError, ProjectError, OSError) as exc:
             if logger is not None:
                 logger.error("run failed stage=%s error=%s", current_stage, exc)
+            report("Failed", f"Preprocessing failed during {current_stage}")
             result = PreprocessResult(
                 success=False,
                 outputs=None,
@@ -720,8 +884,8 @@ class PreprocessService:
             debug_enabled = request.config.debug.enabled
             if internal_path is not None and not debug_enabled:
                 _remove_file(internal_path, warnings)
-            if not succeeded and outputs is not None:
-                _cleanup_new_official_outputs(outputs, preexisting_official, warnings)
+            if staging_dir is not None and (succeeded or not debug_enabled):
+                _remove_staging_dir(staging_dir, warnings)
             if logger is not None:
                 if succeeded and debug_enabled:
                     logger.info("internal artifacts retained debug=true")
