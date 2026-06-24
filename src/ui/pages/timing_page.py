@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QFileDialog,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -151,6 +152,22 @@ class TimingPage(QWidget):
         self.success_label = QLabel()
         self.success_label.setWordWrap(True)
         self.success_label.setStyleSheet("color: #176b2c;")
+        self.warning_panel = QFrame()
+        self.warning_panel.setObjectName("timingWarningPanel")
+        self.warning_panel.setStyleSheet(
+            "QFrame#timingWarningPanel {"
+            "background-color: #fff3cd; border: 2px solid #a86100; "
+            "border-radius: 4px; padding: 8px;"
+            "}"
+        )
+        self.warning_label = QLabel()
+        self.warning_label.setWordWrap(True)
+        self.warning_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        warning_layout = QVBoxLayout(self.warning_panel)
+        warning_layout.addWidget(self.warning_label)
+        self.warning_panel.setVisible(False)
         self.error_label = QLabel()
         self.error_label.setWordWrap(True)
         self.error_label.setStyleSheet("color: #b00020;")
@@ -161,6 +178,7 @@ class TimingPage(QWidget):
         layout.addLayout(mode_row)
         layout.addWidget(self.mat_group, 1)
         layout.addWidget(self.success_label)
+        layout.addWidget(self.warning_panel)
         layout.addWidget(self.error_label)
 
         self.no_timing.toggled.connect(self._mode_changed)
@@ -487,6 +505,30 @@ class TimingPage(QWidget):
             )
         else:
             self.success_label.setText("MATLAB timing selection is not yet validated.")
+        self._refresh_warning()
+
+    def _refresh_warning(self) -> None:
+        assessment = self.controller.state.timing_plausibility_assessment
+        if assessment is None or not assessment.warning_triggered:
+            self.warning_label.clear()
+            self.warning_panel.setVisible(False)
+            return
+        self.warning_label.setText(
+            "Selected timing units: "
+            f"{assessment.selected_timing_units.value}\n"
+            "External timing estimated FPS: "
+            f"{self._format_number(assessment.external_timing_estimated_fps)}\n"
+            "Raw video nominal FPS: "
+            f"{self._format_number(assessment.raw_video_nominal_fps)}\n"
+            "Mismatch factor: "
+            f"{self._format_number(assessment.symmetric_fps_mismatch_factor)}x\n\n"
+            "Warning:\n"
+            "The selected timing units produce an estimated frame rate that "
+            "differs substantially from the raw video frame rate.\n"
+            "Check the timing units before preprocessing. Incorrect units may "
+            "prevent video encoding."
+        )
+        self.warning_panel.setVisible(True)
 
     @staticmethod
     def _format_number(value: float | None) -> str:
@@ -501,6 +543,7 @@ class TimingPage(QWidget):
     def _show_expected_error(self, message: str) -> None:
         self.error_label.setText(message)
         self.success_label.clear()
+        self._refresh_warning()
         self.error_message.emit(message)
         self.validity_changed.emit()
 

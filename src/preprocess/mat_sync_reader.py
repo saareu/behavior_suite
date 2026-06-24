@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -14,8 +15,12 @@ from preprocess.models import (
     ExternalTimeSelection,
     MatVectorCandidate,
     MatWorkspace,
+    TimingPlausibilityAssessment,
     TimingUnit,
+    VideoProbeResult,
 )
+
+TIMING_FPS_MISMATCH_WARNING_THRESHOLD = 2.0
 
 _TEMPORAL_UNIT_SCALE = {
     TimingUnit.SECONDS: 1.0,
@@ -23,6 +28,48 @@ _TEMPORAL_UNIT_SCALE = {
     TimingUnit.MICROSECONDS: 1e-6,
     TimingUnit.NANOSECONDS: 1e-9,
 }
+
+
+def assess_timing_fps_plausibility(
+    selection: ExternalTimeSelection | None,
+    raw_probe: VideoProbeResult | None,
+) -> TimingPlausibilityAssessment | None:
+    """Compare validated temporal timing FPS with nominal raw-video FPS.
+
+    This assessment is display-only. It does not validate timing, choose an FPS,
+    change declared units, or influence navigation and processing decisions.
+    """
+
+    if (
+        selection is None
+        or raw_probe is None
+        or not selection.provided
+        or selection.validation_status != "valid"
+        or selection.declared_units not in _TEMPORAL_UNIT_SCALE
+    ):
+        return None
+    external_fps = selection.estimated_fps
+    raw_fps = raw_probe.raw_fps_effective
+    if (
+        external_fps is None
+        or raw_fps is None
+        or not math.isfinite(external_fps)
+        or not math.isfinite(raw_fps)
+        or external_fps <= 0
+        or raw_fps <= 0
+    ):
+        return None
+    mismatch_factor = max(external_fps / raw_fps, raw_fps / external_fps)
+    return TimingPlausibilityAssessment(
+        selected_timing_units=selection.declared_units,
+        external_timing_estimated_fps=external_fps,
+        raw_video_nominal_fps=raw_fps,
+        raw_video_nominal_fps_source=raw_probe.raw_fps_effective_method,
+        symmetric_fps_mismatch_factor=mismatch_factor,
+        warning_triggered=(
+            mismatch_factor >= TIMING_FPS_MISMATCH_WARNING_THRESHOLD
+        ),
+    )
 
 
 def _is_real_numeric_array(value: Any) -> bool:

@@ -22,7 +22,12 @@ from ui.tasks import (
 )
 
 
-def _probe_result(path: Path, *, readable_count: int | None) -> VideoProbeResult:
+def _probe_result(
+    path: Path,
+    *,
+    readable_count: int | None,
+    raw_fps: float | None = 10.0,
+) -> VideoProbeResult:
     return VideoProbeResult(
         source_path=path.resolve(),
         width=100,
@@ -36,19 +41,30 @@ def _probe_result(path: Path, *, readable_count: int | None) -> VideoProbeResult
         frame_count_ffprobe=4,
         frame_count_opencv_reported=4,
         frame_count_opencv_readable=readable_count,
-        opencv_fps=10.0,
-        raw_fps_effective=10.0,
-        raw_fps_effective_method="ffprobe_avg_frame_rate",
+        opencv_fps=raw_fps,
+        raw_fps_effective=raw_fps,
+        raw_fps_effective_method=(
+            "ffprobe_avg_frame_rate" if raw_fps is not None else None
+        ),
         pts_status="not_extracted",
         ffprobe_succeeded=True,
     )
 
 
-def _state(tmp_path: Path, *, readable_count: int | None = 4) -> PreprocessSetupState:
+def _state(
+    tmp_path: Path,
+    *,
+    readable_count: int | None = 4,
+    raw_fps: float | None = 10.0,
+) -> PreprocessSetupState:
     raw_path = tmp_path / "raw.avi"
     return PreprocessSetupState(
         raw_video_path=raw_path,
-        raw_probe=_probe_result(raw_path, readable_count=readable_count),
+        raw_probe=_probe_result(
+            raw_path,
+            readable_count=readable_count,
+            raw_fps=raw_fps,
+        ),
     )
 
 
@@ -75,10 +91,15 @@ def _loaded_controller(
     *,
     vector: np.ndarray | None = None,
     readable_count: int | None = 4,
+    raw_fps: float | None = 10.0,
 ) -> TimingController:
     workspace = _workspace(tmp_path, vector)
     controller = TimingController(
-        _state(tmp_path, readable_count=readable_count),
+        _state(
+            tmp_path,
+            readable_count=readable_count,
+            raw_fps=raw_fps,
+        ),
         workspace_loader=lambda _path: workspace,
     )
     controller.choose_matlab_timing()
@@ -95,9 +116,14 @@ def _select(
 
 
 def test_no_timing_mode_clears_state_and_permits_navigation(tmp_path: Path) -> None:
-    controller = _loaded_controller(tmp_path)
+    controller = _loaded_controller(
+        tmp_path,
+        vector=np.arange(4, dtype=np.float64) / 20.0,
+    )
     _select(controller)
     controller.validate_selected_timing()
+
+    assert controller.state.timing_plausibility_assessment is not None
 
     controller.choose_no_external_timing()
 
@@ -105,6 +131,7 @@ def test_no_timing_mode_clears_state_and_permits_navigation(tmp_path: Path) -> N
     assert controller.state.timing_status == "not_provided"
     assert controller.state.external_time_selection is None
     assert controller.state.external_time_vector_seconds is None
+    assert controller.state.timing_plausibility_assessment is None
     assert controller.state.mat_candidates == []
     assert controller.can_advance() is True
 
@@ -364,6 +391,88 @@ def test_valid_seconds_timing_stores_selection_and_seconds_vector(
     assert controller.can_advance() is True
 
 
+def test_fps_mismatch_warning_is_non_blocking_at_exact_threshold(
+    tmp_path: Path,
+) -> None:
+    controller = _loaded_controller(
+        tmp_path,
+        vector=np.arange(4, dtype=np.float64) / 20.0,
+        raw_fps=10.0,
+    )
+    _select(controller)
+
+    selection = controller.validate_selected_timing()
+    assessment = controller.state.timing_plausibility_assessment
+
+    assert selection.validation_status == "valid"
+    assert controller.state.timing_valid is True
+    assert controller.state.timing_status == "valid"
+    assert assessment is not None
+    assert assessment.symmetric_fps_mismatch_factor == pytest.approx(2.0)
+    assert assessment.warning_triggered is True
+    assert controller.can_advance() is True
+
+
+def test_missing_raw_nominal_fps_does_not_create_warning(
+    tmp_path: Path,
+) -> None:
+    controller = _loaded_controller(tmp_path, raw_fps=None)
+    _select(controller)
+
+    controller.validate_selected_timing()
+
+    assert controller.state.timing_plausibility_assessment is None
+    assert controller.can_advance() is True
+
+
+def test_changing_units_clears_then_recomputes_warning(tmp_path: Path) -> None:
+    controller = _loaded_controller(
+        tmp_path,
+        vector=np.array([0.0, 100.0, 200.0, 300.0]),
+        raw_fps=10.0,
+    )
+    _select(controller, TimingUnit.SECONDS)
+    controller.validate_selected_timing()
+    first = controller.state.timing_plausibility_assessment
+    assert first is not None
+    assert first.warning_triggered is True
+
+    controller.select_units(TimingUnit.MILLISECONDS)
+
+    assert controller.state.timing_plausibility_assessment is None
+    controller.validate_selected_timing()
+    updated = controller.state.timing_plausibility_assessment
+    assert updated is not None
+    assert updated.warning_triggered is False
+    assert updated.external_timing_estimated_fps == pytest.approx(10.0)
+    assert controller.state.selected_timing_units is TimingUnit.MILLISECONDS
+
+
+def test_invalid_timing_selection_clears_old_warning(tmp_path: Path) -> None:
+    workspace = _workspace(
+        tmp_path,
+        np.arange(4, dtype=np.float64) / 20.0,
+    )
+    controller = TimingController(
+        _state(tmp_path),
+        workspace_loader=lambda _path: workspace,
+    )
+    controller.choose_matlab_timing()
+    controller.load_mat_file(workspace.source_path)
+    _select(controller)
+    controller.validate_selected_timing()
+    assert controller.state.timing_plausibility_assessment is not None
+
+    workspace.variables["frame_times"] = np.array([0.0, 0.1, 0.1, 0.3])
+    controller.select_candidate("frame_times")
+    assert controller.state.timing_plausibility_assessment is None
+
+    with pytest.raises(TimingValidationError, match="strictly increasing"):
+        controller.validate_selected_timing()
+
+    assert controller.state.timing_plausibility_assessment is None
+
+
 def test_milliseconds_conversion_uses_core_helper(tmp_path: Path) -> None:
     controller = _loaded_controller(
         tmp_path,
@@ -391,6 +500,7 @@ def test_non_temporal_units_store_no_seconds_and_mark_not_convertible(
 
     assert selection.declared_units is units
     assert controller.state.external_time_vector_seconds is None
+    assert controller.state.timing_plausibility_assessment is None
     assert controller.state.timing_status == "not_convertible_to_seconds"
     assert controller.can_advance() is True
 

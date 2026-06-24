@@ -6,7 +6,11 @@ import pytest
 import yaml
 
 from preprocess.config import PreprocessConfig, TrimConfig
-from preprocess.models import VideoProbeResult
+from preprocess.models import (
+    TimingPlausibilityAssessment,
+    TimingUnit,
+    VideoProbeResult,
+)
 from preprocess.pre_crop import PreCropMode, PreCropROI
 from project.service import ProjectService
 from ui.controllers.preprocess_setup_controller import (
@@ -284,6 +288,14 @@ def test_changing_raw_video_invalidates_same_session_readable_count(
     controller.create_project(tmp_path, "CountInvalidationProject")
     first_path = tmp_path / "first.avi"
     controller.probe_raw_video(first_path, require_sequential_count=True)
+    controller.state.timing_plausibility_assessment = TimingPlausibilityAssessment(
+        selected_timing_units=TimingUnit.SECONDS,
+        external_timing_estimated_fps=20.0,
+        raw_video_nominal_fps=10.0,
+        raw_video_nominal_fps_source="ffprobe_avg_frame_rate",
+        symmetric_fps_mismatch_factor=2.0,
+        warning_triggered=True,
+    )
 
     controller.set_raw_video_path(tmp_path / "second.avi")
 
@@ -292,6 +304,7 @@ def test_changing_raw_video_invalidates_same_session_readable_count(
         controller.state.raw_readable_count_status
         is RawReadableCountStatus.NOT_COUNTED
     )
+    assert controller.state.timing_plausibility_assessment is None
 
 
 def test_probe_from_different_source_does_not_reuse_previous_count(

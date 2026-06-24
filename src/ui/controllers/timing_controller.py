@@ -12,6 +12,7 @@ import numpy as np
 
 from preprocess.exceptions import PreprocessError, VideoProbeCancelledError
 from preprocess.mat_sync_reader import (
+    assess_timing_fps_plausibility,
     convert_timing_vector_to_seconds,
     get_numeric_vector,
     list_numeric_vectors,
@@ -132,6 +133,7 @@ class TimingController:
         self.state.selected_timing_units = None
         self.state.external_time_selection = None
         self.state.external_time_vector_seconds = None
+        self.state.timing_plausibility_assessment = None
         self.state.last_validation_error = None
 
     def choose_matlab_timing(self) -> None:
@@ -498,6 +500,10 @@ class TimingController:
             timing_status = "not_convertible_to_seconds"
         self.state.external_time_selection = selection
         self.state.external_time_vector_seconds = vector_seconds
+        self.state.timing_plausibility_assessment = assess_timing_fps_plausibility(
+            selection,
+            self.state.raw_probe,
+        )
         self.state.timing_status = timing_status
         self.state.timing_valid = True
         self.state.last_validation_error = None
@@ -546,6 +552,7 @@ class TimingController:
         self.state.timing_status = status
         self.state.external_time_selection = None
         self.state.external_time_vector_seconds = None
+        self.state.timing_plausibility_assessment = None
         if not preserve_choices:
             self.state.selected_timing_variable = None
             self.state.selected_timing_units = None
@@ -553,6 +560,7 @@ class TimingController:
 
     def _new_validation_error(self, message: str) -> TimingValidationError:
         self.state.timing_valid = False
+        self.state.timing_plausibility_assessment = None
         self.state.last_validation_error = message
         return TimingValidationError(message)
 
@@ -576,12 +584,14 @@ class TimingController:
         self.state.timing_status = status
         self.state.external_time_selection = None
         self.state.external_time_vector_seconds = None
+        self.state.timing_plausibility_assessment = None
 
     def _expected_failure(self, message: str, exc: BaseException) -> NoReturn:
         self.state.timing_valid = False
         self.state.timing_status = "invalid"
         self.state.external_time_selection = None
         self.state.external_time_vector_seconds = None
+        self.state.timing_plausibility_assessment = None
         self.state.last_validation_error = message
         raise TimingValidationError(message) from exc
 
@@ -590,6 +600,7 @@ class TimingController:
         self.state.timing_status = "error"
         self.state.external_time_selection = None
         self.state.external_time_vector_seconds = None
+        self.state.timing_plausibility_assessment = None
         self.state.unexpected_error_detail = "".join(
             traceback.format_exception(type(exc), exc, exc.__traceback__)
         )

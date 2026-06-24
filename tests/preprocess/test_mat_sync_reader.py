@@ -7,13 +7,48 @@ from scipy.io import savemat
 
 from preprocess.exceptions import ExternalTimingError
 from preprocess.mat_sync_reader import (
+    TIMING_FPS_MISMATCH_WARNING_THRESHOLD,
+    assess_timing_fps_plausibility,
     convert_timing_vector_to_seconds,
     get_numeric_vector,
     list_numeric_vectors,
     load_mat_workspace,
     validate_external_timing_vector,
 )
-from preprocess.models import TimingUnit
+from preprocess.models import ExternalTimeSelection, TimingUnit, VideoProbeResult
+
+
+def _probe_with_nominal_fps(
+    nominal_fps: float | None,
+) -> VideoProbeResult:
+    return VideoProbeResult(
+        source_path=Path("raw.avi"),
+        width=100,
+        height=80,
+        frame_count_opencv_reported=4,
+        frame_count_opencv_readable=4,
+        opencv_fps=nominal_fps,
+        raw_fps_effective=nominal_fps,
+        raw_fps_effective_method=(
+            "ffprobe_avg_frame_rate" if nominal_fps is not None else None
+        ),
+        pts_status="not_extracted",
+        ffprobe_succeeded=False,
+    )
+
+
+def _validated_selection_for_fps(
+    estimated_fps: float,
+    units: TimingUnit = TimingUnit.SECONDS,
+) -> ExternalTimeSelection:
+    vector = np.arange(4, dtype=np.float64) / estimated_fps
+    if units is TimingUnit.MILLISECONDS:
+        vector *= 1_000.0
+    return validate_external_timing_vector(
+        vector,
+        raw_frame_count_opencv_readable=4,
+        declared_units=units,
+    )
 
 
 def test_load_mat_workspace_and_list_only_numeric_vectors(tmp_path: Path) -> None:
@@ -155,3 +190,83 @@ def test_non_monotonic_timing_vector_is_rejected(vector: np.ndarray) -> None:
 def test_unsupported_timing_units_are_rejected() -> None:
     with pytest.raises(ExternalTimingError, match="Unsupported"):
         convert_timing_vector_to_seconds(np.array([0.0, 1.0]), "minutes")
+
+
+@pytest.mark.parametrize(
+    ("external_fps", "raw_fps", "expected_factor"),
+    [
+        (120.0, 60.0, 2.0),
+        (60.0, 120.0, 2.0),
+        (119_000.0, 119.0, 1_000.0),
+    ],
+)
+def test_timing_fps_mismatch_at_or_above_threshold_triggers_warning(
+    external_fps: float,
+    raw_fps: float,
+    expected_factor: float,
+) -> None:
+    assessment = assess_timing_fps_plausibility(
+        _validated_selection_for_fps(external_fps),
+        _probe_with_nominal_fps(raw_fps),
+    )
+
+    assert TIMING_FPS_MISMATCH_WARNING_THRESHOLD == 2.0
+    assert assessment is not None
+    assert assessment.symmetric_fps_mismatch_factor == pytest.approx(
+        expected_factor
+    )
+    assert assessment.warning_triggered is True
+
+
+def test_timing_fps_mismatch_below_threshold_does_not_warn() -> None:
+    assessment = assess_timing_fps_plausibility(
+        _validated_selection_for_fps(119.4),
+        _probe_with_nominal_fps(60.0),
+    )
+
+    assert assessment is not None
+    assert assessment.symmetric_fps_mismatch_factor == pytest.approx(1.99)
+    assert assessment.warning_triggered is False
+
+
+def test_matching_timing_fps_does_not_warn() -> None:
+    assessment = assess_timing_fps_plausibility(
+        _validated_selection_for_fps(119.0),
+        _probe_with_nominal_fps(119.0),
+    )
+
+    assert assessment is not None
+    assert assessment.symmetric_fps_mismatch_factor == pytest.approx(1.0)
+    assert assessment.warning_triggered is False
+
+
+@pytest.mark.parametrize("units", [TimingUnit.FRAMES, TimingUnit.UNKNOWN])
+def test_non_temporal_timing_has_no_fps_plausibility_assessment(
+    units: TimingUnit,
+) -> None:
+    selection = validate_external_timing_vector(
+        np.arange(4, dtype=np.float64),
+        raw_frame_count_opencv_readable=4,
+        declared_units=units,
+    )
+
+    assert (
+        assess_timing_fps_plausibility(
+            selection,
+            _probe_with_nominal_fps(10.0),
+        )
+        is None
+    )
+
+
+def test_missing_selection_or_raw_nominal_fps_has_no_assessment() -> None:
+    selection = _validated_selection_for_fps(10.0)
+
+    assert assess_timing_fps_plausibility(None, _probe_with_nominal_fps(10.0)) is None
+    assert (
+        assess_timing_fps_plausibility(
+            selection,
+            _probe_with_nominal_fps(None),
+        )
+        is None
+    )

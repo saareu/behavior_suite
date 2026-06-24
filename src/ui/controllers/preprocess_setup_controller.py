@@ -649,6 +649,7 @@ class PreprocessSetupController:
         self.state.selected_timing_units = None
         self.state.external_time_selection = None
         self.state.external_time_vector_seconds = None
+        self.state.timing_plausibility_assessment = None
 
     def _new_validation_error(self, message: str) -> SetupValidationError:
         self.state.last_validation_error = message

@@ -15,6 +15,7 @@ from preprocess.models import (
     ExternalTimeSelection,
     MatVectorCandidate,
     PreprocessResult,
+    TimingPlausibilityAssessment,
     TimingUnit,
     VideoProbeResult,
 )
@@ -106,6 +107,7 @@ class PreprocessSetupState:
     selected_timing_units: TimingUnit | None = None
     external_time_selection: ExternalTimeSelection | None = None
     external_time_vector_seconds: np.ndarray | None = None
+    timing_plausibility_assessment: TimingPlausibilityAssessment | None = None
     candidate_crop_plan: CropPlan | None = None
     accepted_crop_plan: CropPlan | None = None
     crop_mode: CropReviewMode = CropReviewMode.AUTOMATIC

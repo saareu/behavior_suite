@@ -115,6 +115,19 @@ class ExternalTimeSelection(BaseModel):
     validation_status: str
 
 
+class TimingPlausibilityAssessment(BaseModel):
+    """Display-only comparison of validated external and nominal raw FPS."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    selected_timing_units: TimingUnit
+    external_timing_estimated_fps: float = Field(gt=0)
+    raw_video_nominal_fps: float = Field(gt=0)
+    raw_video_nominal_fps_source: str | None = None
+    symmetric_fps_mismatch_factor: float = Field(ge=1.0)
+    warning_triggered: bool
+
+
 class PreprocessOutputs(BaseModel):
     """Official preprocessing artifact paths for a project."""
 
