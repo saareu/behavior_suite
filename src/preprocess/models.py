@@ -32,6 +32,28 @@ class TimingUnit(StrEnum):
     UNKNOWN = "unknown"
 
 
+class RawReadableCountProvenance(StrEnum):
+    """Origin of a positive sequential OpenCV-readable raw-frame count."""
+
+    VERIFIED_CURRENT_SESSION = "verified_current_session"
+    RECORDED_PRIOR_COMPLETED_RUN = "recorded_prior_completed_run"
+    VALIDATED_REUSABLE_CACHE = "validated_reusable_cache"
+
+
+class RawVideoFingerprint(BaseModel):
+    """Exact, bounded-cost identity used for reusable raw-probe cache entries."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    resolved_path: Path
+    file_size_bytes: int = Field(ge=0)
+    modified_time_ns: int = Field(ge=0)
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    content_signature: str | None = None
+    content_signature_method: str | None = None
+
+
 class SoftwareEnvironmentInfo(BaseModel):
     """Version provenance supplied to preprocessing metadata generation."""
 
@@ -99,6 +121,7 @@ class VideoProbeResult(BaseModel):
     frame_count_ffprobe: int | None = Field(default=None, ge=0)
     frame_count_opencv_reported: int = Field(ge=0)
     frame_count_opencv_readable: int | None = Field(default=None, ge=0)
+    raw_readable_count_provenance: RawReadableCountProvenance | None = None
     opencv_fps: float | None = Field(default=None, gt=0)
     raw_fps_effective: float | None = Field(default=None, gt=0)
     raw_fps_effective_method: str | None = None

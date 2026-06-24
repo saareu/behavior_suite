@@ -8,6 +8,7 @@ from preprocess.models import (
     ExternalTimeSelection,
     MatWorkspace,
     OperationProgress,
+    RawReadableCountProvenance,
     TimingUnit,
     VideoProbeResult,
 )
@@ -249,6 +250,47 @@ def test_restored_prior_run_count_is_reused_without_second_probe(
     )
 
 
+def test_validated_cache_count_is_reused_for_timing_without_second_probe(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    state = _state(tmp_path)
+    assert state.raw_probe is not None
+    state.raw_probe = state.raw_probe.model_copy(
+        update={
+            "raw_readable_count_provenance": (
+                RawReadableCountProvenance.VALIDATED_REUSABLE_CACHE
+            )
+        }
+    )
+    state.raw_readable_count_status = (
+        RawReadableCountStatus.VALIDATED_REUSABLE_CACHE
+    )
+
+    def unexpected_probe(
+        _path: Path, *, require_sequential_count: bool
+    ) -> VideoProbeResult:
+        raise AssertionError(
+            f"cached count unexpectedly triggered probe: {require_sequential_count}"
+        )
+
+    controller = TimingController(
+        state,
+        workspace_loader=lambda _path: workspace,
+        probe_function=unexpected_probe,
+    )
+    controller.choose_matlab_timing()
+    controller.load_mat_file(workspace.source_path)
+    _select(controller)
+
+    controller.validate_selected_timing()
+
+    assert controller.reusable_raw_frame_count() == 4
+    assert state.raw_readable_count_status is (
+        RawReadableCountStatus.VALIDATED_REUSABLE_CACHE
+    )
+
+
 def test_existing_count_replaces_default_count_action_with_explicit_recount(
     tmp_path: Path,
 ) -> None:
@@ -301,6 +343,40 @@ def test_failed_diagnostic_recount_preserves_existing_count_and_no_timing_mode(
     assert controller.state.timing_mode is TimingMode.NO_EXTERNAL
     assert controller.state.timing_valid is True
     assert controller.state.timing_status == "not_provided"
+
+
+def test_successful_recount_replaces_cached_count_with_current_session_value(
+    tmp_path: Path,
+) -> None:
+    state = _state(tmp_path)
+    assert state.raw_probe is not None
+    state.raw_probe = state.raw_probe.model_copy(
+        update={
+            "raw_readable_count_provenance": (
+                RawReadableCountProvenance.VALIDATED_REUSABLE_CACHE
+            )
+        }
+    )
+    state.raw_readable_count_status = (
+        RawReadableCountStatus.VALIDATED_REUSABLE_CACHE
+    )
+    controller = TimingController(state)
+    controller.prepare_full_raw_frame_count(force_recount=True)
+    recounted = _probe_result(state.raw_video_path, readable_count=5).model_copy(
+        update={
+            "raw_readable_count_provenance": (
+                RawReadableCountProvenance.VERIFIED_CURRENT_SESSION
+            )
+        }
+    )
+
+    count = controller.apply_full_raw_frame_count(recounted)
+
+    assert count == 5
+    assert controller.reusable_raw_frame_count() == 5
+    assert state.raw_readable_count_status is (
+        RawReadableCountStatus.COUNTED_THIS_SESSION
+    )
 
 
 def test_current_generation_cancellation_has_distinct_nonfailure_status(

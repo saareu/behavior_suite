@@ -27,6 +27,7 @@ from preprocess.models import (
     TimingUnit,
 )
 from preprocess.pre_crop import PreCropMode, resolve_pre_crop
+from preprocess.raw_probe_cache import get_raw_probe_cache_path
 from preprocess.service import PreprocessService, resolve_trim_range
 from preprocess.video_probe import probe_video
 from project.service import ProjectService
@@ -378,7 +379,11 @@ def detect_crop(
         project = ProjectService().open_project(project_dir)
         destination = _validate_new_crop_plan_path(output_crop_plan)
         config = load_preprocess_config(config_path)
-        raw_probe = probe_video(raw_video, require_sequential_count=False)
+        raw_probe = probe_video(
+            raw_video,
+            require_sequential_count=False,
+            cache_path=get_raw_probe_cache_path(project.root_dir / "preprocess"),
+        )
         trim = resolve_trim_range(
             request_start_frame=start_frame,
             request_end_frame_exclusive=end_frame,

@@ -2,12 +2,15 @@ import json
 from pathlib import Path
 from typing import Any
 
+import cv2
+import numpy as np
 import pytest
 import yaml
 
 from preprocess.config import PreprocessConfig, TrimConfig
 from preprocess.models import (
     OperationProgress,
+    RawReadableCountProvenance,
     TimingPlausibilityAssessment,
     TimingUnit,
     VideoProbeResult,
@@ -42,6 +45,23 @@ def _probe_result(path: Path, *, readable_count: int | None = None) -> VideoProb
         pts_status="not_extracted",
         ffprobe_succeeded=True,
     )
+
+
+def _write_tiny_video(path: Path, frame_count: int = 4) -> Path:
+    writer = cv2.VideoWriter(
+        str(path),
+        cv2.VideoWriter_fourcc(*"MJPG"),
+        10.0,
+        (100, 80),
+    )
+    if not writer.isOpened():
+        pytest.skip("This OpenCV build cannot create an MJPG AVI test fixture.")
+    try:
+        for index in range(frame_count):
+            writer.write(np.full((80, 100, 3), index * 20, dtype=np.uint8))
+    finally:
+        writer.release()
+    return path
 
 
 def _controller_with_probe(
@@ -166,6 +186,28 @@ def test_open_completed_project_restores_prior_run_raw_count_provenance(
     tmp_path: Path,
 ) -> None:
     project = ProjectService().create_project(tmp_path, "CountedProject")
+    raw_path = _write_tiny_video(tmp_path / "recorded_raw.avi")
+    counting_controller = PreprocessSetupController()
+    counting_controller.load_startup_config()
+    counting_controller.open_project(project.root_dir)
+    counting_controller.probe_raw_video(raw_path, require_sequential_count=True)
+    _write_prepare_metadata(project.root_dir, raw_path, readable_count=4)
+    controller = _controller_with_probe()
+
+    controller.open_project(project.root_dir)
+
+    assert controller.state.raw_probe is not None
+    assert controller.state.raw_probe.frame_count_opencv_readable == 4
+    assert (
+        controller.state.raw_readable_count_status
+        is RawReadableCountStatus.RECORDED_PRIOR_RUN
+    )
+
+
+def test_completed_metadata_count_without_verified_fingerprint_is_not_restored(
+    tmp_path: Path,
+) -> None:
+    project = ProjectService().create_project(tmp_path, "UnverifiedCountProject")
     raw_path = tmp_path / "recorded_raw.avi"
     _write_prepare_metadata(project.root_dir, raw_path, readable_count=20)
     controller = _controller_with_probe()
@@ -173,10 +215,35 @@ def test_open_completed_project_restores_prior_run_raw_count_provenance(
     controller.open_project(project.root_dir)
 
     assert controller.state.raw_probe is not None
-    assert controller.state.raw_probe.frame_count_opencv_readable == 20
+    assert controller.state.raw_probe.frame_count_opencv_readable is None
     assert (
         controller.state.raw_readable_count_status
-        is RawReadableCountStatus.RECORDED_PRIOR_RUN
+        is RawReadableCountStatus.NOT_COUNTED
+    )
+
+
+def test_reopened_gui_restores_matching_cache_with_distinct_provenance(
+    tmp_path: Path,
+) -> None:
+    project = ProjectService().create_project(tmp_path, "CachedProbeProject")
+    raw_path = _write_tiny_video(tmp_path / "cached_raw.avi")
+    counting_controller = PreprocessSetupController()
+    counting_controller.load_startup_config()
+    counting_controller.open_project(project.root_dir)
+    counting_controller.probe_raw_video(raw_path, require_sequential_count=True)
+    reopened = PreprocessSetupController()
+    reopened.load_startup_config()
+
+    reopened.open_project(project.root_dir)
+
+    assert reopened.state.raw_video_path == raw_path.resolve()
+    assert reopened.state.raw_probe is not None
+    assert reopened.state.raw_probe.frame_count_opencv_readable == 4
+    assert reopened.state.raw_probe.raw_readable_count_provenance is (
+        RawReadableCountProvenance.VALIDATED_REUSABLE_CACHE
+    )
+    assert reopened.state.raw_readable_count_status is (
+        RawReadableCountStatus.VALIDATED_REUSABLE_CACHE
     )
 
 
@@ -306,6 +373,34 @@ def test_changing_raw_video_invalidates_same_session_readable_count(
         is RawReadableCountStatus.NOT_COUNTED
     )
     assert controller.state.timing_plausibility_assessment is None
+
+
+def test_changing_raw_video_clears_cache_derived_count(tmp_path: Path) -> None:
+    controller = _controller_with_probe()
+    controller.create_project(tmp_path, "CachedCountInvalidationProject")
+    first_path = tmp_path / "first.avi"
+    controller.state.raw_video_path = first_path
+    controller.state.raw_probe = _probe_result(
+        first_path,
+        readable_count=20,
+    ).model_copy(
+        update={
+            "raw_readable_count_provenance": (
+                RawReadableCountProvenance.VALIDATED_REUSABLE_CACHE
+            )
+        }
+    )
+    controller.state.raw_readable_count_status = (
+        RawReadableCountStatus.VALIDATED_REUSABLE_CACHE
+    )
+
+    controller.set_raw_video_path(tmp_path / "second.avi")
+
+    assert controller.state.raw_probe is None
+    assert (
+        controller.state.raw_readable_count_status
+        is RawReadableCountStatus.NOT_COUNTED
+    )
 
 
 def test_probe_from_different_source_does_not_reuse_previous_count(

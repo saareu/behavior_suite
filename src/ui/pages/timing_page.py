@@ -324,6 +324,7 @@ class TimingPage(QWidget):
                     path,
                     context,
                     report,
+                    force_recount=force_recount,
                 ),
                 task_name=(
                     "sequential raw-frame recount"
@@ -528,6 +529,11 @@ class TimingPage(QWidget):
                     "Raw sequential readable-frame count:\n"
                     "Recorded by prior completed preprocessing run: "
                     f"{readable_count:,}"
+                )
+            elif status is RawReadableCountStatus.VALIDATED_REUSABLE_CACHE:
+                count_status = (
+                    "Raw sequential readable-frame count:\n"
+                    f"Validated reusable cached count: {readable_count:,}"
                 )
             else:
                 count_status = (

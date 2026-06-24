@@ -59,6 +59,7 @@ class RawReadableCountStatus(StrEnum):
     NOT_COUNTED = "not_counted"
     COUNTED_THIS_SESSION = "counted_this_session"
     RECORDED_PRIOR_RUN = "recorded_prior_run"
+    VALIDATED_REUSABLE_CACHE = "validated_reusable_cache"
     COUNTING = "counting"
     RECOUNTING = "recounting"
     COUNT_FAILED = "count_failed"

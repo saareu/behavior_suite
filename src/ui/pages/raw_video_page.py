@@ -204,6 +204,10 @@ class RawVideoPage(QWidget):
                     True,
                     context,
                     report,
+                    force_recount=(
+                        self.controller.state.raw_readable_count_status
+                        is RawReadableCountStatus.RECOUNTING
+                    ),
                 ),
                 task_name="full raw-video probe",
                 context=context,
@@ -368,6 +372,8 @@ class RawVideoPage(QWidget):
         if count is not None and count > 0:
             if status is RawReadableCountStatus.RECORDED_PRIOR_RUN:
                 return f"Recorded by prior completed preprocessing run: {count:,}"
+            if status is RawReadableCountStatus.VALIDATED_REUSABLE_CACHE:
+                return f"Validated reusable cached count: {count:,}"
             return f"Verified during this GUI session: {count:,}"
         return "Not measured"
 

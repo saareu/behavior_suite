@@ -24,10 +24,13 @@ from preprocess.models import (
     MatVectorCandidate,
     MatWorkspace,
     OperationProgress,
+    RawReadableCountProvenance,
     TimingUnit,
     VideoProbeResult,
 )
+from preprocess.raw_probe_cache import get_raw_probe_cache_path
 from preprocess.video_probe import probe_video
+from project.paths import PREPROCESS_DIRNAME
 from ui.state import PreprocessSetupState, RawReadableCountStatus, TimingMode
 from ui.tasks import (
     GuiTaskContext,
@@ -104,8 +107,16 @@ class TimingController:
             and self.state.raw_readable_count_status
             is RawReadableCountStatus.NOT_COUNTED
         ):
+            provenance = (
+                self.state.raw_probe.raw_readable_count_provenance
+                if self.state.raw_probe is not None
+                else None
+            )
             self.state.raw_readable_count_status = (
-                RawReadableCountStatus.COUNTED_THIS_SESSION
+                RawReadableCountStatus.VALIDATED_REUSABLE_CACHE
+                if provenance
+                is RawReadableCountProvenance.VALIDATED_REUSABLE_CACHE
+                else RawReadableCountStatus.COUNTED_THIS_SESSION
             )
         elif (
             reusable_count is None
@@ -113,6 +124,7 @@ class TimingController:
             in {
                 RawReadableCountStatus.COUNTED_THIS_SESSION,
                 RawReadableCountStatus.RECORDED_PRIOR_RUN,
+                RawReadableCountStatus.VALIDATED_REUSABLE_CACHE,
                 RawReadableCountStatus.RECOUNTING,
                 RawReadableCountStatus.RECOUNT_FAILED,
             }
@@ -271,7 +283,10 @@ class TimingController:
 
         path = self.prepare_full_raw_frame_count(force_recount=force_recount)
         try:
-            result = self.compute_full_raw_frame_count(path)
+            result = self.compute_full_raw_frame_count(
+                path,
+                force_recount=force_recount,
+            )
         except (PreprocessError, OSError, ValueError) as exc:
             self.record_full_raw_frame_count_failure(exc)
             raise TimingValidationError(
@@ -342,6 +357,8 @@ class TimingController:
         path: Path,
         context: GuiTaskContext | None = None,
         progress_callback: Callable[[OperationProgress], None] | None = None,
+        *,
+        force_recount: bool = False,
     ) -> VideoProbeResult:
         """Run a full raw-video probe without mutating GUI state."""
 
@@ -352,6 +369,14 @@ class TimingController:
             )
         if progress_callback is not None:
             arguments["progress_callback"] = progress_callback
+        task_preprocess_dir = (
+            context.project_dir / PREPROCESS_DIRNAME
+            if context is not None and context.project_dir is not None
+            else self.state.preprocess_dir
+        )
+        if self._probe_function is probe_video and task_preprocess_dir is not None:
+            arguments["cache_path"] = get_raw_probe_cache_path(task_preprocess_dir)
+            arguments["force_recount"] = force_recount
         return self._probe_function(path, **arguments)
 
     def apply_full_raw_frame_count(
@@ -385,7 +410,10 @@ class TimingController:
             )
         self.state.raw_probe = result
         self.state.raw_readable_count_status = (
-            RawReadableCountStatus.COUNTED_THIS_SESSION
+            RawReadableCountStatus.VALIDATED_REUSABLE_CACHE
+            if result.raw_readable_count_provenance
+            is RawReadableCountProvenance.VALIDATED_REUSABLE_CACHE
+            else RawReadableCountStatus.COUNTED_THIS_SESSION
         )
         if self.state.timing_mode is TimingMode.MATLAB:
             self._invalidate_matlab_selection(

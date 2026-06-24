@@ -49,6 +49,7 @@ from preprocess.models import (
     VideoProbeResult,
 )
 from preprocess.pre_crop import resolve_pre_crop
+from preprocess.raw_probe_cache import get_raw_probe_cache_path
 from preprocess.sync_writer import (
     PreparedSyncData,
     build_prepared_sync,
@@ -575,6 +576,7 @@ class PreprocessService:
                 request.raw_video_path,
                 require_sequential_count=requires_raw_count,
                 cancellation_requested=execution.cancellation_requested,
+                cache_path=get_raw_probe_cache_path(outputs.preprocess_dir),
             )
 
             current_stage = "trim resolution"

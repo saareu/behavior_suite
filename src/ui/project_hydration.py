@@ -11,8 +11,13 @@ from pydantic import ValidationError
 
 from preprocess.config import PreCropConfig
 from preprocess.metadata import PREPARE_METADATA_SCHEMA_VERSION
-from preprocess.models import VideoProbeResult
+from preprocess.models import RawReadableCountProvenance, VideoProbeResult
 from preprocess.pre_crop import PreCropMode, PreCropROI, ResolvedPreCrop
+from preprocess.raw_probe_cache import (
+    RawProbeCacheRecord,
+    get_raw_probe_cache_path,
+    validate_raw_probe_cache,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +73,11 @@ def _build_probe(
                 "frame_count_opencv_reported"
             ),
             frame_count_opencv_readable=readable_count,
+            raw_readable_count_provenance=(
+                RawReadableCountProvenance.RECORDED_PRIOR_COMPLETED_RUN
+                if readable_count is not None
+                else None
+            ),
             opencv_fps=None,
             raw_fps_effective=raw_video.get("fps_effective"),
             raw_fps_effective_method=raw_video.get("fps_effective_method"),
@@ -136,14 +146,52 @@ def _build_pre_crop(
     return config, resolved
 
 
+def _cache_probe(record: RawProbeCacheRecord) -> VideoProbeResult:
+    return VideoProbeResult.model_validate(
+        {
+            **record.probe_result.model_dump(mode="python"),
+            "raw_readable_count_provenance": (
+                RawReadableCountProvenance.VALIDATED_REUSABLE_CACHE
+            ),
+        }
+    )
+
+
+def _cache_only_result(
+    record: RawProbeCacheRecord | None,
+    *,
+    fallback_status: str,
+    fallback_message: str,
+) -> ProjectHydrationResult:
+    if record is None:
+        return ProjectHydrationResult(
+            status=fallback_status,
+            message=fallback_message,
+        )
+    probe = _cache_probe(record)
+    return ProjectHydrationResult(
+        status="cache_loaded",
+        message=(
+            f"{fallback_message} A matching internal raw-probe cache was restored."
+        ),
+        raw_video_path=probe.source_path,
+        raw_probe=probe,
+    )
+
+
 def load_project_hydration(preprocess_dir: Path) -> ProjectHydrationResult:
     """Read compact prior-run context without making project opening fail."""
 
-    metadata_path = Path(preprocess_dir) / "prepare_meta.json"
+    preprocess_path = Path(preprocess_dir)
+    cache_record = validate_raw_probe_cache(
+        get_raw_probe_cache_path(preprocess_path)
+    )
+    metadata_path = preprocess_path / "prepare_meta.json"
     if not metadata_path.is_file():
-        return ProjectHydrationResult(
-            status="metadata_absent",
-            message=(
+        return _cache_only_result(
+            cache_record,
+            fallback_status="metadata_absent",
+            fallback_message=(
                 "Project opened. No prior prepare_meta.json was found; select and "
                 "probe a raw video."
             ),
@@ -152,28 +200,36 @@ def load_project_hydration(preprocess_dir: Path) -> ProjectHydrationResult:
         with metadata_path.open("r", encoding="utf-8") as stream:
             metadata = json.load(stream)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return ProjectHydrationResult(
-            status="metadata_invalid",
-            message=f"Project opened, but prepare_meta.json could not be read: {exc}",
+        return _cache_only_result(
+            cache_record,
+            fallback_status="metadata_invalid",
+            fallback_message=(
+                f"Project opened, but prepare_meta.json could not be read: {exc}"
+            ),
         )
     if not isinstance(metadata, Mapping):
-        return ProjectHydrationResult(
-            status="metadata_invalid",
-            message="Project opened, but prepare_meta.json is not a JSON object.",
+        return _cache_only_result(
+            cache_record,
+            fallback_status="metadata_invalid",
+            fallback_message=(
+                "Project opened, but prepare_meta.json is not a JSON object."
+            ),
         )
     raw_video = metadata.get("raw_video")
     if not isinstance(raw_video, Mapping):
-        return ProjectHydrationResult(
-            status="metadata_incomplete",
-            message=(
+        return _cache_only_result(
+            cache_record,
+            fallback_status="metadata_incomplete",
+            fallback_message=(
                 "Project opened, but prepare_meta.json has no usable raw-video section."
             ),
         )
     source_value = raw_video.get("source_path")
     if not isinstance(source_value, str) or not source_value.strip():
-        return ProjectHydrationResult(
-            status="metadata_incomplete",
-            message=(
+        return _cache_only_result(
+            cache_record,
+            fallback_status="metadata_incomplete",
+            fallback_message=(
                 "Project opened, but prepare_meta.json has no usable raw-video path."
             ),
         )
@@ -186,18 +242,40 @@ def load_project_hydration(preprocess_dir: Path) -> ProjectHydrationResult:
         metadata.get("schema_version") == PREPARE_METADATA_SCHEMA_VERSION
         and prior_run_status == "passed"
     )
+    cached_probe = _cache_probe(cache_record) if cache_record is not None else None
+    cache_matches_metadata = bool(
+        cached_probe is not None
+        and _same_path(raw_video_path, cached_probe.source_path)
+        and raw_video.get("width") == cached_probe.width
+        and raw_video.get("height") == cached_probe.height
+    )
+    metadata_readable_count = _integer(
+        raw_video.get("frame_count_opencv_readable"),
+        minimum=1,
+    )
+    recorded_count = bool(
+        completed_run
+        and cache_matches_metadata
+        and metadata_readable_count
+        == cache_record.frame_count_opencv_readable
+    )
     probe = _build_probe(
         raw_video,
         raw_video_path,
-        allow_recorded_count=completed_run,
+        allow_recorded_count=recorded_count,
     )
-    recorded_count = (
-        completed_run
-        and probe is not None
-        and probe.frame_count_opencv_readable is not None
-        and probe.frame_count_opencv_readable > 0
-        and _same_path(raw_video_path, probe.source_path)
-    )
+    if not recorded_count and cache_matches_metadata and probe is not None:
+        probe = VideoProbeResult.model_validate(
+            {
+                **probe.model_dump(mode="python"),
+                "frame_count_opencv_readable": (
+                    cache_record.frame_count_opencv_readable
+                ),
+                "raw_readable_count_provenance": (
+                    RawReadableCountProvenance.VALIDATED_REUSABLE_CACHE
+                ),
+            }
+        )
 
     trim = metadata.get("trim")
     start_frame = None
@@ -234,7 +312,11 @@ def load_project_hydration(preprocess_dir: Path) -> ProjectHydrationResult:
     count_message = (
         " Prior raw sequential count was restored with prior-run provenance."
         if recorded_count
-        else " No prior raw sequential readable-frame count was recorded."
+        else (
+            " A matching internal raw-probe cache was restored."
+            if cache_matches_metadata
+            else " No fingerprint-verified raw sequential count was restored."
+        )
     )
     return ProjectHydrationResult(
         status="metadata_loaded",

@@ -1,3 +1,5 @@
+import json
+import os
 from pathlib import Path
 
 import cv2
@@ -6,6 +8,13 @@ import pytest
 
 from preprocess import video_probe
 from preprocess.exceptions import VideoProbeCancelledError, VideoProbeError
+from preprocess.models import RawReadableCountProvenance
+from preprocess.raw_probe_cache import (
+    RAW_PROBE_CACHE_SCHEMA_VERSION,
+    get_raw_probe_cache_path,
+    read_raw_probe_cache,
+    write_raw_probe_cache_atomic,
+)
 
 
 def _write_tiny_video(path: Path, frame_count: int = 5) -> Path:
@@ -45,6 +54,216 @@ def test_probe_video_with_sequential_count(tmp_path: Path) -> None:
     assert result.frame_count_opencv_reported == 4
     assert result.frame_count_opencv_readable == 4
     assert result.opencv_fps == pytest.approx(10.0)
+
+
+def test_successful_sequential_probe_writes_versioned_project_cache(
+    tmp_path: Path,
+) -> None:
+    video_path = _write_tiny_video(tmp_path / "tiny.avi", frame_count=4)
+    cache_path = get_raw_probe_cache_path(tmp_path / "preprocess")
+
+    result = video_probe.probe_video(
+        video_path,
+        require_sequential_count=True,
+        cache_path=cache_path,
+    )
+    record = read_raw_probe_cache(cache_path)
+
+    assert result.raw_readable_count_provenance is (
+        RawReadableCountProvenance.VERIFIED_CURRENT_SESSION
+    )
+    assert record is not None
+    assert record.cache_schema_version == RAW_PROBE_CACHE_SCHEMA_VERSION
+    assert record.frame_count_opencv_readable == 4
+    assert record.raw_video_fingerprint.resolved_path == video_path.resolve()
+    assert record.raw_video_fingerprint.file_size_bytes == video_path.stat().st_size
+    assert record.raw_video_fingerprint.modified_time_ns == video_path.stat().st_mtime_ns
+    assert (record.raw_video_fingerprint.width, record.raw_video_fingerprint.height) == (
+        32,
+        24,
+    )
+    assert record.raw_video_fingerprint.content_signature
+
+
+def test_matching_fingerprint_restores_cached_count_without_sequential_decode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video_path = _write_tiny_video(tmp_path / "tiny.avi", frame_count=4)
+    cache_path = get_raw_probe_cache_path(tmp_path / "preprocess")
+    video_probe.probe_video(
+        video_path,
+        require_sequential_count=True,
+        cache_path=cache_path,
+    )
+
+    def fail_if_called(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("matching cache unexpectedly triggered sequential decode")
+
+    monkeypatch.setattr(video_probe, "count_opencv_readable_frames", fail_if_called)
+
+    restored = video_probe.probe_video(
+        video_path,
+        require_sequential_count=True,
+        cache_path=cache_path,
+    )
+
+    assert restored.frame_count_opencv_readable == 4
+    assert restored.raw_readable_count_provenance is (
+        RawReadableCountProvenance.VALIDATED_REUSABLE_CACHE
+    )
+
+
+def test_path_only_cache_match_is_rejected_after_file_size_change(
+    tmp_path: Path,
+) -> None:
+    video_path = _write_tiny_video(tmp_path / "tiny.avi", frame_count=4)
+    cache_path = get_raw_probe_cache_path(tmp_path / "preprocess")
+    video_probe.probe_video(
+        video_path,
+        require_sequential_count=True,
+        cache_path=cache_path,
+    )
+    with video_path.open("ab") as stream:
+        stream.write(b"cache-size-mismatch")
+
+    restored = video_probe.probe_video(
+        video_path,
+        require_sequential_count=False,
+        cache_path=cache_path,
+    )
+
+    assert restored.frame_count_opencv_readable is None
+    assert restored.raw_readable_count_provenance is None
+
+
+def test_path_only_cache_match_is_rejected_after_mtime_change(tmp_path: Path) -> None:
+    video_path = _write_tiny_video(tmp_path / "tiny.avi", frame_count=4)
+    cache_path = get_raw_probe_cache_path(tmp_path / "preprocess")
+    video_probe.probe_video(
+        video_path,
+        require_sequential_count=True,
+        cache_path=cache_path,
+    )
+    stat = video_path.stat()
+    os.utime(
+        video_path,
+        ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000),
+    )
+
+    restored = video_probe.probe_video(
+        video_path,
+        require_sequential_count=False,
+        cache_path=cache_path,
+    )
+
+    assert restored.frame_count_opencv_readable is None
+
+
+def test_cache_is_rejected_when_fingerprinted_dimensions_differ(tmp_path: Path) -> None:
+    video_path = _write_tiny_video(tmp_path / "tiny.avi", frame_count=4)
+    cache_path = get_raw_probe_cache_path(tmp_path / "preprocess")
+    video_probe.probe_video(
+        video_path,
+        require_sequential_count=True,
+        cache_path=cache_path,
+    )
+    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    payload["raw_video_fingerprint"]["width"] = 64
+    payload["width"] = 64
+    payload["probe_result"]["width"] = 64
+    cache_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    restored = video_probe.probe_video(
+        video_path,
+        require_sequential_count=False,
+        cache_path=cache_path,
+    )
+
+    assert restored.frame_count_opencv_readable is None
+
+
+@pytest.mark.parametrize("cache_contents", [None, "{not-json"])
+def test_missing_or_malformed_cache_is_a_nonfatal_miss(
+    tmp_path: Path,
+    cache_contents: str | None,
+) -> None:
+    video_path = _write_tiny_video(tmp_path / "tiny.avi", frame_count=4)
+    cache_path = get_raw_probe_cache_path(tmp_path / "preprocess")
+    if cache_contents is not None:
+        cache_path.parent.mkdir(parents=True)
+        cache_path.write_text(cache_contents, encoding="utf-8")
+
+    result = video_probe.probe_video(
+        video_path,
+        require_sequential_count=False,
+        cache_path=cache_path,
+    )
+
+    assert result.frame_count_opencv_readable is None
+
+
+def test_cache_write_uses_atomic_replace_and_preserves_old_file_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video_path = _write_tiny_video(tmp_path / "tiny.avi", frame_count=4)
+    cache_path = get_raw_probe_cache_path(tmp_path / "preprocess")
+    video_probe.probe_video(
+        video_path,
+        require_sequential_count=True,
+        cache_path=cache_path,
+    )
+    record = read_raw_probe_cache(cache_path)
+    assert record is not None
+    cache_path.write_text("old-cache", encoding="utf-8")
+    replace_calls: list[tuple[Path, Path]] = []
+
+    def fail_replace(source: str | Path, destination: str | Path) -> None:
+        replace_calls.append((Path(source), Path(destination)))
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failure"):
+        write_raw_probe_cache_atomic(cache_path, record)
+
+    assert replace_calls and replace_calls[0][1] == cache_path
+    assert cache_path.read_text(encoding="utf-8") == "old-cache"
+    assert list(cache_path.parent.glob(f".{cache_path.name}.*.tmp")) == []
+
+
+def test_force_recount_bypasses_and_replaces_cached_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video_path = _write_tiny_video(tmp_path / "tiny.avi", frame_count=4)
+    cache_path = get_raw_probe_cache_path(tmp_path / "preprocess")
+    video_probe.probe_video(
+        video_path,
+        require_sequential_count=True,
+        cache_path=cache_path,
+    )
+    monkeypatch.setattr(
+        video_probe,
+        "count_opencv_readable_frames",
+        lambda *_args, **_kwargs: 7,
+    )
+
+    recounted = video_probe.probe_video(
+        video_path,
+        require_sequential_count=True,
+        cache_path=cache_path,
+        force_recount=True,
+    )
+    replaced = read_raw_probe_cache(cache_path)
+
+    assert recounted.frame_count_opencv_readable == 7
+    assert recounted.raw_readable_count_provenance is (
+        RawReadableCountProvenance.VERIFIED_CURRENT_SESSION
+    )
+    assert replaced is not None
+    assert replaced.frame_count_opencv_readable == 7
 
 
 def test_probe_video_skips_full_count_when_disabled(

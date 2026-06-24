@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import shutil
 import subprocess
@@ -14,11 +15,23 @@ from typing import Any
 import cv2
 
 from preprocess.exceptions import VideoProbeCancelledError, VideoProbeError
-from preprocess.models import OperationProgress, VideoProbeResult
+from preprocess.models import (
+    OperationProgress,
+    RawReadableCountProvenance,
+    RawVideoFingerprint,
+    VideoProbeResult,
+)
+from preprocess.raw_probe_cache import (
+    build_raw_probe_cache_record,
+    fingerprint_raw_video,
+    load_matching_raw_probe_cache,
+    write_raw_probe_cache_atomic,
+)
 
 _FFPROBE_TIMEOUT_SECONDS = 30
 _COUNT_PROGRESS_FRAME_INTERVAL = 250
 _COUNT_PROGRESS_TIME_INTERVAL_SECONDS = 0.25
+_LOGGER = logging.getLogger(__name__)
 
 
 def _validate_video_path(path: Path) -> Path:
@@ -230,12 +243,15 @@ def probe_video(
     *,
     cancellation_requested: Callable[[], bool] | None = None,
     progress_callback: Callable[[OperationProgress], None] | None = None,
+    cache_path: Path | None = None,
+    force_recount: bool = False,
 ) -> VideoProbeResult:
     """Probe a readable video with OpenCV and ffprobe when available.
 
     OpenCV readability is mandatory. ffprobe failure is captured in the result
     so a readable video remains probeable. A full sequential decode occurs only
-    when require_sequential_count is true.
+    when require_sequential_count is true. A project-local cache is consulted only
+    when its exact fingerprint matches; force_recount bypasses that cache.
 
     Raises:
         VideoProbeError: If the file is absent, OpenCV cannot open it, or no
@@ -244,6 +260,8 @@ def probe_video(
 
     if cancellation_requested is not None and cancellation_requested():
         raise VideoProbeCancelledError(f"Raw-video probe was cancelled for: {path}")
+    if force_recount and not require_sequential_count:
+        raise ValueError("force_recount requires a sequential readable-frame count.")
     video_path = _validate_video_path(path)
     capture = _open_video(video_path)
     try:
@@ -261,13 +279,39 @@ def probe_video(
         if math.isfinite(reported_count_value) and reported_count_value > 0
         else 0
     )
-    readable_count = None
-    if require_sequential_count:
+    fingerprint_before_count: RawVideoFingerprint | None = None
+    cached_count: int | None = None
+    if cache_path is not None:
+        try:
+            fingerprint_before_count = fingerprint_raw_video(video_path)
+            if not force_recount:
+                cached = load_matching_raw_probe_cache(
+                    cache_path,
+                    fingerprint_before_count,
+                )
+                if cached is not None:
+                    cached_count = cached.frame_count_opencv_readable
+        except (OSError, ValueError):
+            _LOGGER.debug(
+                "raw probe cache fingerprint/read failed for %s",
+                video_path,
+                exc_info=True,
+            )
+
+    performed_sequential_count = require_sequential_count and cached_count is None
+    readable_count = cached_count
+    count_provenance = (
+        RawReadableCountProvenance.VALIDATED_REUSABLE_CACHE
+        if cached_count is not None
+        else None
+    )
+    if performed_sequential_count:
         readable_count = count_opencv_readable_frames(
             video_path,
             cancellation_requested=cancellation_requested,
             progress_callback=progress_callback,
         )
+        count_provenance = RawReadableCountProvenance.VERIFIED_CURRENT_SESSION
 
     ffprobe_metadata: dict[str, Any] | None = None
     ffprobe_error: str | None = None
@@ -308,7 +352,7 @@ def probe_video(
         raw_fps_effective = None
         raw_fps_method = None
 
-    return VideoProbeResult(
+    result = VideoProbeResult(
         source_path=video_path,
         width=int(width),
         height=int(height),
@@ -321,6 +365,7 @@ def probe_video(
         frame_count_ffprobe=_frame_count(stream.get("nb_frames")),
         frame_count_opencv_reported=reported_count,
         frame_count_opencv_readable=readable_count,
+        raw_readable_count_provenance=count_provenance,
         opencv_fps=opencv_fps,
         raw_fps_effective=raw_fps_effective,
         raw_fps_effective_method=raw_fps_method,
@@ -329,3 +374,25 @@ def probe_video(
         ffprobe_error=ffprobe_error,
         ffprobe_metadata=ffprobe_metadata,
     )
+    if (
+        cache_path is not None
+        and performed_sequential_count
+        and fingerprint_before_count is not None
+    ):
+        try:
+            fingerprint_after_count = fingerprint_raw_video(video_path)
+            if fingerprint_after_count == fingerprint_before_count:
+                record = build_raw_probe_cache_record(fingerprint_after_count, result)
+                write_raw_probe_cache_atomic(cache_path, record)
+            else:
+                _LOGGER.debug(
+                    "raw video changed during sequential count; cache was not written: %s",
+                    video_path,
+                )
+        except (OSError, ValueError):
+            _LOGGER.debug(
+                "raw probe cache write failed for %s",
+                video_path,
+                exc_info=True,
+            )
+    return result

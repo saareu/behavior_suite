@@ -16,12 +16,17 @@ from preprocess.config import (
     load_preprocess_config,
 )
 from preprocess.exceptions import PreprocessError, VideoProbeCancelledError
-from preprocess.models import OperationProgress, VideoProbeResult
+from preprocess.models import (
+    OperationProgress,
+    RawReadableCountProvenance,
+    VideoProbeResult,
+)
 from preprocess.pre_crop import PreCropMode, ResolvedPreCrop, resolve_pre_crop
+from preprocess.raw_probe_cache import get_raw_probe_cache_path
 from preprocess.service import resolve_trim_range
 from preprocess.video_probe import probe_video
 from project.models import Project
-from project.paths import get_preprocess_dir
+from project.paths import PREPROCESS_DIRNAME, get_preprocess_dir
 from project.service import ProjectService
 from project.validation import ProjectError
 from ui.project_hydration import ProjectHydrationResult, load_project_hydration
@@ -176,7 +181,7 @@ class PreprocessSetupController:
         self.state.raw_readable_count_status = (
             RawReadableCountStatus.RECORDED_PRIOR_RUN
             if result.raw_count_recorded_by_prior_run
-            else RawReadableCountStatus.NOT_COUNTED
+            else self._count_status_for_probe(result.raw_probe)
         )
         if result.start_frame is not None:
             self.state.start_frame = result.start_frame
@@ -347,6 +352,8 @@ class PreprocessSetupController:
         require_sequential_count: bool,
         context: GuiTaskContext | None = None,
         progress_callback: Callable[[OperationProgress], None] | None = None,
+        *,
+        force_recount: bool = False,
     ) -> VideoProbeResult:
         """Run the core probe without mutating GUI state (worker-safe)."""
 
@@ -359,6 +366,14 @@ class PreprocessSetupController:
             )
         if progress_callback is not None:
             arguments["progress_callback"] = progress_callback
+        task_preprocess_dir = (
+            context.project_dir / PREPROCESS_DIRNAME
+            if context is not None and context.project_dir is not None
+            else self.state.preprocess_dir
+        )
+        if self._probe_function is probe_video and task_preprocess_dir is not None:
+            arguments["cache_path"] = get_raw_probe_cache_path(task_preprocess_dir)
+            arguments["force_recount"] = force_recount
         return self._probe_function(path, **arguments)
 
     def apply_raw_video_probe(
@@ -396,6 +411,9 @@ class PreprocessSetupController:
                     "frame_count_opencv_readable": (
                         previous_probe.frame_count_opencv_readable
                     ),
+                    "raw_readable_count_provenance": (
+                        previous_probe.raw_readable_count_provenance
+                    ),
                 }
             )
         self.state.raw_video_path = result.source_path
@@ -405,15 +423,31 @@ class PreprocessSetupController:
         elif count_was_preserved:
             self.state.raw_readable_count_status = previous_count_status
         else:
-            self.state.raw_readable_count_status = (
-                RawReadableCountStatus.COUNTED_THIS_SESSION
-            )
+            self.state.raw_readable_count_status = self._count_status_for_probe(result)
         self.state.resolved_pre_crop = None
         self.state.trim_pre_crop_valid = False
         self.state.invalidate_crop_review("Raw video probe changed; crop review is required.")
         self._reset_timing_state()
         self.state.last_validation_error = None
         return result
+
+    @staticmethod
+    def _count_status_for_probe(
+        probe: VideoProbeResult | None,
+    ) -> RawReadableCountStatus:
+        if probe is None or not probe.frame_count_opencv_readable:
+            return RawReadableCountStatus.NOT_COUNTED
+        if (
+            probe.raw_readable_count_provenance
+            is RawReadableCountProvenance.RECORDED_PRIOR_COMPLETED_RUN
+        ):
+            return RawReadableCountStatus.RECORDED_PRIOR_RUN
+        if (
+            probe.raw_readable_count_provenance
+            is RawReadableCountProvenance.VALIDATED_REUSABLE_CACHE
+        ):
+            return RawReadableCountStatus.VALIDATED_REUSABLE_CACHE
+        return RawReadableCountStatus.COUNTED_THIS_SESSION
 
     def record_raw_video_probe_failure(
         self,
