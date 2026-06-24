@@ -44,6 +44,19 @@ class SoftwareEnvironmentInfo(BaseModel):
     application_version: str | None = None
 
 
+class OperationProgress(BaseModel):
+    """UI-independent progress emitted by one long-running core operation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    phase: str = Field(min_length=1)
+    message: str = Field(min_length=1)
+    completed_units: int | None = Field(default=None, ge=0)
+    total_units: int | None = Field(default=None, gt=0)
+    total_is_estimate: bool = False
+    is_indeterminate: bool
+
+
 class VideoProbeResult(BaseModel):
     """Metadata collected independently from ffprobe and OpenCV."""
 

@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from preprocess.exceptions import PreprocessError
+from preprocess.exceptions import CageDetectionCancelledError, PreprocessError
 from ui.controllers.crop_review_controller import (
     CropReviewComputation,
     CropReviewController,
@@ -38,6 +38,7 @@ from ui.state import CropReviewMode, WorkflowStep
 from ui.tasks import (
     GuiTaskContext,
     GuiTaskKind,
+    GuiTaskProgressEvent,
     GuiTaskRunner,
     TaskAlreadyRunningError,
 )
@@ -108,6 +109,14 @@ class CropReviewPage(QWidget):
         self.busy_indicator.setRange(0, 0)
         self.busy_indicator.setVisible(False)
         controls_layout.addWidget(self.busy_indicator)
+        self.detection_progress_label = QLabel()
+        self.detection_progress_label.setWordWrap(True)
+        self.detection_progress_label.setVisible(False)
+        controls_layout.addWidget(self.detection_progress_label)
+        self.cancel_detection_button = QPushButton("Cancel Cage Detection")
+        self.cancel_detection_button.clicked.connect(self._cancel_detection)
+        self.cancel_detection_button.setVisible(False)
+        controls_layout.addWidget(self.cancel_detection_button)
         self.accept_button = QPushButton("Accept Crop")
         self.accept_button.clicked.connect(self._accept_crop)
         controls_layout.addWidget(self.accept_button)
@@ -404,10 +413,15 @@ class CropReviewPage(QWidget):
             context = self.setup_controller.begin_task(GuiTaskKind.CAGE_DETECTION)
             self._set_busy(True)
             self.refresh_from_state()
-            self.task_runner.start(
-                lambda: self.controller.compute_automatic_detection(request),
+            self.task_runner.start_progressive(
+                lambda report: self.controller.compute_automatic_detection(
+                    request,
+                    progress_callback=report,
+                    cancellation_requested=context.is_cancellation_requested,
+                ),
                 task_name="automatic cage detection",
                 context=context,
+                on_progress=lambda event: self._detection_progress(event, context),
                 on_success=lambda result: self._detection_succeeded(result, context),
                 on_error=lambda exc: self._detection_failed(exc, context),
                 on_finished=lambda: self._detection_finished(context),
@@ -440,6 +454,8 @@ class CropReviewPage(QWidget):
         except Exception as exc:
             self._show_unexpected(exc)
             return
+        self.detection_progress_label.setText("Finding cage: Complete")
+        self.detection_progress_label.setVisible(True)
         self.error_label.clear()
         self.refresh_from_state()
         self.status_message.emit(
@@ -453,7 +469,17 @@ class CropReviewPage(QWidget):
     ) -> None:
         if not self.setup_controller.task_belongs_to_current_inputs(context):
             return
+        if isinstance(exc, CageDetectionCancelledError):
+            self.controller.record_automatic_detection_cancellation()
+            self.detection_progress_label.setText("Finding cage: Cancelled")
+            self.detection_progress_label.setVisible(True)
+            self.error_label.clear()
+            self.status_message.emit("Automatic cage detection cancelled.")
+            self.validity_changed.emit()
+            return
         self.controller.record_automatic_detection_failure(exc)
+        self.detection_progress_label.setText("Finding cage: Failed")
+        self.detection_progress_label.setVisible(True)
         if isinstance(
             exc,
             (PreprocessError, ValidationError, OSError, ValueError, cv2.error),
@@ -469,6 +495,24 @@ class CropReviewPage(QWidget):
         self.setup_controller.finish_task(context)
         self._set_busy(False)
         self.refresh_from_state()
+
+    def _detection_progress(
+        self,
+        event: GuiTaskProgressEvent,
+        context: GuiTaskContext,
+    ) -> None:
+        if not self.setup_controller.task_progress_is_current(event, context):
+            return
+        self.detection_progress_label.setText(f"Finding cage: {event.phase}")
+        self.detection_progress_label.setVisible(True)
+
+    def _cancel_detection(self) -> None:
+        self.task_runner.request_cancellation()
+        self.cancel_detection_button.setEnabled(False)
+        self.detection_progress_label.setText(
+            "Finding cage: Cancellation requested"
+        )
+        self.detection_progress_label.setVisible(True)
 
     def _settings_changed(self) -> None:
         if self._refreshing:
@@ -584,6 +628,11 @@ class CropReviewPage(QWidget):
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         self.busy_indicator.setVisible(busy)
+        self.cancel_detection_button.setVisible(busy)
+        self.cancel_detection_button.setEnabled(busy)
+        if busy:
+            self.detection_progress_label.clear()
+            self.detection_progress_label.setVisible(True)
         self.load_frame_button.setEnabled(not busy)
         self.find_button.setEnabled(not busy)
         self.retry_button.setEnabled(not busy)

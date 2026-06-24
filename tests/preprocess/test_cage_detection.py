@@ -19,7 +19,11 @@ from preprocess.config import (
     PreprocessConfig,
 )
 from preprocess.crop_plan import CropMode, compute_canonical_geometry
-from preprocess.exceptions import CageDetectionError, CropPlanError
+from preprocess.exceptions import (
+    CageDetectionCancelledError,
+    CageDetectionError,
+    CropPlanError,
+)
 from preprocess.manual_crop import make_manual_crop_plan
 from preprocess.pre_crop import (
     build_pre_crop_translation_homography,
@@ -117,6 +121,54 @@ def test_successful_automatic_detection_returns_unaccepted_crop_plan(
     assert result.crop_plan.fit_score is not None
     assert result.crop_plan.rim_density is not None
     assert all(dimension > 0 and dimension % 2 == 0 for dimension in result.crop_plan.prepared_size_wh)
+
+
+def test_automatic_detection_reports_ordered_real_core_phases(tmp_path: Path) -> None:
+    video_path = _write_synthetic_video(tmp_path / "cage.avi")
+    config = _detector_config()
+    pre_crop = resolve_pre_crop(config.pre_crop, raw_size_wh=(200, 120))
+    phases: list[str] = []
+
+    detect_cage_crop_plan(
+        video_path,
+        config,
+        pre_crop,
+        progress_callback=lambda progress: phases.append(progress.phase),
+    )
+
+    assert phases == [
+        "Loading representative frames",
+        "Estimating background",
+        "Detecting cage contour",
+        "Building CropPlan",
+    ]
+
+
+def test_automatic_detection_cancellation_stops_before_later_phases(
+    tmp_path: Path,
+) -> None:
+    video_path = _write_synthetic_video(tmp_path / "cage.avi")
+    config = _detector_config()
+    pre_crop = resolve_pre_crop(config.pre_crop, raw_size_wh=(200, 120))
+    phases: list[str] = []
+    cancellation_requested = False
+
+    def receive_progress(progress) -> None:
+        nonlocal cancellation_requested
+        phases.append(progress.phase)
+        if progress.phase == "Estimating background":
+            cancellation_requested = True
+
+    with pytest.raises(CageDetectionCancelledError, match="cancelled"):
+        detect_cage_crop_plan(
+            video_path,
+            config,
+            pre_crop,
+            progress_callback=receive_progress,
+            cancellation_requested=lambda: cancellation_requested,
+        )
+
+    assert phases == ["Loading representative frames", "Estimating background"]
 
 
 def test_canonical_geometry_is_honored(tmp_path: Path) -> None:

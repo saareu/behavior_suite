@@ -21,17 +21,19 @@ from preprocess.config import (
 )
 from preprocess.crop_plan import CropMode, CropPlan
 from preprocess.exceptions import (
+    CageDetectionCancelledError,
     CropPlanError,
     PreprocessError,
     VideoProbeError,
 )
 from preprocess.manual_crop import make_manual_crop_plan
+from preprocess.models import OperationProgress
 from preprocess.pre_crop import ResolvedPreCrop
 from ui.state import CropReviewMode, PreprocessSetupState
 
 FrameReader = Callable[[Path, int], np.ndarray]
 PreviewBuilder = Callable[[np.ndarray, CropPlan, str], np.ndarray]
-AutomaticDetector = Callable[[Path, PreprocessConfig, ResolvedPreCrop], CageDetectionResult]
+AutomaticDetector = Callable[..., CageDetectionResult]
 ManualPlanBuilder = Callable[..., CropPlan]
 
 _POINT_LABELS = ("top-left", "top-right", "bottom-right", "bottom-left")
@@ -306,24 +308,50 @@ class CropReviewController:
     def compute_automatic_detection(
         self,
         request: AutomaticDetectionRequest,
+        *,
+        progress_callback: Callable[[OperationProgress], None] | None = None,
+        cancellation_requested: Callable[[], bool] | None = None,
     ) -> CropReviewComputation:
         """Run core detection and preview generation without mutating GUI state."""
 
-        result = self._detector(
-            request.raw_video_path,
-            request.config,
-            request.pre_crop,
-        )
+        if progress_callback is None and cancellation_requested is None:
+            result = self._detector(
+                request.raw_video_path,
+                request.config,
+                request.pre_crop,
+            )
+        else:
+            result = self._detector(
+                request.raw_video_path,
+                request.config,
+                request.pre_crop,
+                progress_callback=progress_callback,
+                cancellation_requested=cancellation_requested,
+            )
+        if cancellation_requested is not None and cancellation_requested():
+            raise CageDetectionCancelledError("Automatic cage detection was cancelled.")
         crop_plan = _copy_plan_with_acceptance(result.crop_plan, False)
         if crop_plan.mode is not CropMode.AUTOMATIC:
             raise CropReviewValidationError(
                 "Automatic cage detection did not return an automatic CropPlan."
+            )
+        if progress_callback is not None:
+            progress_callback(
+                OperationProgress(
+                    phase="Preparing preview",
+                    message="Preparing preview",
+                    completed_units=None,
+                    total_units=None,
+                    is_indeterminate=True,
+                )
             )
         preview = self._preview_builder(
             request.representative_frame,
             crop_plan,
             request.config.prepare.perspective_interpolation,
         )
+        if cancellation_requested is not None and cancellation_requested():
+            raise CageDetectionCancelledError("Automatic cage detection was cancelled.")
         return CropReviewComputation(
             crop_plan=crop_plan,
             prepared_preview=preview,
@@ -373,6 +401,12 @@ class CropReviewController:
                 traceback.format_exception(type(exc), exc, exc.__traceback__)
             )
         self.state.last_validation_error = message
+
+    def record_automatic_detection_cancellation(self) -> None:
+        """Clear any candidate without presenting cooperative cancellation as failure."""
+
+        self._invalidate_candidate("Automatic cage detection cancelled.")
+        self.state.last_validation_error = None
 
     def update_detector_settings(
         self,

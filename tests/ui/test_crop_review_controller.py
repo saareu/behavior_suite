@@ -9,7 +9,7 @@ from preprocess.config import CanonicalResolutionConfig, PrepareConfig, Preproce
 from preprocess.crop_plan import CropMode, CropPlan
 from preprocess.exceptions import CageDetectionError, CropPlanError, VideoProbeError
 from preprocess.manual_crop import make_manual_crop_plan
-from preprocess.models import VideoProbeResult
+from preprocess.models import OperationProgress, VideoProbeResult
 from preprocess.pre_crop import PreCropMode, resolve_pre_crop
 from project.models import Project
 from ui.controllers.crop_review_controller import (
@@ -156,6 +156,84 @@ def test_automatic_detection_stores_unaccepted_candidate(tmp_path: Path) -> None
         "fit_score": 0.91,
         "rim_density": 0.13,
     }
+
+
+def test_automatic_detection_reports_all_ordered_gui_phases(tmp_path: Path) -> None:
+    core_phases = (
+        "Loading representative frames",
+        "Estimating background",
+        "Detecting cage contour",
+        "Building CropPlan",
+    )
+
+    def detector(
+        path,
+        config,
+        pre_crop,
+        *,
+        progress_callback,
+        cancellation_requested,
+    ) -> CageDetectionResult:
+        del cancellation_requested
+        for phase in core_phases:
+            progress_callback(
+                OperationProgress(
+                    phase=phase,
+                    message=phase,
+                    is_indeterminate=True,
+                )
+            )
+        return _detector(path, config, pre_crop)
+
+    controller = _controller(tmp_path, detector=detector)
+    request = controller.begin_automatic_detection()
+    phases: list[str] = []
+
+    result = controller.compute_automatic_detection(
+        request,
+        progress_callback=lambda progress: phases.append(progress.phase),
+        cancellation_requested=lambda: False,
+    )
+
+    assert result.crop_plan.mode is CropMode.AUTOMATIC
+    assert phases == [*core_phases, "Preparing preview"]
+
+
+def test_automatic_detection_failure_never_reports_preview_or_completion(
+    tmp_path: Path,
+) -> None:
+    def detector(
+        _path,
+        _config,
+        _pre_crop,
+        *,
+        progress_callback,
+        cancellation_requested,
+    ) -> CageDetectionResult:
+        del cancellation_requested
+        progress_callback(
+            OperationProgress(
+                phase="Loading representative frames",
+                message="Loading representative frames",
+                is_indeterminate=True,
+            )
+        )
+        raise CageDetectionError("no cage")
+
+    controller = _controller(tmp_path, detector=detector)
+    request = controller.begin_automatic_detection()
+    phases: list[str] = []
+
+    with pytest.raises(CageDetectionError, match="no cage"):
+        controller.compute_automatic_detection(
+            request,
+            progress_callback=lambda progress: phases.append(progress.phase),
+            cancellation_requested=lambda: False,
+        )
+
+    assert phases == ["Loading representative frames"]
+    assert "Preparing preview" not in phases
+    assert "Complete" not in phases
 
 
 def test_automatic_failure_clears_stale_candidate_and_acceptance(tmp_path: Path) -> None:

@@ -16,7 +16,7 @@ from preprocess.config import (
     load_preprocess_config,
 )
 from preprocess.exceptions import PreprocessError, VideoProbeCancelledError
-from preprocess.models import VideoProbeResult
+from preprocess.models import OperationProgress, VideoProbeResult
 from preprocess.pre_crop import PreCropMode, ResolvedPreCrop, resolve_pre_crop
 from preprocess.service import resolve_trim_range
 from preprocess.video_probe import probe_video
@@ -31,7 +31,12 @@ from ui.state import (
     TimingMode,
     WorkflowStep,
 )
-from ui.tasks import GuiTaskContext, GuiTaskCoordinator, GuiTaskKind
+from ui.tasks import (
+    GuiTaskContext,
+    GuiTaskCoordinator,
+    GuiTaskKind,
+    GuiTaskProgressEvent,
+)
 
 ConfigLoader = Callable[[Path], PreprocessConfig]
 PreCropResolver = Callable[[PreCropConfig, tuple[int, int]], ResolvedPreCrop]
@@ -211,14 +216,14 @@ class PreprocessSetupController:
         self.state.last_validation_error = None
 
     def cancel_active_input_tasks(self) -> tuple[GuiTaskContext, ...]:
-        """Cancel probe/count work and invalidate all prior task generations."""
+        """Cancel input-dependent work and invalidate all prior generations."""
 
         return self.task_coordinator.invalidate_inputs()
 
     def request_current_input_task_cancellation(
         self,
     ) -> tuple[GuiTaskContext, ...]:
-        """Cancel current probe/count work while retaining the input generation."""
+        """Cancel current input-dependent work while retaining its generation."""
 
         return self.task_coordinator.request_input_cancellation()
 
@@ -258,6 +263,20 @@ class PreprocessSetupController:
         """Return whether a task generation/identity still matches current inputs."""
 
         return self.task_coordinator.belongs_to_current_inputs(
+            context,
+            project_dir=self.state.project_dir,
+            raw_video_path=self.state.raw_video_path,
+        )
+
+    def task_progress_is_current(
+        self,
+        event: GuiTaskProgressEvent,
+        context: GuiTaskContext,
+    ) -> bool:
+        """Return whether one task progress event may update current widgets."""
+
+        return self.task_coordinator.progress_is_current(
+            event,
             context,
             project_dir=self.state.project_dir,
             raw_video_path=self.state.raw_video_path,
@@ -327,6 +346,7 @@ class PreprocessSetupController:
         path: Path,
         require_sequential_count: bool,
         context: GuiTaskContext | None = None,
+        progress_callback: Callable[[OperationProgress], None] | None = None,
     ) -> VideoProbeResult:
         """Run the core probe without mutating GUI state (worker-safe)."""
 
@@ -337,6 +357,8 @@ class PreprocessSetupController:
             arguments["cancellation_requested"] = (
                 context.is_cancellation_requested
             )
+        if progress_callback is not None:
+            arguments["progress_callback"] = progress_callback
         return self._probe_function(path, **arguments)
 
     def apply_raw_video_probe(

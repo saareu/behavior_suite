@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,7 +19,12 @@ from preprocess.crop_plan import (
     build_clockwise_rotation_transform,
     compute_native_rectified_size,
 )
-from preprocess.exceptions import CageDetectionError, CropPlanError
+from preprocess.exceptions import (
+    CageDetectionCancelledError,
+    CageDetectionError,
+    CropPlanError,
+)
+from preprocess.models import OperationProgress
 from preprocess.pre_crop import (
     PreCropROI,
     ResolvedPreCrop,
@@ -66,7 +72,35 @@ class _DetectedRectangle:
     coarse_search_roi: tuple[int, int, int, int]
 
 
-def _read_sampled_frames(video_path: Path, sample_step: int) -> list[np.ndarray]:
+def _raise_if_cancelled(
+    cancellation_requested: Callable[[], bool] | None,
+) -> None:
+    if cancellation_requested is not None and cancellation_requested():
+        raise CageDetectionCancelledError("Automatic cage detection was cancelled.")
+
+
+def _emit_phase(
+    progress_callback: Callable[[OperationProgress], None] | None,
+    phase: str,
+) -> None:
+    if progress_callback is not None:
+        progress_callback(
+            OperationProgress(
+                phase=phase,
+                message=phase,
+                completed_units=None,
+                total_units=None,
+                is_indeterminate=True,
+            )
+        )
+
+
+def _read_sampled_frames(
+    video_path: Path,
+    sample_step: int,
+    *,
+    cancellation_requested: Callable[[], bool] | None = None,
+) -> list[np.ndarray]:
     if sample_step <= 0:
         raise CageDetectionError("sample_step must be positive.")
     if not video_path.is_file():
@@ -82,6 +116,7 @@ def _read_sampled_frames(video_path: Path, sample_step: int) -> list[np.ndarray]
         reported_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
         if reported_count > 0:
             for frame_index in range(0, reported_count, sample_step):
+                _raise_if_cancelled(cancellation_requested)
                 capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
                 success, frame = capture.read()
                 if success and frame is not None:
@@ -89,6 +124,7 @@ def _read_sampled_frames(video_path: Path, sample_step: int) -> list[np.ndarray]
         else:
             frame_index = 0
             while True:
+                _raise_if_cancelled(cancellation_requested)
                 success, frame = capture.read()
                 if not success:
                     break
@@ -103,13 +139,25 @@ def _read_sampled_frames(video_path: Path, sample_step: int) -> list[np.ndarray]
 def _build_median_background_with_count(
     video_path: Path,
     sample_step: int,
+    *,
+    progress_callback: Callable[[OperationProgress], None] | None = None,
+    cancellation_requested: Callable[[], bool] | None = None,
 ) -> _MedianBackground:
-    frames = _read_sampled_frames(video_path, sample_step)
+    if cancellation_requested is None:
+        frames = _read_sampled_frames(video_path, sample_step)
+    else:
+        frames = _read_sampled_frames(
+            video_path,
+            sample_step,
+            cancellation_requested=cancellation_requested,
+        )
     if not frames:
         raise CageDetectionError(
             f"No usable frames were sampled for cage detection from: {video_path}"
         )
 
+    _raise_if_cancelled(cancellation_requested)
+    _emit_phase(progress_callback, "Estimating background")
     first_shape = frames[0].shape
     if any(frame.shape != first_shape for frame in frames):
         raise CageDetectionError("Sampled video frames do not have a consistent shape.")
@@ -418,6 +466,9 @@ def detect_cage_crop_plan(
     video_path: Path,
     config: PreprocessConfig,
     pre_crop: ResolvedPreCrop,
+    *,
+    progress_callback: Callable[[OperationProgress], None] | None = None,
+    cancellation_requested: Callable[[], bool] | None = None,
 ) -> CageDetectionResult:
     """Detect a cage and return an unaccepted automatic CropPlan.
 
@@ -430,10 +481,20 @@ def detect_cage_crop_plan(
     """
 
     resolved_path = Path(video_path).expanduser().resolve()
-    background_result = _build_median_background_with_count(
-        resolved_path,
-        config.cage_detect.sample_step,
-    )
+    _raise_if_cancelled(cancellation_requested)
+    _emit_phase(progress_callback, "Loading representative frames")
+    if progress_callback is None and cancellation_requested is None:
+        background_result = _build_median_background_with_count(
+            resolved_path,
+            config.cage_detect.sample_step,
+        )
+    else:
+        background_result = _build_median_background_with_count(
+            resolved_path,
+            config.cage_detect.sample_step,
+            progress_callback=progress_callback,
+            cancellation_requested=cancellation_requested,
+        )
     background = background_result.image
     background_height, background_width = background.shape
     if pre_crop.raw_size_wh != (background_width, background_height):
@@ -449,12 +510,16 @@ def detect_cage_crop_plan(
     if pre_cropped_background.shape != (roi.height, roi.width):
         raise CageDetectionError("Resolved pre-crop could not be applied to the background.")
 
+    _raise_if_cancelled(cancellation_requested)
+    _emit_phase(progress_callback, "Detecting cage contour")
     try:
         detected = _detect_rotated_rectangle(
             pre_cropped_background,
             config.cage_detect,
             config.prepare.roi_margin_px,
         )
+        _raise_if_cancelled(cancellation_requested)
+        _emit_phase(progress_callback, "Building CropPlan")
         homography_rectify, homography_rotate, native_size_wh, rotated_90 = (
             _build_rectification_geometry(
                 detected.quad_in_pre_crop,
@@ -516,6 +581,7 @@ def detect_cage_crop_plan(
         if config.prepare.perspective_interpolation == "cubic"
         else cv2.INTER_LINEAR
     )
+    _raise_if_cancelled(cancellation_requested)
     try:
         cropped_background = cv2.warpPerspective(
             background,

@@ -23,6 +23,7 @@ from preprocess.models import (
     ExternalTimeSelection,
     MatVectorCandidate,
     MatWorkspace,
+    OperationProgress,
     TimingUnit,
     VideoProbeResult,
 )
@@ -340,6 +341,7 @@ class TimingController:
         self,
         path: Path,
         context: GuiTaskContext | None = None,
+        progress_callback: Callable[[OperationProgress], None] | None = None,
     ) -> VideoProbeResult:
         """Run a full raw-video probe without mutating GUI state."""
 
@@ -348,6 +350,8 @@ class TimingController:
             arguments["cancellation_requested"] = (
                 context.is_cancellation_requested
             )
+        if progress_callback is not None:
+            arguments["progress_callback"] = progress_callback
         return self._probe_function(path, **arguments)
 
     def apply_full_raw_frame_count(

@@ -28,8 +28,11 @@ from ui.state import RawReadableCountStatus
 from ui.tasks import (
     GuiTaskContext,
     GuiTaskKind,
+    GuiTaskProgressEvent,
     GuiTaskRunner,
     TaskAlreadyRunningError,
+    format_raw_count_progress,
+    format_task_duration,
 )
 
 
@@ -46,6 +49,7 @@ class RawVideoPage(QWidget):
         super().__init__()
         self.controller = controller
         self.task_runner = GuiTaskRunner(self)
+        self._latest_progress_event: GuiTaskProgressEvent | None = None
         title = QLabel("Raw Video")
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
 
@@ -68,6 +72,12 @@ class RawVideoPage(QWidget):
         self.busy_indicator = QProgressBar()
         self.busy_indicator.setRange(0, 0)
         self.busy_indicator.setVisible(False)
+        self.progress_label = QLabel()
+        self.progress_label.setWordWrap(True)
+        self.progress_label.setVisible(False)
+        self.cancel_count_button = QPushButton("Cancel Frame Count")
+        self.cancel_count_button.clicked.connect(self._cancel_count)
+        self.cancel_count_button.setVisible(False)
 
         summary = QGroupBox("Probe summary")
         self.summary_values = {
@@ -104,6 +114,8 @@ class RawVideoPage(QWidget):
         layout.addWidget(warning)
         layout.addWidget(self.probe_button)
         layout.addWidget(self.busy_indicator)
+        layout.addWidget(self.progress_label)
+        layout.addWidget(self.cancel_count_button)
         layout.addWidget(summary)
         layout.addWidget(self.error_label)
         layout.addStretch(1)
@@ -186,10 +198,16 @@ class RawVideoPage(QWidget):
                 else RawReadableCountStatus.COUNTING
             )
             self._set_busy(True)
-            self.task_runner.start(
-                lambda: self.controller.compute_raw_video_probe(path, True, context),
+            self.task_runner.start_progressive(
+                lambda report: self.controller.compute_raw_video_probe(
+                    path,
+                    True,
+                    context,
+                    report,
+                ),
                 task_name="full raw-video probe",
                 context=context,
+                on_progress=lambda event: self._raw_probe_progress(event, context),
                 on_success=lambda result: self._raw_probe_succeeded(result, context),
                 on_error=lambda exc: self._raw_probe_failed(exc, context),
                 on_finished=lambda: self._raw_probe_finished(context),
@@ -217,6 +235,17 @@ class RawVideoPage(QWidget):
             return
         if applied is None:
             return
+        elapsed = (
+            self._latest_progress_event.elapsed_sec
+            if self._latest_progress_event is not None
+            else 0.0
+        )
+        count = applied.frame_count_opencv_readable or 0
+        self.progress_label.setText(
+            f"Sequential count complete: {count:,} readable frames\n"
+            f"Elapsed: {format_task_duration(elapsed)}"
+        )
+        self.progress_label.setVisible(True)
         self.error_label.clear()
         self._refresh_summary()
         self.status_message.emit("Raw video probe and sequential count completed.")
@@ -234,6 +263,8 @@ class RawVideoPage(QWidget):
         if message is None:
             return
         if isinstance(exc, VideoProbeCancelledError):
+            self.progress_label.setText("Sequential readable-frame count cancelled.")
+            self.progress_label.setVisible(True)
             self._refresh_summary()
             self.status_message.emit("Raw readable-frame count cancelled.")
             self.validity_changed.emit()
@@ -249,8 +280,45 @@ class RawVideoPage(QWidget):
         self._refresh_summary()
         self.raw_probe_changed.emit()
 
+    def _raw_probe_progress(
+        self,
+        event: GuiTaskProgressEvent,
+        context: GuiTaskContext,
+    ) -> None:
+        if not self.controller.task_progress_is_current(event, context):
+            return
+        self._latest_progress_event = event
+        self.progress_label.setText(format_raw_count_progress(event))
+        self.progress_label.setVisible(True)
+        if event.total_units is None or event.is_indeterminate:
+            self.busy_indicator.setRange(0, 0)
+            return
+        self.busy_indicator.setRange(0, 1000)
+        completed = event.completed_units or 0
+        fraction = min(max(completed / event.total_units, 0.0), 1.0)
+        self.busy_indicator.setValue(round(fraction * 1000))
+        self.busy_indicator.setFormat(
+            "Estimated progress: %p%" if event.total_is_estimate else "%p%"
+        )
+
+    def _cancel_count(self) -> None:
+        self.task_runner.request_cancellation()
+        self.cancel_count_button.setEnabled(False)
+        self.progress_label.setText(
+            "Cancellation requested; stopping after the current frame."
+        )
+        self.progress_label.setVisible(True)
+
     def _set_busy(self, busy: bool) -> None:
         self.busy_indicator.setVisible(busy)
+        self.cancel_count_button.setVisible(busy)
+        self.cancel_count_button.setEnabled(busy)
+        if busy:
+            self._latest_progress_event = None
+            self.busy_indicator.setRange(0, 0)
+            self.busy_indicator.setFormat("%p%")
+            self.progress_label.clear()
+            self.progress_label.setVisible(True)
         self.browse_button.setEnabled(not busy)
         self.probe_button.setEnabled(not busy)
         self.full_count.setEnabled(not busy)

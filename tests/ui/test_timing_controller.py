@@ -7,6 +7,7 @@ from preprocess.exceptions import VideoProbeCancelledError
 from preprocess.models import (
     ExternalTimeSelection,
     MatWorkspace,
+    OperationProgress,
     TimingUnit,
     VideoProbeResult,
 )
@@ -562,3 +563,44 @@ def test_state_transitions_are_headless(tmp_path: Path) -> None:
 
     assert isinstance(controller.state, PreprocessSetupState)
     assert controller.state.timing_valid is True
+
+
+def test_full_count_progress_callback_is_forwarded_headlessly(
+    tmp_path: Path,
+) -> None:
+    progress: list[OperationProgress] = []
+
+    def fake_probe(
+        path: Path,
+        *,
+        require_sequential_count: bool,
+        cancellation_requested,
+        progress_callback,
+    ) -> VideoProbeResult:
+        assert require_sequential_count is True
+        assert cancellation_requested() is False
+        update = OperationProgress(
+            phase="counting",
+            message="Counting",
+            completed_units=2,
+            total_units=4,
+            total_is_estimate=True,
+            is_indeterminate=False,
+        )
+        progress_callback(update)
+        return _probe_result(path, readable_count=4)
+
+    controller = TimingController(
+        _state(tmp_path, readable_count=None),
+        probe_function=fake_probe,
+    )
+    path, context = controller.begin_full_raw_frame_count()
+
+    result = controller.compute_full_raw_frame_count(
+        path,
+        context,
+        progress.append,
+    )
+
+    assert result.frame_count_opencv_readable == 4
+    assert [update.completed_units for update in progress] == [2]

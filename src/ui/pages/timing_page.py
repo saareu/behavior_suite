@@ -33,7 +33,14 @@ from ui.controllers.timing_controller import (
     TimingValidationError,
 )
 from ui.state import RawReadableCountStatus, TimingMode
-from ui.tasks import GuiTaskContext, GuiTaskRunner, TaskAlreadyRunningError
+from ui.tasks import (
+    GuiTaskContext,
+    GuiTaskProgressEvent,
+    GuiTaskRunner,
+    TaskAlreadyRunningError,
+    format_raw_count_progress,
+    format_task_duration,
+)
 
 _TABLE_HEADERS = (
     "Variable",
@@ -66,6 +73,7 @@ class TimingPage(QWidget):
         )
         self.task_runner = GuiTaskRunner(self)
         self._refreshing = False
+        self._latest_progress_event: GuiTaskProgressEvent | None = None
 
         title = QLabel("External Timing")
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
@@ -133,6 +141,12 @@ class TimingPage(QWidget):
         self.busy_indicator = QProgressBar()
         self.busy_indicator.setRange(0, 0)
         self.busy_indicator.setVisible(False)
+        self.progress_label = QLabel()
+        self.progress_label.setWordWrap(True)
+        self.progress_label.setVisible(False)
+        self.cancel_count_button = QPushButton("Cancel Frame Count")
+        self.cancel_count_button.clicked.connect(self._cancel_count)
+        self.cancel_count_button.setVisible(False)
 
         mat_layout = QVBoxLayout(self.mat_group)
         mat_layout.addLayout(file_row)
@@ -147,6 +161,8 @@ class TimingPage(QWidget):
         mat_layout.addWidget(self.raw_count_explanation)
         mat_layout.addWidget(self.count_button)
         mat_layout.addWidget(self.busy_indicator)
+        mat_layout.addWidget(self.progress_label)
+        mat_layout.addWidget(self.cancel_count_button)
         mat_layout.addWidget(self.validate_button)
 
         self.success_label = QLabel()
@@ -303,14 +319,19 @@ class TimingPage(QWidget):
                 force_recount=force_recount
             )
             self._set_busy(True)
-            self.task_runner.start(
-                lambda: self.controller.compute_full_raw_frame_count(path, context),
+            self.task_runner.start_progressive(
+                lambda report: self.controller.compute_full_raw_frame_count(
+                    path,
+                    context,
+                    report,
+                ),
                 task_name=(
                     "sequential raw-frame recount"
                     if force_recount
                     else "sequential raw-frame count"
                 ),
                 context=context,
+                on_progress=lambda event: self._raw_count_progress(event, context),
                 on_success=lambda result: self._raw_count_succeeded(result, context),
                 on_error=lambda exc: self._raw_count_failed(exc, context),
                 on_finished=lambda: self._raw_count_finished(context),
@@ -344,6 +365,16 @@ class TimingPage(QWidget):
             return
         if count is None:
             return
+        elapsed = (
+            self._latest_progress_event.elapsed_sec
+            if self._latest_progress_event is not None
+            else 0.0
+        )
+        self.progress_label.setText(
+            f"Sequential count complete: {count:,} readable frames\n"
+            f"Elapsed: {format_task_duration(elapsed)}"
+        )
+        self.progress_label.setVisible(True)
         self.error_label.clear()
         self.refresh_from_state()
         self.status_message.emit(f"Sequential readable-frame count completed: {count}.")
@@ -361,6 +392,8 @@ class TimingPage(QWidget):
         if not applied:
             return
         if isinstance(exc, VideoProbeCancelledError):
+            self.progress_label.setText("Sequential readable-frame count cancelled.")
+            self.progress_label.setVisible(True)
             self.refresh_from_state()
             self.status_message.emit("Raw readable-frame count cancelled.")
             self.validity_changed.emit()
@@ -383,8 +416,45 @@ class TimingPage(QWidget):
         self.refresh_from_state()
         self.raw_probe_changed.emit()
 
+    def _raw_count_progress(
+        self,
+        event: GuiTaskProgressEvent,
+        context: GuiTaskContext,
+    ) -> None:
+        if not self.setup_controller.task_progress_is_current(event, context):
+            return
+        self._latest_progress_event = event
+        self.progress_label.setText(format_raw_count_progress(event))
+        self.progress_label.setVisible(True)
+        if event.total_units is None or event.is_indeterminate:
+            self.busy_indicator.setRange(0, 0)
+            return
+        self.busy_indicator.setRange(0, 1000)
+        completed = event.completed_units or 0
+        fraction = min(max(completed / event.total_units, 0.0), 1.0)
+        self.busy_indicator.setValue(round(fraction * 1000))
+        self.busy_indicator.setFormat(
+            "Estimated progress: %p%" if event.total_is_estimate else "%p%"
+        )
+
+    def _cancel_count(self) -> None:
+        self.task_runner.request_cancellation()
+        self.cancel_count_button.setEnabled(False)
+        self.progress_label.setText(
+            "Cancellation requested; stopping after the current frame."
+        )
+        self.progress_label.setVisible(True)
+
     def _set_busy(self, busy: bool) -> None:
         self.busy_indicator.setVisible(busy)
+        self.cancel_count_button.setVisible(busy)
+        self.cancel_count_button.setEnabled(busy)
+        if busy:
+            self._latest_progress_event = None
+            self.busy_indicator.setRange(0, 0)
+            self.busy_indicator.setFormat("%p%")
+            self.progress_label.clear()
+            self.progress_label.setVisible(True)
         self.no_timing.setEnabled(not busy)
         self.matlab_timing.setEnabled(not busy)
         self.load_button.setEnabled(not busy)

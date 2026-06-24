@@ -7,6 +7,7 @@ import yaml
 
 from preprocess.config import PreprocessConfig, TrimConfig
 from preprocess.models import (
+    OperationProgress,
     TimingPlausibilityAssessment,
     TimingUnit,
     VideoProbeResult,
@@ -18,7 +19,7 @@ from ui.controllers.preprocess_setup_controller import (
     SetupValidationError,
 )
 from ui.state import RawReadableCountStatus, WorkflowStep
-from ui.tasks import GuiTaskKind
+from ui.tasks import GuiTaskKind, GuiTaskProgressTracker
 
 
 def _probe_result(path: Path, *, readable_count: int | None = None) -> VideoProbeResult:
@@ -583,3 +584,54 @@ def test_state_cannot_advance_with_invalid_trim_or_pre_crop(
         )
 
     assert controller.can_advance(WorkflowStep.TRIM_PRE_CROP) is False
+
+
+def test_raw_probe_progress_is_forwarded_and_rejected_after_video_change(
+    tmp_path: Path,
+) -> None:
+    received_callbacks = []
+
+    def fake_probe(
+        path: Path,
+        *,
+        require_sequential_count: bool,
+        cancellation_requested,
+        progress_callback,
+    ) -> VideoProbeResult:
+        assert require_sequential_count is True
+        assert cancellation_requested() is False
+        progress_callback(
+            OperationProgress(
+                phase="counting",
+                message="Counting",
+                completed_units=1,
+                total_units=20,
+                total_is_estimate=True,
+                is_indeterminate=False,
+            )
+        )
+        received_callbacks.append(progress_callback)
+        return _probe_result(path, readable_count=20)
+
+    controller = PreprocessSetupController(probe_function=fake_probe)
+    controller.load_startup_config()
+    controller.create_project(tmp_path, "ProgressProject")
+    raw_path = tmp_path / "raw.avi"
+    controller.set_raw_video_path(raw_path)
+    context = controller.begin_task(GuiTaskKind.RAW_SEQUENTIAL_COUNT)
+    progress: list[OperationProgress] = []
+
+    controller.compute_raw_video_probe(
+        raw_path,
+        True,
+        context,
+        progress.append,
+    )
+    event = GuiTaskProgressTracker(context).build(progress[0])
+
+    assert received_callbacks == [progress.append]
+    assert controller.task_progress_is_current(event, context) is True
+
+    controller.set_raw_video_path(tmp_path / "replacement.avi")
+
+    assert controller.task_progress_is_current(event, context) is False

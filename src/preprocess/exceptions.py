@@ -37,6 +37,10 @@ class CageDetectionError(PreprocessError):
     """Raised when automatic cage detection cannot produce a valid CropPlan."""
 
 
+class CageDetectionCancelledError(PreprocessCancelledError):
+    """Raised when automatic cage detection stops after cooperative cancellation."""
+
+
 class VideoPreparationError(PreprocessError):
     """Raised when a video preparation stage cannot complete safely."""
 

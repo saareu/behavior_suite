@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import math
+import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -10,6 +13,8 @@ from typing import Any
 from uuid import uuid4
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
+
+from preprocess.models import OperationProgress
 
 
 class TaskAlreadyRunningError(RuntimeError):
@@ -45,6 +50,150 @@ class GuiTaskContext:
         """Return a callback-compatible cancellation state."""
 
         return self.cancellation_requested
+
+
+@dataclass(frozen=True, slots=True)
+class GuiTaskProgressEvent:
+    """One typed, task-identifiable progress update delivered on the GUI thread."""
+
+    task_id: str
+    task_kind: GuiTaskKind
+    generation: int
+    phase: str
+    message: str
+    completed_units: int | None
+    total_units: int | None
+    total_is_estimate: bool
+    elapsed_sec: float
+    estimated_remaining_sec: float | None
+    is_indeterminate: bool
+    cancellation_requested: bool
+
+
+class GuiTaskProgressTracker:
+    """Add task identity, elapsed time, and conservative ETA to core progress."""
+
+    _ETA_MIN_ELAPSED_SEC = 2.0
+    _ETA_MIN_COMPLETED_UNITS = 100
+    _ETA_RATE_INTERVALS = 2
+    _ETA_MAX_RELATIVE_RATE_SPREAD = 0.25
+
+    def __init__(
+        self,
+        context: GuiTaskContext,
+        *,
+        clock: Callable[[], float] = time.perf_counter,
+    ) -> None:
+        self._context = context
+        self._clock = clock
+        self._started_at = clock()
+        self._samples: deque[tuple[float, int]] = deque(maxlen=5)
+
+    def build(self, progress: OperationProgress) -> GuiTaskProgressEvent:
+        """Build one GUI event without inventing progress unavailable from core."""
+
+        elapsed = max(0.0, self._clock() - self._started_at)
+        completed = progress.completed_units
+        if completed is not None and (
+            not self._samples or completed >= self._samples[-1][1]
+        ):
+            self._samples.append((elapsed, completed))
+        eta = self._estimate_remaining(progress, elapsed)
+        return GuiTaskProgressEvent(
+            task_id=self._context.task_id,
+            task_kind=self._context.task_kind,
+            generation=self._context.generation,
+            phase=progress.phase,
+            message=progress.message,
+            completed_units=completed,
+            total_units=progress.total_units,
+            total_is_estimate=progress.total_is_estimate,
+            elapsed_sec=elapsed,
+            estimated_remaining_sec=eta,
+            is_indeterminate=progress.is_indeterminate,
+            cancellation_requested=self._context.cancellation_requested,
+        )
+
+    def _estimate_remaining(
+        self,
+        progress: OperationProgress,
+        elapsed: float,
+    ) -> float | None:
+        completed = progress.completed_units
+        total = progress.total_units
+        if (
+            completed is None
+            or total is None
+            or progress.total_is_estimate
+            or progress.is_indeterminate
+            or completed >= total
+            or completed < self._ETA_MIN_COMPLETED_UNITS
+            or elapsed < self._ETA_MIN_ELAPSED_SEC
+            or len(self._samples) < self._ETA_RATE_INTERVALS + 1
+        ):
+            return None
+        rates: list[float] = []
+        samples = tuple(self._samples)
+        for previous, current in zip(samples, samples[1:], strict=False):
+            delta_time = current[0] - previous[0]
+            delta_units = current[1] - previous[1]
+            if delta_time > 0 and delta_units > 0:
+                rates.append(delta_units / delta_time)
+        if len(rates) < self._ETA_RATE_INTERVALS:
+            return None
+        mean_rate = sum(rates) / len(rates)
+        if not math.isfinite(mean_rate) or mean_rate <= 0:
+            return None
+        relative_spread = (max(rates) - min(rates)) / mean_rate
+        if relative_spread > self._ETA_MAX_RELATIVE_RATE_SPREAD:
+            return None
+        estimate = (total - completed) / mean_rate
+        return estimate if math.isfinite(estimate) and estimate >= 0 else None
+
+
+def progress_matches_context(
+    event: GuiTaskProgressEvent,
+    context: GuiTaskContext,
+) -> bool:
+    """Return whether a progress event belongs to exactly one task generation."""
+
+    return (
+        event.task_id == context.task_id
+        and event.task_kind is context.task_kind
+        and event.generation == context.generation
+    )
+
+
+def format_task_duration(seconds: float) -> str:
+    """Format elapsed/remaining seconds compactly for status text."""
+
+    whole_seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(whole_seconds, 3600)
+    minutes, seconds_part = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{seconds_part:02d}"
+    return f"{minutes:02d}:{seconds_part:02d}"
+
+
+def format_raw_count_progress(event: GuiTaskProgressEvent) -> str:
+    """Render an honest sequential-count status without implying an exact total."""
+
+    completed = event.completed_units or 0
+    if event.total_units is None:
+        first_line = f"Counting readable frames: {completed:,} decoded"
+    else:
+        qualifier = "approximately " if event.total_is_estimate else ""
+        first_line = (
+            f"Counting readable frames: {completed:,} decoded of "
+            f"{qualifier}{event.total_units:,}"
+        )
+    lines = [first_line, f"Elapsed: {format_task_duration(event.elapsed_sec)}"]
+    if event.estimated_remaining_sec is not None:
+        lines.append(
+            "Estimated remaining: "
+            f"{format_task_duration(event.estimated_remaining_sec)}"
+        )
+    return "\n".join(lines)
 
 
 def _same_optional_path(first: Path | None, second: Path | None) -> bool:
@@ -104,7 +253,7 @@ class GuiTaskCoordinator:
         return context
 
     def invalidate_inputs(self) -> tuple[GuiTaskContext, ...]:
-        """Advance generation and cancel probe/count tasks tied to prior inputs."""
+        """Advance generation and cancel input-dependent tasks tied to prior inputs."""
 
         self._generation += 1
         cancelled: list[GuiTaskContext] = []
@@ -112,19 +261,21 @@ class GuiTaskCoordinator:
             if context.task_kind in {
                 GuiTaskKind.RAW_PROBE,
                 GuiTaskKind.RAW_SEQUENTIAL_COUNT,
+                GuiTaskKind.CAGE_DETECTION,
             }:
                 context.request_cancellation()
                 cancelled.append(context)
         return tuple(cancelled)
 
     def request_input_cancellation(self) -> tuple[GuiTaskContext, ...]:
-        """Cancel current-generation probe/count work without changing inputs."""
+        """Cancel current-generation input work without changing inputs."""
 
         cancelled: list[GuiTaskContext] = []
         for context in self._active.values():
             if context.task_kind in {
                 GuiTaskKind.RAW_PROBE,
                 GuiTaskKind.RAW_SEQUENTIAL_COUNT,
+                GuiTaskKind.CAGE_DETECTION,
             }:
                 context.request_cancellation()
                 cancelled.append(context)
@@ -172,6 +323,22 @@ class GuiTaskCoordinator:
             and _same_optional_path(context.raw_video_path, raw_video_path)
         )
 
+    def progress_is_current(
+        self,
+        event: GuiTaskProgressEvent,
+        context: GuiTaskContext,
+        *,
+        project_dir: Path | None,
+        raw_video_path: Path | None,
+    ) -> bool:
+        """Reject progress from a stale, cancelled, or different task generation."""
+
+        return progress_matches_context(event, context) and self.is_current(
+            context,
+            project_dir=project_dir,
+            raw_video_path=raw_video_path,
+        )
+
     def finish(self, context: GuiTaskContext) -> None:
         """Forget a completed task without changing the input generation."""
 
@@ -181,16 +348,37 @@ class GuiTaskCoordinator:
 class _TaskWorker(QObject):
     succeeded = Signal(object)
     failed = Signal(object)
+    progressed = Signal(object)
     finished = Signal()
 
-    def __init__(self, operation: Callable[[], Any]) -> None:
+    def __init__(
+        self,
+        operation: Callable[..., Any],
+        *,
+        context: GuiTaskContext | None,
+        progressive: bool,
+    ) -> None:
         super().__init__()
         self._operation = operation
+        self._progressive = progressive
+        self._progress_tracker = (
+            GuiTaskProgressTracker(context) if context is not None else None
+        )
+
+    def _report_progress(self, progress: OperationProgress) -> None:
+        if self._progress_tracker is None:
+            raise RuntimeError("Progress reporting requires a GUI task context.")
+        validated = OperationProgress.model_validate(progress)
+        self.progressed.emit(self._progress_tracker.build(validated))
 
     @Slot()
     def run(self) -> None:
         try:
-            result = self._operation()
+            result = (
+                self._operation(self._report_progress)
+                if self._progressive
+                else self._operation()
+            )
         except BaseException as exc:
             self.failed.emit(exc)
         else:
@@ -205,6 +393,7 @@ class GuiTaskRunner(QObject):
     started = Signal(str)
     succeeded = Signal(object)
     failed = Signal(object)
+    progressed = Signal(object)
     finished = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -213,6 +402,7 @@ class GuiTaskRunner(QObject):
         self._worker: _TaskWorker | None = None
         self._on_success: Callable[[Any], None] | None = None
         self._on_error: Callable[[BaseException], None] | None = None
+        self._on_progress: Callable[[GuiTaskProgressEvent], None] | None = None
         self._on_finished: Callable[[], None] | None = None
         self._context: GuiTaskContext | None = None
 
@@ -246,27 +436,89 @@ class GuiTaskRunner(QObject):
     ) -> None:
         """Start one operation or reject an overlapping invocation."""
 
+        self._start(
+            operation,
+            progressive=False,
+            task_name=task_name,
+            context=context,
+            on_success=on_success,
+            on_error=on_error,
+            on_finished=on_finished,
+        )
+
+    def start_progressive(
+        self,
+        operation: Callable[[Callable[[OperationProgress], None]], Any],
+        *,
+        task_name: str = "background task",
+        context: GuiTaskContext,
+        on_progress: Callable[[GuiTaskProgressEvent], None] | None = None,
+        on_success: Callable[[Any], None] | None = None,
+        on_error: Callable[[BaseException], None] | None = None,
+        on_finished: Callable[[], None] | None = None,
+    ) -> None:
+        """Start an operation that emits typed progress from its worker thread."""
+
+        self._start(
+            operation,
+            progressive=True,
+            task_name=task_name,
+            context=context,
+            on_progress=on_progress,
+            on_success=on_success,
+            on_error=on_error,
+            on_finished=on_finished,
+        )
+
+    def _start(
+        self,
+        operation: Callable[..., Any],
+        *,
+        progressive: bool,
+        task_name: str,
+        context: GuiTaskContext | None,
+        on_progress: Callable[[GuiTaskProgressEvent], None] | None = None,
+        on_success: Callable[[Any], None] | None,
+        on_error: Callable[[BaseException], None] | None,
+        on_finished: Callable[[], None] | None,
+    ) -> None:
+        """Configure the common QThread lifecycle for standard/progressive work."""
+
         if self.is_running:
             raise TaskAlreadyRunningError("A GUI background task is already running.")
         thread = QThread(self)
-        worker = _TaskWorker(operation)
+        worker = _TaskWorker(
+            operation,
+            context=context,
+            progressive=progressive,
+        )
         worker.moveToThread(thread)
         self._thread = thread
         self._worker = worker
         self._on_success = on_success
         self._on_error = on_error
+        self._on_progress = on_progress
         self._on_finished = on_finished
         self._context = context
 
         thread.started.connect(worker.run)
         worker.succeeded.connect(self._dispatch_success)
         worker.failed.connect(self._dispatch_failure)
+        worker.progressed.connect(self._dispatch_progress)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(self._thread_finished)
         thread.finished.connect(thread.deleteLater)
         self.started.emit(task_name)
         thread.start()
+
+    @Slot(object)
+    def _dispatch_progress(self, event: object) -> None:
+        if not isinstance(event, GuiTaskProgressEvent):
+            return
+        self.progressed.emit(event)
+        if self._on_progress is not None:
+            self._on_progress(event)
 
     @Slot(object)
     def _dispatch_success(self, result: object) -> None:
@@ -288,6 +540,7 @@ class GuiTaskRunner(QObject):
         self._worker = None
         self._on_success = None
         self._on_error = None
+        self._on_progress = None
         self._on_finished = None
         self._context = None
         self.finished.emit()

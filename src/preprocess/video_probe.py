@@ -6,6 +6,7 @@ import json
 import math
 import shutil
 import subprocess
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -13,9 +14,11 @@ from typing import Any
 import cv2
 
 from preprocess.exceptions import VideoProbeCancelledError, VideoProbeError
-from preprocess.models import VideoProbeResult
+from preprocess.models import OperationProgress, VideoProbeResult
 
 _FFPROBE_TIMEOUT_SECONDS = 30
+_COUNT_PROGRESS_FRAME_INTERVAL = 250
+_COUNT_PROGRESS_TIME_INTERVAL_SECONDS = 0.25
 
 
 def _validate_video_path(path: Path) -> Path:
@@ -154,6 +157,7 @@ def count_opencv_readable_frames(
     path: Path,
     *,
     cancellation_requested: Callable[[], bool] | None = None,
+    progress_callback: Callable[[OperationProgress], None] | None = None,
 ) -> int:
     """Sequentially decode a video from the first frame and return the count.
 
@@ -163,9 +167,38 @@ def count_opencv_readable_frames(
 
     capture = _open_video(path)
     readable_count = 0
+    reported_total: int | None = None
+    get_property = getattr(capture, "get", None)
+    if callable(get_property):
+        try:
+            reported_value = float(get_property(cv2.CAP_PROP_FRAME_COUNT))
+        except (TypeError, ValueError, OverflowError, cv2.error):
+            reported_value = 0.0
+        if math.isfinite(reported_value) and reported_value > 0:
+            parsed_total = int(reported_value)
+            reported_total = parsed_total if parsed_total > 0 else None
+    last_emitted_count = 0
+    last_emitted_at = time.perf_counter()
+
+    def emit(phase: str, message: str) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            OperationProgress(
+                phase=phase,
+                message=message,
+                completed_units=readable_count,
+                total_units=reported_total,
+                total_is_estimate=reported_total is not None,
+                is_indeterminate=reported_total is None,
+            )
+        )
+
+    emit("counting", "Counting sequentially readable frames")
     try:
         while True:
             if cancellation_requested is not None and cancellation_requested():
+                emit("cancelling", "Cancellation requested; stopping frame count")
                 raise VideoProbeCancelledError(
                     f"Raw readable-frame count was cancelled for video: {path}"
                 )
@@ -173,10 +206,21 @@ def count_opencv_readable_frames(
             if not success:
                 break
             readable_count += 1
+            now = time.perf_counter()
+            if (
+                readable_count - last_emitted_count
+                >= _COUNT_PROGRESS_FRAME_INTERVAL
+                or now - last_emitted_at
+                >= _COUNT_PROGRESS_TIME_INTERVAL_SECONDS
+            ):
+                emit("counting", "Counting sequentially readable frames")
+                last_emitted_count = readable_count
+                last_emitted_at = now
     finally:
         capture.release()
     if readable_count == 0:
         raise VideoProbeError(f"OpenCV could not decode any frames from video: {path}")
+    emit("complete", "Sequential readable-frame count complete")
     return readable_count
 
 
@@ -185,6 +229,7 @@ def probe_video(
     require_sequential_count: bool,
     *,
     cancellation_requested: Callable[[], bool] | None = None,
+    progress_callback: Callable[[OperationProgress], None] | None = None,
 ) -> VideoProbeResult:
     """Probe a readable video with OpenCV and ffprobe when available.
 
@@ -221,6 +266,7 @@ def probe_video(
         readable_count = count_opencv_readable_frames(
             video_path,
             cancellation_requested=cancellation_requested,
+            progress_callback=progress_callback,
         )
 
     ffprobe_metadata: dict[str, Any] | None = None

@@ -113,11 +113,65 @@ def test_sequential_count_cancellation_never_returns_partial_count(
 
     monkeypatch.setattr(video_probe, "_open_video", lambda _path: capture)
 
+    progress = []
     with pytest.raises(VideoProbeCancelledError, match="cancelled"):
         video_probe.count_opencv_readable_frames(
             tmp_path / "raw.avi",
             cancellation_requested=cancellation_requested,
+            progress_callback=progress.append,
         )
 
     assert capture.read_count == 3
     assert capture.released is True
+    assert progress[-1].phase == "cancelling"
+    assert all(event.phase != "complete" for event in progress)
+
+
+@pytest.mark.parametrize(
+    ("reported_total", "expected_indeterminate"),
+    [(600, False), (0, True)],
+)
+def test_sequential_count_progress_is_monotonic_and_honest_about_denominator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reported_total: int,
+    expected_indeterminate: bool,
+) -> None:
+    frame_count = 600
+
+    class FakeCapture:
+        def __init__(self) -> None:
+            self.read_count = 0
+
+        def get(self, _property: int) -> float:
+            return float(reported_total)
+
+        def read(self) -> tuple[bool, np.ndarray | None]:
+            if self.read_count >= frame_count:
+                return False, None
+            self.read_count += 1
+            return True, np.zeros((2, 2, 3), dtype=np.uint8)
+
+        def release(self) -> None:
+            pass
+
+    monkeypatch.setattr(video_probe, "_open_video", lambda _path: FakeCapture())
+    progress = []
+
+    count = video_probe.count_opencv_readable_frames(
+        tmp_path / "raw.avi",
+        progress_callback=progress.append,
+    )
+
+    completed = [event.completed_units for event in progress]
+    assert count == frame_count
+    assert completed == sorted(completed)
+    assert completed[0] == 0
+    assert completed[-1] == frame_count
+    assert all(event.is_indeterminate is expected_indeterminate for event in progress)
+    expected_total = None if expected_indeterminate else reported_total
+    assert all(event.total_units == expected_total for event in progress)
+    assert all(
+        event.total_is_estimate is (not expected_indeterminate)
+        for event in progress
+    )

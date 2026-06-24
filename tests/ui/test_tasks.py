@@ -7,11 +7,15 @@ import pytest
 from PySide6.QtCore import QCoreApplication, QEventLoop, QThread, QTimer
 
 from preprocess.exceptions import CageDetectionError
+from preprocess.models import OperationProgress
 from ui.tasks import (
     GuiTaskCoordinator,
     GuiTaskKind,
+    GuiTaskProgressEvent,
+    GuiTaskProgressTracker,
     GuiTaskRunner,
     TaskAlreadyRunningError,
+    format_raw_count_progress,
 )
 
 
@@ -171,3 +175,171 @@ def test_runner_exposes_context_and_forwards_cancellation_request(
     _wait_for_runner(runner)
 
     assert context.cancellation_requested is True
+
+
+def test_progressive_task_returns_typed_progress_to_main_thread(
+    application: QCoreApplication,
+    tmp_path,
+) -> None:
+    coordinator = GuiTaskCoordinator()
+    context = coordinator.begin(
+        task_kind=GuiTaskKind.RAW_SEQUENTIAL_COUNT,
+        project_dir=tmp_path,
+        raw_video_path=tmp_path / "raw.avi",
+    )
+    runner = GuiTaskRunner()
+    callbacks: list[tuple[GuiTaskProgressEvent, QThread]] = []
+
+    def operation(report) -> int:
+        report(
+            OperationProgress(
+                phase="counting",
+                message="Counting sequentially readable frames",
+                completed_units=250,
+                total_units=1000,
+                total_is_estimate=True,
+                is_indeterminate=False,
+            )
+        )
+        return 250
+
+    runner.start_progressive(
+        operation,
+        context=context,
+        on_progress=lambda event: callbacks.append(
+            (event, QThread.currentThread())
+        ),
+    )
+    _wait_for_runner(runner)
+
+    assert len(callbacks) == 1
+    event, callback_thread = callbacks[0]
+    assert callback_thread is application.thread()
+    assert event.task_id == context.task_id
+    assert event.task_kind is GuiTaskKind.RAW_SEQUENTIAL_COUNT
+    assert event.generation == context.generation
+    assert event.completed_units == 250
+    assert event.total_units == 1000
+    assert event.total_is_estimate is True
+    assert event.is_indeterminate is False
+
+
+def test_progress_eta_is_hidden_until_rate_is_stable(tmp_path) -> None:
+    context = GuiTaskCoordinator().begin(
+        task_kind=GuiTaskKind.RAW_SEQUENTIAL_COUNT,
+        project_dir=tmp_path,
+        raw_video_path=tmp_path / "raw.avi",
+    )
+    now = [0.0]
+    tracker = GuiTaskProgressTracker(context, clock=lambda: now[0])
+
+    def update(
+        completed: int,
+        *,
+        total: int | None = 1000,
+        total_is_estimate: bool = False,
+        is_indeterminate: bool = False,
+    ) -> OperationProgress:
+        return OperationProgress(
+            phase="counting",
+            message="Counting",
+            completed_units=completed,
+            total_units=total,
+            total_is_estimate=total_is_estimate,
+            is_indeterminate=is_indeterminate,
+        )
+
+    initial = tracker.build(update(0))
+    now[0] = 1.0
+    second = tracker.build(update(100))
+    now[0] = 2.0
+    stable = tracker.build(update(200))
+    now[0] = 3.0
+    estimated_total = tracker.build(update(300, total_is_estimate=True))
+    now[0] = 4.0
+    unknown_total = tracker.build(
+        update(400, total=None, is_indeterminate=True)
+    )
+
+    assert initial.estimated_remaining_sec is None
+    assert second.estimated_remaining_sec is None
+    assert stable.estimated_remaining_sec == pytest.approx(8.0)
+    assert estimated_total.estimated_remaining_sec is None
+    assert unknown_total.estimated_remaining_sec is None
+
+
+def test_coordinator_rejects_stale_progress_generation(tmp_path) -> None:
+    coordinator = GuiTaskCoordinator()
+    context = coordinator.begin(
+        task_kind=GuiTaskKind.CAGE_DETECTION,
+        project_dir=tmp_path,
+        raw_video_path=tmp_path / "raw.avi",
+    )
+    event = GuiTaskProgressTracker(context).build(
+        OperationProgress(
+            phase="Loading representative frames",
+            message="Loading representative frames",
+            is_indeterminate=True,
+        )
+    )
+
+    coordinator.invalidate_inputs()
+
+    assert context.cancellation_requested is True
+    assert coordinator.progress_is_current(
+        event,
+        context,
+        project_dir=tmp_path,
+        raw_video_path=tmp_path / "raw.avi",
+    ) is False
+
+
+def test_current_generation_completion_can_refresh_visible_status_headlessly(
+    application: QCoreApplication,
+    tmp_path,
+) -> None:
+    del application
+    coordinator = GuiTaskCoordinator()
+    context = coordinator.begin(
+        task_kind=GuiTaskKind.RAW_SEQUENTIAL_COUNT,
+        project_dir=tmp_path,
+        raw_video_path=tmp_path / "raw.avi",
+    )
+    runner = GuiTaskRunner()
+    visible_status: list[str] = []
+
+    def operation(report) -> int:
+        report(
+            OperationProgress(
+                phase="complete",
+                message="Sequential readable-frame count complete",
+                completed_units=3,
+                total_units=None,
+                is_indeterminate=True,
+            )
+        )
+        return 3
+
+    def show_progress(event: GuiTaskProgressEvent) -> None:
+        if coordinator.progress_is_current(
+            event,
+            context,
+            project_dir=tmp_path,
+            raw_video_path=tmp_path / "raw.avi",
+        ):
+            visible_status.append(format_raw_count_progress(event).splitlines()[0])
+
+    runner.start_progressive(
+        operation,
+        context=context,
+        on_progress=show_progress,
+        on_success=lambda count: visible_status.append(
+            f"Sequential count complete: {count} readable frames"
+        ),
+    )
+    _wait_for_runner(runner)
+
+    assert visible_status == [
+        "Counting readable frames: 3 decoded",
+        "Sequential count complete: 3 readable frames",
+    ]
