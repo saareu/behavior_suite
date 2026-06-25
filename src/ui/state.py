@@ -89,6 +89,11 @@ class PreprocessSetupState:
     raw_readable_count_status: RawReadableCountStatus = (
         RawReadableCountStatus.NOT_COUNTED
     )
+    current_raw_frame_idx: int | None = None
+    last_successfully_displayed_frame_idx: int | None = None
+    raw_frame_navigation_error: str | None = None
+    raw_frame_navigation_in_progress: bool = False
+    raw_frame_navigation_step: int = 10
     preprocess_config: PreprocessConfig | None = None
     original_preprocess_config: PreprocessConfig | None = None
     config_dirty: bool = False
@@ -179,3 +184,11 @@ class PreprocessSetupState:
             self.run_status = status
             self.run_started_at = None
             self.run_elapsed_sec = 0.0
+
+    def reset_raw_frame_navigation(self, initial_frame_index: int | None = None) -> None:
+        """Reset compact raw-frame navigation state after source/project changes."""
+
+        self.current_raw_frame_idx = initial_frame_index
+        self.last_successfully_displayed_frame_idx = None
+        self.raw_frame_navigation_error = None
+        self.raw_frame_navigation_in_progress = False

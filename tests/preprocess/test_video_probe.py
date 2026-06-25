@@ -56,6 +56,134 @@ def test_probe_video_with_sequential_count(tmp_path: Path) -> None:
     assert result.opencv_fps == pytest.approx(10.0)
 
 
+def test_read_raw_frame_at_index_returns_requested_decode_index(
+    tmp_path: Path,
+) -> None:
+    video_path = _write_tiny_video(tmp_path / "indexed.avi", frame_count=5)
+
+    frame = video_probe.read_raw_frame_at_index(video_path, 3)
+
+    assert frame.shape == (24, 32, 3)
+    assert float(frame.mean()) == pytest.approx(60.0, abs=8.0)
+
+
+def test_read_raw_frame_at_index_uses_verified_direct_seek(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video_path = tmp_path / "fake.avi"
+    video_path.write_bytes(b"placeholder")
+
+    class FakeCapture:
+        def __init__(self) -> None:
+            self.position = 0
+            self.released = False
+
+        def set(self, _property: int, value: int) -> bool:
+            self.position = int(value)
+            return True
+
+        def get(self, _property: int) -> float:
+            return float(self.position)
+
+        def read(self) -> tuple[bool, np.ndarray]:
+            frame = np.full((2, 2, 3), self.position, dtype=np.uint8)
+            self.position += 1
+            return True, frame
+
+        def release(self) -> None:
+            self.released = True
+
+    capture = FakeCapture()
+    monkeypatch.setattr(video_probe, "_open_video", lambda _path: capture)
+
+    frame = video_probe.read_raw_frame_at_index(video_path, 4)
+
+    assert int(frame[0, 0, 0]) == 4
+    assert capture.released is True
+
+
+def test_unverified_direct_seek_falls_back_to_bounded_sequential_decode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video_path = tmp_path / "fake.avi"
+    video_path.write_bytes(b"placeholder")
+
+    class DirectUnverifiedCapture:
+        def __init__(self) -> None:
+            self.released = False
+
+        def set(self, _property: int, _value: int) -> bool:
+            return True
+
+        def get(self, _property: int) -> float:
+            return 0.0
+
+        def read(self) -> tuple[bool, np.ndarray]:
+            return True, np.full((2, 2, 3), 99, dtype=np.uint8)
+
+        def release(self) -> None:
+            self.released = True
+
+    class SequentialCapture:
+        def __init__(self) -> None:
+            self.position = 0
+            self.released = False
+
+        def read(self) -> tuple[bool, np.ndarray]:
+            frame = np.full((2, 2, 3), self.position, dtype=np.uint8)
+            self.position += 1
+            return True, frame
+
+        def release(self) -> None:
+            self.released = True
+
+    direct = DirectUnverifiedCapture()
+    fallback = SequentialCapture()
+    captures = [direct, fallback]
+    monkeypatch.setattr(video_probe, "_open_video", lambda _path: captures.pop(0))
+
+    frame = video_probe.read_raw_frame_at_index(video_path, 3)
+
+    assert int(frame[0, 0, 0]) == 3
+    assert direct.released is True
+    assert fallback.released is True
+
+
+def test_read_raw_frame_at_index_rejects_unreadable_out_of_range_request(
+    tmp_path: Path,
+) -> None:
+    video_path = _write_tiny_video(tmp_path / "short.avi", frame_count=3)
+
+    with pytest.raises(VideoProbeError, match="Raw decode frame 5 is unreadable"):
+        video_probe.read_raw_frame_at_index(video_path, 5)
+
+
+def test_read_raw_frame_at_index_reports_bounded_fallback_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video_path = tmp_path / "fake.avi"
+    video_path.write_bytes(b"placeholder")
+
+    class UnseekableCapture:
+        def set(self, _property: int, _value: int) -> bool:
+            return False
+
+        def release(self) -> None:
+            pass
+
+    monkeypatch.setattr(video_probe, "_open_video", lambda _path: UnseekableCapture())
+
+    with pytest.raises(VideoProbeError, match="bounded fallback decoding"):
+        video_probe.read_raw_frame_at_index(
+            video_path,
+            2,
+            max_fallback_decode_frames=1,
+        )
+
+
 def test_successful_sequential_probe_writes_versioned_project_cache(
     tmp_path: Path,
 ) -> None:

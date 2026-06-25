@@ -18,7 +18,9 @@ from preprocess.models import (
 from preprocess.pre_crop import PreCropMode, PreCropROI
 from project.service import ProjectService
 from ui.controllers.preprocess_setup_controller import (
+    SUPPORTED_RAW_FRAME_JUMP_STEPS,
     PreprocessSetupController,
+    RawFrameReadResult,
     SetupValidationError,
 )
 from ui.state import RawReadableCountStatus, WorkflowStep
@@ -66,6 +68,7 @@ def _write_tiny_video(path: Path, frame_count: int = 4) -> Path:
 
 def _controller_with_probe(
     calls: list[bool] | None = None,
+    raw_frame_reader=None,
 ) -> PreprocessSetupController:
     def fake_probe(
         path: Path,
@@ -79,7 +82,10 @@ def _controller_with_probe(
             readable_count=20 if require_sequential_count else None,
         )
 
-    controller = PreprocessSetupController(probe_function=fake_probe)
+    kwargs = {"probe_function": fake_probe}
+    if raw_frame_reader is not None:
+        kwargs["raw_frame_reader"] = raw_frame_reader
+    controller = PreprocessSetupController(**kwargs)
     controller.load_startup_config()
     return controller
 
@@ -93,6 +99,26 @@ def _ready_controller(
     controller.create_project(tmp_path, "SetupProject")
     controller.probe_raw_video(tmp_path / "raw.avi")
     return controller
+
+
+def _ready_controller_with_trusted_count(tmp_path: Path) -> PreprocessSetupController:
+    controller = _controller_with_probe()
+    controller.create_project(tmp_path, "TrustedCountProject")
+    controller.probe_raw_video(tmp_path / "raw.avi", require_sequential_count=True)
+    return controller
+
+
+@pytest.fixture
+def qt_application(monkeypatch: pytest.MonkeyPatch) -> object:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    if not isinstance(app, QApplication):
+        pytest.skip("A non-GUI Qt application already exists.")
+    return app
 
 
 def _write_prepare_metadata(
@@ -527,7 +553,8 @@ def test_invalid_trim_is_rejected(
         )
 
     assert controller.state.trim_pre_crop_valid is False
-    assert controller.state.resolved_pre_crop is None
+    assert controller.state.resolved_pre_crop is not None
+    assert controller.can_advance(WorkflowStep.TRIM_PRE_CROP) is False
 
 
 def test_valid_trim_is_stored(tmp_path: Path) -> None:
@@ -730,3 +757,381 @@ def test_raw_probe_progress_is_forwarded_and_rejected_after_video_change(
     controller.set_raw_video_path(tmp_path / "replacement.avi")
 
     assert controller.task_progress_is_current(event, context) is False
+
+
+def test_raw_frame_index_initializes_after_raw_video_probe(tmp_path: Path) -> None:
+    controller = _ready_controller(tmp_path)
+
+    assert controller.state.current_raw_frame_idx == 0
+    assert controller.state.last_successfully_displayed_frame_idx is None
+    assert controller.state.raw_frame_navigation_error is None
+    assert controller.state.raw_frame_navigation_in_progress is False
+
+
+def test_first_previous_and_next_navigation_compute_requested_index(
+    tmp_path: Path,
+) -> None:
+    controller = _ready_controller(tmp_path)
+    controller.state.current_raw_frame_idx = 5
+    controller.state.last_successfully_displayed_frame_idx = 5
+
+    assert controller.first_raw_frame_index() == 0
+    assert controller.previous_raw_frame_index() == 4
+    assert controller.next_raw_frame_index() == 6
+
+
+@pytest.mark.parametrize("step", SUPPORTED_RAW_FRAME_JUMP_STEPS)
+def test_jump_by_supported_step_computes_requested_index(
+    tmp_path: Path,
+    step: int,
+) -> None:
+    controller = _ready_controller(tmp_path)
+    controller.state.current_raw_frame_idx = 5_000
+    controller.state.last_successfully_displayed_frame_idx = 5_000
+
+    assert controller.set_raw_frame_navigation_step(step) == step
+    assert controller.raw_frame_index_after_step(direction=1, step=step) == 5_000 + step
+    assert controller.raw_frame_index_after_step(direction=-1, step=step) == 5_000 - step
+
+
+def test_exact_raw_frame_jump_validates_nonnegative_integer(
+    tmp_path: Path,
+) -> None:
+    controller = _ready_controller(tmp_path)
+
+    with pytest.raises(SetupValidationError, match="non-negative integer"):
+        controller.validate_raw_frame_index(-1)
+
+
+def test_out_of_range_raw_frame_request_is_rejected_when_count_is_trusted(
+    tmp_path: Path,
+) -> None:
+    controller = _ready_controller_with_trusted_count(tmp_path)
+
+    with pytest.raises(SetupValidationError, match=r"\[0, 20\)"):
+        controller.validate_raw_frame_index(20)
+
+
+def test_out_of_range_raw_frame_request_does_not_start_worker_when_count_is_trusted(
+    tmp_path: Path,
+) -> None:
+    controller = _ready_controller_with_trusted_count(tmp_path)
+
+    with pytest.raises(SetupValidationError, match=r"\[0, 20\)"):
+        controller.begin_raw_frame_read(20)
+
+    assert controller.task_coordinator.active_contexts == ()
+    assert controller.state.raw_frame_navigation_in_progress is False
+
+
+def test_unknown_raw_frame_count_allows_worker_to_attempt_navigation(
+    tmp_path: Path,
+) -> None:
+    controller = _ready_controller(tmp_path)
+
+    request, context = controller.begin_raw_frame_read(45_716)
+
+    assert request.raw_decode_frame_idx == 45_716
+    assert controller.task_coordinator.active_contexts == (context,)
+    controller.record_raw_frame_read_failure(
+        OSError("synthetic stop"),
+        context=context,
+        requested_frame_idx=request.raw_decode_frame_idx,
+    )
+    controller.finish_task(context)
+
+
+def test_failed_raw_frame_read_preserves_last_valid_displayed_index(
+    tmp_path: Path,
+) -> None:
+    controller = _ready_controller(tmp_path)
+    raw_path = controller.state.raw_video_path
+    assert raw_path is not None
+    controller.state.current_raw_frame_idx = 5
+    controller.state.last_successfully_displayed_frame_idx = 5
+    _request, context = controller.begin_raw_frame_read(6)
+
+    message = controller.record_raw_frame_read_failure(
+        OSError("decode failed"),
+        context=context,
+        requested_frame_idx=6,
+    )
+
+    assert message == "Could not load raw frame 6: decode failed"
+    assert controller.state.current_raw_frame_idx == 5
+    assert controller.state.last_successfully_displayed_frame_idx == 5
+    assert controller.state.raw_frame_navigation_in_progress is False
+
+
+def test_raw_frame_scrubber_requires_verified_count(
+    tmp_path: Path,
+    qt_application: object,
+) -> None:
+    del qt_application
+    from ui.pages.trim_precrop_page import TrimPreCropPage
+
+    controller = _ready_controller(tmp_path)
+    page = TrimPreCropPage(controller)
+
+    assert page.frame_scrubber.isEnabled() is False
+    assert page.frame_scrubber.minimum() == 0
+    assert page.frame_scrubber.maximum() == 0
+
+
+def test_raw_frame_scrubber_defers_frame_read_until_release(
+    tmp_path: Path,
+    qt_application: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del qt_application
+    from ui.pages.trim_precrop_page import TrimPreCropPage
+
+    controller = _ready_controller_with_trusted_count(tmp_path)
+    controller.state.current_raw_frame_idx = 5
+    controller.state.last_successfully_displayed_frame_idx = 5
+    page = TrimPreCropPage(controller)
+    calls: list[int] = []
+    monkeypatch.setattr(page, "_load_raw_frame", lambda index: calls.append(index))
+
+    page.refresh_from_state()
+    assert page.frame_scrubber.isEnabled() is True
+    assert page.frame_scrubber.minimum() == 0
+    assert page.frame_scrubber.maximum() == 19
+    assert page.frame_scrubber.value() == 5
+    assert page.raw_frame_status.text() == "Raw frame: 5 / 19"
+
+    page.frame_scrubber.setValue(8)
+    page._raw_frame_scrubber_moved(8)
+
+    assert calls == []
+    assert "8" in page.pending_frame_status.text()
+
+    page._raw_frame_scrubber_released()
+
+    assert calls == [8]
+
+
+def test_raw_frame_scrubber_restores_last_valid_index_after_failed_read(
+    tmp_path: Path,
+    qt_application: object,
+) -> None:
+    del qt_application
+    from ui.pages.trim_precrop_page import TrimPreCropPage
+
+    controller = _ready_controller_with_trusted_count(tmp_path)
+    controller.state.current_raw_frame_idx = 5
+    controller.state.last_successfully_displayed_frame_idx = 5
+    page = TrimPreCropPage(controller)
+    _request, context = controller.begin_raw_frame_read(8)
+    page._pending_slider_frame_idx = 8
+    page.frame_scrubber.setValue(8)
+
+    page._raw_frame_read_failed(OSError("decode failed"), context, 8)
+    page._raw_frame_read_finished(context)
+
+    assert controller.state.current_raw_frame_idx == 5
+    assert controller.state.last_successfully_displayed_frame_idx == 5
+    assert page.frame_scrubber.value() == 5
+
+
+def test_direct_jump_out_of_range_does_not_start_worker(
+    tmp_path: Path,
+    qt_application: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del qt_application
+    from ui.pages.trim_precrop_page import TrimPreCropPage
+
+    controller = _ready_controller_with_trusted_count(tmp_path)
+    page = TrimPreCropPage(controller)
+    calls: list[int] = []
+    monkeypatch.setattr(page, "_load_raw_frame", lambda index: calls.append(index))
+
+    page.exact_jump.setValue(20)
+    page._jump_to_exact_frame()
+
+    assert calls == []
+    assert controller.task_coordinator.active_contexts == ()
+    assert "[0, 20)" in page.error_label.text()
+
+
+def test_changing_raw_video_resets_frame_navigation_state(tmp_path: Path) -> None:
+    controller = _ready_controller(tmp_path)
+    controller.state.current_raw_frame_idx = 7
+    controller.state.last_successfully_displayed_frame_idx = 7
+    controller.state.raw_frame_navigation_error = "old error"
+    controller.state.raw_frame_navigation_in_progress = True
+
+    controller.set_raw_video_path(tmp_path / "replacement.avi")
+
+    assert controller.state.current_raw_frame_idx is None
+    assert controller.state.last_successfully_displayed_frame_idx is None
+    assert controller.state.raw_frame_navigation_error is None
+    assert controller.state.raw_frame_navigation_in_progress is False
+
+
+def test_changing_project_resets_frame_navigation_state(tmp_path: Path) -> None:
+    controller = _ready_controller(tmp_path)
+    controller.state.current_raw_frame_idx = 7
+    controller.state.last_successfully_displayed_frame_idx = 7
+    replacement = ProjectService().create_project(tmp_path, "FrameReplacementProject")
+
+    controller.open_project(replacement.root_dir)
+
+    assert controller.state.current_raw_frame_idx is None
+    assert controller.state.last_successfully_displayed_frame_idx is None
+    assert controller.state.raw_frame_navigation_error is None
+    assert controller.state.raw_frame_navigation_in_progress is False
+
+
+def test_stale_raw_frame_read_completion_cannot_update_new_video(
+    tmp_path: Path,
+) -> None:
+    controller = _ready_controller(tmp_path)
+    old_path = controller.state.raw_video_path
+    assert old_path is not None
+    request, context = controller.begin_raw_frame_read(3)
+    result = RawFrameReadResult(
+        raw_video_path=request.raw_video_path,
+        raw_decode_frame_idx=3,
+        frame=np.zeros((80, 100, 3), dtype=np.uint8),
+    )
+
+    controller.set_raw_video_path(tmp_path / "new_raw.avi")
+    applied = controller.apply_raw_frame_read(result, context=context)
+
+    assert applied is None
+    assert controller.state.current_raw_frame_idx is None
+    assert controller.state.last_successfully_displayed_frame_idx is None
+
+
+def test_set_start_to_current_uses_current_raw_decode_index(
+    tmp_path: Path,
+) -> None:
+    controller = _ready_controller(tmp_path)
+    controller.state.current_raw_frame_idx = 7
+    controller.state.last_successfully_displayed_frame_idx = 7
+
+    controller.set_start_frame_to_current()
+
+    assert controller.state.start_frame == 7
+    assert controller.state.trim_pre_crop_valid is True
+
+
+def test_set_end_exclusive_to_current_uses_current_raw_decode_index(
+    tmp_path: Path,
+) -> None:
+    controller = _ready_controller(tmp_path)
+    controller.configure_trim_and_pre_crop(
+        start_frame=3,
+        end_frame_exclusive=None,
+        mode=PreCropMode.NONE,
+    )
+    controller.state.current_raw_frame_idx = 7
+    controller.state.last_successfully_displayed_frame_idx = 7
+
+    controller.set_end_frame_exclusive_to_current()
+
+    assert controller.state.start_frame == 3
+    assert controller.state.end_frame_exclusive == 7
+    assert controller.state.trim_pre_crop_valid is True
+
+
+def test_set_end_exclusive_plus_one_uses_current_raw_decode_index_plus_one(
+    tmp_path: Path,
+) -> None:
+    controller = _ready_controller(tmp_path)
+    controller.configure_trim_and_pre_crop(
+        start_frame=3,
+        end_frame_exclusive=None,
+        mode=PreCropMode.NONE,
+    )
+    controller.state.current_raw_frame_idx = 7
+    controller.state.last_successfully_displayed_frame_idx = 7
+
+    controller.set_end_frame_exclusive_to_current_plus_one()
+
+    assert controller.state.end_frame_exclusive == 8
+
+
+def test_invalid_visual_trim_range_is_rejected(tmp_path: Path) -> None:
+    controller = _ready_controller(tmp_path)
+    controller.configure_trim_and_pre_crop(
+        start_frame=10,
+        end_frame_exclusive=None,
+        mode=PreCropMode.NONE,
+    )
+    controller.state.current_raw_frame_idx = 5
+    controller.state.last_successfully_displayed_frame_idx = 5
+
+    with pytest.raises(SetupValidationError, match="Invalid trim"):
+        controller.set_end_frame_exclusive_to_current()
+
+    assert controller.state.trim_pre_crop_valid is False
+    assert controller.state.end_frame_exclusive == 5
+
+
+def test_visual_trim_change_preserves_crop_review_geometry(tmp_path: Path) -> None:
+    controller = _ready_controller(tmp_path)
+    controller.configure_trim_and_pre_crop(
+        start_frame=0,
+        end_frame_exclusive=None,
+        mode=PreCropMode.NONE,
+    )
+    controller.state.current_raw_frame_idx = 7
+    controller.state.last_successfully_displayed_frame_idx = 7
+    candidate = object()
+    accepted = object()
+    controller.state.candidate_crop_plan = candidate
+    controller.state.accepted_crop_plan = accepted
+    previous_revision = controller.state.crop_review_revision
+
+    controller.set_start_frame_to_current()
+
+    assert controller.state.candidate_crop_plan is candidate
+    assert controller.state.accepted_crop_plan is accepted
+    assert controller.state.crop_review_revision == previous_revision
+
+
+def test_pre_crop_change_still_invalidates_crop_review_geometry(
+    tmp_path: Path,
+) -> None:
+    controller = _ready_controller(tmp_path)
+    controller.configure_trim_and_pre_crop(
+        start_frame=0,
+        end_frame_exclusive=None,
+        mode=PreCropMode.NONE,
+    )
+    controller.state.candidate_crop_plan = object()
+    controller.state.accepted_crop_plan = object()
+    previous_revision = controller.state.crop_review_revision
+
+    controller.configure_trim_and_pre_crop(
+        start_frame=0,
+        end_frame_exclusive=None,
+        mode=PreCropMode.VERTICAL_KEEP_LEFT,
+        boundary_px=95,
+    )
+
+    assert controller.state.candidate_crop_plan is None
+    assert controller.state.accepted_crop_plan is None
+    assert controller.state.crop_review_revision > previous_revision
+
+
+def test_direct_text_trim_entry_remains_functional_with_frame_navigation(
+    tmp_path: Path,
+) -> None:
+    controller = _ready_controller(tmp_path)
+    controller.state.current_raw_frame_idx = 12
+    controller.state.last_successfully_displayed_frame_idx = 12
+
+    controller.configure_trim_and_pre_crop(
+        start_frame=2,
+        end_frame_exclusive=9,
+        mode=PreCropMode.NONE,
+    )
+
+    assert controller.state.start_frame == 2
+    assert controller.state.end_frame_exclusive == 9
+    assert controller.state.current_raw_frame_idx == 12
+    assert controller.state.last_successfully_displayed_frame_idx == 12

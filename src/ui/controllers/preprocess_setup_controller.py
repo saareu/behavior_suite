@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import traceback
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn, cast
 
+import numpy as np
 from pydantic import ValidationError
 
 from preprocess.config import (
@@ -24,7 +26,7 @@ from preprocess.models import (
 from preprocess.pre_crop import PreCropMode, ResolvedPreCrop, resolve_pre_crop
 from preprocess.raw_probe_cache import get_raw_probe_cache_path
 from preprocess.service import resolve_trim_range
-from preprocess.video_probe import probe_video
+from preprocess.video_probe import probe_video, read_raw_frame_at_index
 from project.models import Project
 from project.paths import PREPROCESS_DIRNAME, get_preprocess_dir
 from project.service import ProjectService
@@ -45,6 +47,9 @@ from ui.tasks import (
 
 ConfigLoader = Callable[[Path], PreprocessConfig]
 PreCropResolver = Callable[[PreCropConfig, tuple[int, int]], ResolvedPreCrop]
+RawFrameReader = Callable[[Path, int], np.ndarray]
+
+SUPPORTED_RAW_FRAME_JUMP_STEPS = (1, 10, 100, 1000)
 
 
 def _same_video_source(first: Path, second: Path) -> bool:
@@ -59,6 +64,23 @@ class SetupValidationError(ValueError):
     """Expected user-facing setup validation failure."""
 
 
+@dataclass(frozen=True, slots=True)
+class RawFrameReadRequest:
+    """Immutable raw-frame read request captured for a worker thread."""
+
+    raw_video_path: Path
+    raw_decode_frame_idx: int
+
+
+@dataclass(frozen=True, slots=True)
+class RawFrameReadResult:
+    """Ephemeral raw-frame read result; the frame is never stored in shared state."""
+
+    raw_video_path: Path
+    raw_decode_frame_idx: int
+    frame: np.ndarray
+
+
 class PreprocessSetupController:
     """Coordinate setup state through existing typed core APIs."""
 
@@ -70,6 +92,7 @@ class PreprocessSetupController:
         probe_function: Callable[..., VideoProbeResult] = probe_video,
         config_loader: ConfigLoader = load_preprocess_config,
         pre_crop_resolver: PreCropResolver = resolve_pre_crop,
+        raw_frame_reader: RawFrameReader = read_raw_frame_at_index,
         task_coordinator: GuiTaskCoordinator | None = None,
     ) -> None:
         self.state = state or PreprocessSetupState()
@@ -77,6 +100,7 @@ class PreprocessSetupController:
         self._probe_function = probe_function
         self._config_loader = config_loader
         self._pre_crop_resolver = pre_crop_resolver
+        self._raw_frame_reader = raw_frame_reader
         self.task_coordinator = task_coordinator or GuiTaskCoordinator()
 
     @staticmethod
@@ -156,6 +180,7 @@ class PreprocessSetupController:
         self.state.raw_video_path = None
         self.state.raw_probe = None
         self.state.raw_readable_count_status = RawReadableCountStatus.NOT_COUNTED
+        self.state.reset_raw_frame_navigation()
         config = self.state.preprocess_config
         self.state.start_frame = (
             (config.trim.start_frame or 0) if config is not None else None
@@ -217,6 +242,9 @@ class PreprocessSetupController:
         self.state.accepted_crop_plan = None
         self.state.crop_review_status = (
             "Prior run context loaded; crop review is required for a new run."
+        )
+        self.state.reset_raw_frame_navigation(
+            0 if result.raw_probe is not None else None
         )
         self.state.last_validation_error = None
 
@@ -300,6 +328,7 @@ class PreprocessSetupController:
         self.state.raw_video_path = selected
         self.state.raw_probe = None
         self.state.raw_readable_count_status = RawReadableCountStatus.NOT_COUNTED
+        self.state.reset_raw_frame_navigation()
         self.state.resolved_pre_crop = None
         self.state.trim_pre_crop_valid = False
         self.state.invalidate_crop_review("Raw video changed; crop review is required.")
@@ -314,6 +343,7 @@ class PreprocessSetupController:
         self.state.raw_video_path = None
         self.state.raw_probe = None
         self.state.raw_readable_count_status = RawReadableCountStatus.NOT_COUNTED
+        self.state.reset_raw_frame_navigation()
         self.state.resolved_pre_crop = None
         self.state.trim_pre_crop_valid = False
         self.state.invalidate_crop_review("Raw video changed; crop review is required.")
@@ -424,6 +454,7 @@ class PreprocessSetupController:
             self.state.raw_readable_count_status = previous_count_status
         else:
             self.state.raw_readable_count_status = self._count_status_for_probe(result)
+        self.state.reset_raw_frame_navigation(0)
         self.state.resolved_pre_crop = None
         self.state.trim_pre_crop_valid = False
         self.state.invalidate_crop_review("Raw video probe changed; crop review is required.")
@@ -479,6 +510,7 @@ class PreprocessSetupController:
         else:
             self.state.raw_probe = None
             self.state.raw_readable_count_status = RawReadableCountStatus.NOT_COUNTED
+            self.state.reset_raw_frame_navigation()
             self.state.resolved_pre_crop = None
             self.state.trim_pre_crop_valid = False
             self.state.invalidate_crop_review("Raw video probe failed.")
@@ -495,6 +527,242 @@ class PreprocessSetupController:
         self.state.last_validation_error = message
         return message
 
+    def trusted_raw_frame_upper_bound(self) -> int | None:
+        """Return a proven exclusive upper bound for raw-frame navigation."""
+
+        probe = self.state.raw_probe
+        if probe is None or probe.frame_count_opencv_readable is None:
+            return None
+        count = probe.frame_count_opencv_readable
+        if count <= 0:
+            return None
+        if self.state.raw_readable_count_status in {
+            RawReadableCountStatus.COUNTED_THIS_SESSION,
+            RawReadableCountStatus.RECORDED_PRIOR_RUN,
+            RawReadableCountStatus.VALIDATED_REUSABLE_CACHE,
+        }:
+            return count
+        if probe.raw_readable_count_provenance is not None:
+            return count
+        return None
+
+    def validate_raw_frame_index(self, raw_decode_frame_idx: int) -> int:
+        """Validate one requested raw decode-frame index for navigation."""
+
+        if self.state.raw_probe is None or self.state.raw_video_path is None:
+            raise self._new_validation_error("Probe a raw video before frame navigation.")
+        if (
+            isinstance(raw_decode_frame_idx, bool)
+            or not isinstance(raw_decode_frame_idx, int)
+            or raw_decode_frame_idx < 0
+        ):
+            raise self._new_validation_error(
+                "Raw frame index must be a non-negative integer."
+            )
+        upper_bound = self.trusted_raw_frame_upper_bound()
+        if upper_bound is not None and raw_decode_frame_idx >= upper_bound:
+            raise self._new_validation_error(
+                "Raw frame index "
+                f"{raw_decode_frame_idx:,} is outside the verified raw frame "
+                f"range [0, {upper_bound:,})."
+            )
+        return raw_decode_frame_idx
+
+    def first_raw_frame_index(self) -> int:
+        """Return the first raw decode-frame index."""
+
+        return self.validate_raw_frame_index(0)
+
+    def previous_raw_frame_index(self) -> int:
+        """Return the previous raw decode-frame index without silent clamping."""
+
+        current = self._current_raw_frame_index_for_navigation()
+        if current <= 0:
+            raise self._new_validation_error("Already at the first raw frame.")
+        return self.validate_raw_frame_index(current - 1)
+
+    def next_raw_frame_index(self) -> int:
+        """Return the next raw decode-frame index."""
+
+        return self.validate_raw_frame_index(
+            self._current_raw_frame_index_for_navigation() + 1
+        )
+
+    def raw_frame_index_after_step(self, *, direction: int, step: int) -> int:
+        """Return the requested raw-frame index after one configured step."""
+
+        if direction not in {-1, 1}:
+            raise self._new_validation_error("Frame navigation direction must be -1 or 1.")
+        if step not in SUPPORTED_RAW_FRAME_JUMP_STEPS:
+            raise self._new_validation_error(
+                "Raw frame jump step must be one of "
+                f"{', '.join(str(value) for value in SUPPORTED_RAW_FRAME_JUMP_STEPS)}."
+            )
+        current = self._current_raw_frame_index_for_navigation()
+        target = current + direction * step
+        if target < 0:
+            raise self._new_validation_error(
+                "Raw frame jump would go before the first frame."
+            )
+        return self.validate_raw_frame_index(target)
+
+    def set_raw_frame_navigation_step(self, step: int) -> int:
+        """Store one supported visual-navigation jump step."""
+
+        if step not in SUPPORTED_RAW_FRAME_JUMP_STEPS:
+            raise self._new_validation_error(
+                "Raw frame jump step must be one of "
+                f"{', '.join(str(value) for value in SUPPORTED_RAW_FRAME_JUMP_STEPS)}."
+            )
+        self.state.raw_frame_navigation_step = step
+        return step
+
+    def begin_raw_frame_read(
+        self,
+        raw_decode_frame_idx: int,
+    ) -> tuple[RawFrameReadRequest, GuiTaskContext]:
+        """Capture a frame-read request and mark navigation busy."""
+
+        index = self.validate_raw_frame_index(raw_decode_frame_idx)
+        assert self.state.raw_video_path is not None
+        context = self.begin_task(
+            GuiTaskKind.RAW_FRAME_READ,
+            raw_video_path=self.state.raw_video_path,
+        )
+        self.state.raw_frame_navigation_in_progress = True
+        self.state.raw_frame_navigation_error = None
+        return (
+            RawFrameReadRequest(
+                raw_video_path=self.state.raw_video_path,
+                raw_decode_frame_idx=index,
+            ),
+            context,
+        )
+
+    def compute_raw_frame_read(
+        self,
+        request: RawFrameReadRequest,
+        context: GuiTaskContext | None = None,
+    ) -> RawFrameReadResult:
+        """Read one raw frame without mutating shared GUI state."""
+
+        if context is not None and context.is_cancellation_requested():
+            raise ValueError("Raw frame read was cancelled.")
+        frame = self._raw_frame_reader(
+            request.raw_video_path,
+            request.raw_decode_frame_idx,
+        )
+        array = np.asarray(frame)
+        if array.ndim not in {2, 3} or array.size == 0:
+            raise ValueError("Raw frame reader returned an invalid image array.")
+        result_frame = np.array(array, copy=True)
+        result_frame.setflags(write=False)
+        return RawFrameReadResult(
+            raw_video_path=request.raw_video_path,
+            raw_decode_frame_idx=request.raw_decode_frame_idx,
+            frame=result_frame,
+        )
+
+    def apply_raw_frame_read(
+        self,
+        result: RawFrameReadResult,
+        *,
+        context: GuiTaskContext | None = None,
+    ) -> np.ndarray | None:
+        """Apply a frame-read result only if it still belongs to current inputs."""
+
+        if context is not None:
+            if not self.task_belongs_to_current_inputs(context):
+                return None
+            if context.cancellation_requested:
+                self.state.raw_frame_navigation_in_progress = False
+                return None
+        if self.state.raw_video_path is None or not _same_video_source(
+            self.state.raw_video_path,
+            result.raw_video_path,
+        ):
+            return None
+        self.validate_raw_frame_index(result.raw_decode_frame_idx)
+        probe = self.state.raw_probe
+        if probe is not None and result.frame.shape[:2] != (probe.height, probe.width):
+            raise self._new_validation_error(
+                "Raw frame dimensions do not match the selected raw-video probe."
+            )
+        self.state.current_raw_frame_idx = result.raw_decode_frame_idx
+        self.state.last_successfully_displayed_frame_idx = result.raw_decode_frame_idx
+        self.state.raw_frame_navigation_error = None
+        self.state.raw_frame_navigation_in_progress = False
+        return np.array(result.frame, copy=True)
+
+    def record_raw_frame_read_failure(
+        self,
+        exc: BaseException,
+        *,
+        context: GuiTaskContext | None = None,
+        requested_frame_idx: int | None = None,
+    ) -> str | None:
+        """Record a failed frame read without changing the last valid frame index."""
+
+        if context is not None:
+            if not self.task_belongs_to_current_inputs(context):
+                return None
+            if context.cancellation_requested:
+                self.state.raw_frame_navigation_in_progress = False
+                return None
+        prefix = (
+            f"Could not load raw frame {requested_frame_idx:,}: "
+            if requested_frame_idx is not None
+            else "Could not load raw frame: "
+        )
+        message = prefix + str(exc)
+        self.state.raw_frame_navigation_error = message
+        self.state.raw_frame_navigation_in_progress = False
+        self.state.last_validation_error = message
+        return message
+
+    def set_start_frame_to_current(self) -> ResolvedPreCrop:
+        """Set inclusive start_frame to the currently displayed raw frame."""
+
+        current = self._require_displayed_raw_frame_index()
+        return self._configure_existing_pre_crop_with_trim(
+            start_frame=current,
+            end_frame_exclusive=self.state.end_frame_exclusive,
+        )
+
+    def set_end_frame_exclusive_to_current(self) -> ResolvedPreCrop:
+        """Set exclusive end_frame to the currently displayed raw frame."""
+
+        current = self._require_displayed_raw_frame_index()
+        return self._configure_existing_pre_crop_with_trim(
+            start_frame=self.state.start_frame or 0,
+            end_frame_exclusive=current,
+        )
+
+    def set_end_frame_exclusive_to_current_plus_one(self) -> ResolvedPreCrop:
+        """Set exclusive end_frame to one past the current raw frame."""
+
+        current = self._require_displayed_raw_frame_index()
+        return self._configure_existing_pre_crop_with_trim(
+            start_frame=self.state.start_frame or 0,
+            end_frame_exclusive=current + 1,
+        )
+
+    def clear_start_frame_selection(self) -> ResolvedPreCrop:
+        """Clear direct start selection by restoring the default inclusive zero."""
+
+        return self._configure_existing_pre_crop_with_trim(
+            start_frame=0,
+            end_frame_exclusive=self.state.end_frame_exclusive,
+        )
+
+    def clear_end_frame_selection(self) -> ResolvedPreCrop:
+        """Clear the exclusive end-frame selection."""
+
+        return self._configure_existing_pre_crop_with_trim(
+            start_frame=self.state.start_frame or 0,
+            end_frame_exclusive=None,
+        )
+
     def configure_trim_and_pre_crop(
         self,
         *,
@@ -509,9 +777,11 @@ class PreprocessSetupController:
     ) -> ResolvedPreCrop:
         """Validate and store trim selection plus one resolved pre-crop ROI."""
 
-        previous_selection = (
+        previous_trim_selection = (
             self.state.start_frame,
             self.state.end_frame_exclusive,
+        )
+        previous_pre_crop_selection = (
             self.state.pre_crop_config,
             self.state.resolved_pre_crop,
         )
@@ -522,12 +792,6 @@ class PreprocessSetupController:
         if raw_probe is None:
             raise self._new_validation_error("Probe a raw video first.")
         try:
-            trim = resolve_trim_range(
-                request_start_frame=start_frame,
-                request_end_frame_exclusive=end_frame_exclusive,
-                config=config,
-                raw_readable_frame_count=raw_probe.frame_count_opencv_readable,
-            )
             pre_crop_config = self._build_pre_crop_config(
                 mode=mode,
                 boundary_px=boundary_px,
@@ -546,8 +810,30 @@ class PreprocessSetupController:
             self.state.resolved_pre_crop = None
             self.state.trim_pre_crop_valid = False
             self.state.invalidate_crop_review(
-                "Trim or pre-crop changed; crop review is required."
+                "Pre-crop changed; crop review is required."
             )
+            self._validation_failure(f"Invalid trim or pre-crop: {exc}", exc)
+        pre_crop_selection = (pre_crop_config, resolved)
+        pre_crop_changed = pre_crop_selection != previous_pre_crop_selection
+
+        try:
+            trim = resolve_trim_range(
+                request_start_frame=start_frame,
+                request_end_frame_exclusive=end_frame_exclusive,
+                config=config,
+                raw_readable_frame_count=raw_probe.frame_count_opencv_readable,
+            )
+        except (PreprocessError, ValidationError, ValueError) as exc:
+            self.state.start_frame = start_frame
+            self.state.end_frame_exclusive = end_frame_exclusive
+            self.state.pre_crop_config = pre_crop_config
+            self.state.resolved_pre_crop = resolved
+            self.state.trim_pre_crop_valid = False
+            self.state.invalidate_run_result("Configuration changed")
+            if pre_crop_changed:
+                self.state.invalidate_crop_review(
+                    "Pre-crop changed; crop review is required."
+                )
             self._validation_failure(f"Invalid trim or pre-crop: {exc}", exc)
         self.state.start_frame = trim.start_frame
         self.state.end_frame_exclusive = trim.end_frame_exclusive
@@ -568,15 +854,50 @@ class PreprocessSetupController:
         current_selection = (
             self.state.start_frame,
             self.state.end_frame_exclusive,
-            self.state.pre_crop_config,
-            self.state.resolved_pre_crop,
         )
-        if current_selection != previous_selection:
-            self.state.invalidate_crop_review(
-                "Trim or pre-crop changed; crop review is required."
-            )
+        trim_changed = current_selection != previous_trim_selection
+        if pre_crop_changed:
+            self.state.invalidate_crop_review("Pre-crop changed; crop review is required.")
+        elif trim_changed:
+            self.state.invalidate_run_result("Configuration changed")
         self.state.last_validation_error = None
         return resolved
+
+    def _current_raw_frame_index_for_navigation(self) -> int:
+        current = self.state.current_raw_frame_idx
+        if current is None:
+            current = self.state.last_successfully_displayed_frame_idx
+        if current is None:
+            current = 0
+        return self.validate_raw_frame_index(current)
+
+    def _require_displayed_raw_frame_index(self) -> int:
+        current = self.state.last_successfully_displayed_frame_idx
+        if current is None:
+            current = self.state.current_raw_frame_idx
+        if current is None:
+            raise self._new_validation_error("Load a raw frame before setting trim.")
+        return self.validate_raw_frame_index(current)
+
+    def _configure_existing_pre_crop_with_trim(
+        self,
+        *,
+        start_frame: int,
+        end_frame_exclusive: int | None,
+    ) -> ResolvedPreCrop:
+        pre_crop = self.state.pre_crop_config
+        mode = PreCropMode.NONE if pre_crop is None else PreCropMode(pre_crop.mode)
+        rectangle = pre_crop.manual_rectangle if pre_crop is not None else None
+        return self.configure_trim_and_pre_crop(
+            start_frame=start_frame,
+            end_frame_exclusive=end_frame_exclusive,
+            mode=mode,
+            boundary_px=pre_crop.boundary_px if pre_crop is not None else None,
+            rectangle_x=rectangle[0] if rectangle is not None else None,
+            rectangle_y=rectangle[1] if rectangle is not None else None,
+            rectangle_width=rectangle[2] if rectangle is not None else None,
+            rectangle_height=rectangle[3] if rectangle is not None else None,
+        )
 
     @staticmethod
     def _build_pre_crop_config(

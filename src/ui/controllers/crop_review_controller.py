@@ -24,11 +24,11 @@ from preprocess.exceptions import (
     CageDetectionCancelledError,
     CropPlanError,
     PreprocessError,
-    VideoProbeError,
 )
 from preprocess.manual_crop import make_manual_crop_plan
 from preprocess.models import OperationProgress
 from preprocess.pre_crop import ResolvedPreCrop
+from preprocess.video_probe import read_raw_frame_at_index
 from ui.state import CropReviewMode, PreprocessSetupState
 
 FrameReader = Callable[[Path, int], np.ndarray]
@@ -64,26 +64,9 @@ class CropReviewComputation:
 
 
 def read_video_frame(video_path: Path, frame_index: int) -> np.ndarray:
-    """Decode one requested raw frame without decoding the complete video."""
+    """Decode one requested raw frame using the shared raw-frame helper."""
 
-    path = Path(video_path).expanduser()
-    if not path.is_file():
-        raise VideoProbeError(f"Raw video does not exist: {path}")
-    if isinstance(frame_index, bool) or not isinstance(frame_index, int) or frame_index < 0:
-        raise VideoProbeError("Representative frame index must be a non-negative integer.")
-    capture = cv2.VideoCapture(str(path))
-    if not capture.isOpened():
-        capture.release()
-        raise VideoProbeError(f"OpenCV could not open raw video: {path}")
-    try:
-        if frame_index and not capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index):
-            raise VideoProbeError(f"Could not seek to raw frame {frame_index}.")
-        success, frame = capture.read()
-    finally:
-        capture.release()
-    if not success or frame is None or frame.ndim not in {2, 3} or frame.size == 0:
-        raise VideoProbeError(f"Raw frame {frame_index} is unreadable.")
-    return np.array(frame, copy=True)
+    return read_raw_frame_at_index(video_path, frame_index)
 
 
 def build_crop_preview(
@@ -250,11 +233,7 @@ class CropReviewController:
         start_frame = self.state.start_frame if self.state.start_frame is not None else 0
         known_count = None
         if probe is not None:
-            known_count = (
-                probe.frame_count_opencv_readable
-                if probe.frame_count_opencv_readable is not None
-                else probe.frame_count_opencv_reported
-            )
+            known_count = probe.frame_count_opencv_readable
         start_is_valid = start_frame >= 0 and (
             known_count is None or known_count <= 0 or start_frame < known_count
         )
@@ -685,8 +664,6 @@ class CropReviewController:
             )
         return (
             self.state.raw_video_path,
-            self.state.start_frame,
-            self.state.end_frame_exclusive,
             roi,
         )
 

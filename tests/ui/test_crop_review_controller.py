@@ -396,6 +396,32 @@ def test_editing_pre_crop_clears_acceptance(tmp_path: Path) -> None:
     assert state.candidate_crop_plan is None
 
 
+def test_editing_trim_only_preserves_crop_review_acceptance(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    crop_controller = CropReviewController(
+        state,
+        detector=_detector,
+        frame_reader=lambda _path, _index: FRAME.copy(),
+    )
+    crop_controller.run_automatic_detection()
+    crop_controller.accept_crop()
+    setup = PreprocessSetupController(state=state)
+    accepted = state.accepted_crop_plan
+    candidate = state.candidate_crop_plan
+    previous_revision = state.crop_review_revision
+
+    setup.configure_trim_and_pre_crop(
+        start_frame=7,
+        end_frame_exclusive=None,
+        mode=PreCropMode.NONE,
+    )
+    crop_controller.synchronize_upstream_context()
+
+    assert state.accepted_crop_plan is accepted
+    assert state.candidate_crop_plan is candidate
+    assert state.crop_review_revision == previous_revision
+
+
 def test_accepted_crop_enables_crop_review_next(tmp_path: Path) -> None:
     state = _state(tmp_path)
     crop_controller = CropReviewController(

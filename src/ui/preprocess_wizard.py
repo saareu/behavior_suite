@@ -118,6 +118,7 @@ class PreprocessWizard(QWidget):
     def _task_runners(self) -> tuple[GuiTaskRunner, ...]:
         return (
             self.raw_video_page.task_runner,
+            self.trim_pre_crop_page.task_runner,
             self.timing_page.task_runner,
             self.crop_review_page.task_runner,
             self.run_validate_page.task_runner,

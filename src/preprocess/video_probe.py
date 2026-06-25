@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import cv2
+import numpy as np
 
 from preprocess.exceptions import VideoProbeCancelledError, VideoProbeError
 from preprocess.models import (
@@ -31,6 +32,7 @@ from preprocess.raw_probe_cache import (
 _FFPROBE_TIMEOUT_SECONDS = 30
 _COUNT_PROGRESS_FRAME_INTERVAL = 250
 _COUNT_PROGRESS_TIME_INTERVAL_SECONDS = 0.25
+_RAW_FRAME_FALLBACK_MAX_DECODE_FRAMES = 100_000
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -235,6 +237,151 @@ def count_opencv_readable_frames(
         raise VideoProbeError(f"OpenCV could not decode any frames from video: {path}")
     emit("complete", "Sequential readable-frame count complete")
     return readable_count
+
+
+def _opencv_frame_position(capture: cv2.VideoCapture) -> float | None:
+    try:
+        value = float(capture.get(cv2.CAP_PROP_POS_FRAMES))
+    except (TypeError, ValueError, OverflowError, cv2.error):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return value
+
+
+def _position_matches(actual: float | None, expected: int) -> bool:
+    return actual is not None and abs(actual - expected) <= 0.5
+
+
+def _read_raw_frame_by_bounded_sequential_decode(
+    path: Path,
+    raw_decode_frame_idx: int,
+    *,
+    max_fallback_decode_frames: int,
+    direct_seek_diagnostic: str,
+) -> np.ndarray:
+    if raw_decode_frame_idx > max_fallback_decode_frames:
+        raise VideoProbeError(
+            "OpenCV could not verify exact direct seek to raw decode frame "
+            f"{raw_decode_frame_idx:,} ({direct_seek_diagnostic}); bounded "
+            "fallback decoding is limited to "
+            f"{max_fallback_decode_frames:,} frames."
+        )
+    capture = _open_video(path)
+    try:
+        for decoded_index in range(raw_decode_frame_idx + 1):
+            success, frame = capture.read()
+            if not success or frame is None:
+                raise VideoProbeError(
+                    "Raw decode frame "
+                    f"{raw_decode_frame_idx:,} is unreadable; reached the end "
+                    f"before frame {decoded_index:,}."
+                )
+    finally:
+        capture.release()
+    return frame
+
+
+def read_raw_frame_at_index(
+    video_path: Path,
+    raw_decode_frame_idx: int,
+    *,
+    max_fallback_decode_frames: int = _RAW_FRAME_FALLBACK_MAX_DECODE_FRAMES,
+) -> np.ndarray:
+    """Return the exact requested raw decode-order frame as a copied array.
+
+    The requested index is zero-based raw sequential decode order. Raw PTS and
+    display timestamps are never used as identity.
+
+    OpenCV random seeking is backend/container dependent: ``set(POS_FRAMES, n)``
+    may seek to a keyframe or report imprecise position information. This helper
+    first attempts direct seeking for responsiveness and returns that frame only
+    when OpenCV's frame-position reporting confirms the requested index as far
+    as the backend permits. If direct seeking cannot be verified, it falls back
+    to bounded sequential decoding from frame zero, which defines raw decode
+    identity. If neither path can prove the requested frame, a ``VideoProbeError``
+    is raised; a neighboring frame is never returned silently.
+
+    Args:
+        video_path: Raw video path.
+        raw_decode_frame_idx: Zero-based raw decode-frame index to read.
+        max_fallback_decode_frames: Maximum target index allowed for the exact
+            sequential fallback when direct seeking is unavailable or
+            unverifiable.
+
+    Raises:
+        VideoProbeError: If the source cannot be opened, the index is invalid,
+            direct seeking is unverifiable beyond the fallback bound, or the
+            requested frame cannot be decoded.
+    """
+
+    if (
+        isinstance(raw_decode_frame_idx, bool)
+        or not isinstance(raw_decode_frame_idx, int)
+        or raw_decode_frame_idx < 0
+    ):
+        raise VideoProbeError("Raw decode frame index must be a non-negative integer.")
+    if (
+        isinstance(max_fallback_decode_frames, bool)
+        or not isinstance(max_fallback_decode_frames, int)
+        or max_fallback_decode_frames < 0
+    ):
+        raise VideoProbeError("Fallback decode bound must be a non-negative integer.")
+
+    path = _validate_video_path(video_path)
+    if raw_decode_frame_idx == 0:
+        capture = _open_video(path)
+        try:
+            success, frame = capture.read()
+        finally:
+            capture.release()
+        if not success or frame is None:
+            raise VideoProbeError("Raw decode frame 0 is unreadable.")
+        return frame.copy()
+
+    direct_seek_diagnostic = "direct seek was not attempted"
+    capture = _open_video(path)
+    try:
+        try:
+            seek_succeeded = bool(capture.set(cv2.CAP_PROP_POS_FRAMES, raw_decode_frame_idx))
+        except cv2.error as exc:
+            seek_succeeded = False
+            direct_seek_diagnostic = f"OpenCV seek failed: {exc}"
+        if seek_succeeded:
+            position_before = _opencv_frame_position(capture)
+            success, frame = capture.read()
+            position_after = _opencv_frame_position(capture)
+            if (
+                success
+                and frame is not None
+                and _position_matches(position_before, raw_decode_frame_idx)
+                and _position_matches(position_after, raw_decode_frame_idx + 1)
+            ):
+                return frame.copy()
+            if not success or frame is None:
+                direct_seek_diagnostic = "direct seek returned no readable frame"
+            elif not _position_matches(position_before, raw_decode_frame_idx):
+                direct_seek_diagnostic = (
+                    "direct seek reported frame position "
+                    f"{position_before!r} before read"
+                )
+            else:
+                direct_seek_diagnostic = (
+                    "direct seek reported frame position "
+                    f"{position_after!r} after read"
+                )
+        else:
+            direct_seek_diagnostic = "OpenCV did not accept CAP_PROP_POS_FRAMES seek"
+    finally:
+        capture.release()
+
+    frame = _read_raw_frame_by_bounded_sequential_decode(
+        path,
+        raw_decode_frame_idx,
+        max_fallback_decode_frames=max_fallback_decode_frames,
+        direct_seek_diagnostic=direct_seek_diagnostic,
+    )
+    return frame.copy()
 
 
 def probe_video(

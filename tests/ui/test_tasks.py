@@ -147,6 +147,27 @@ def test_input_generation_cancels_old_context_and_makes_result_stale(
     )
 
 
+def test_input_generation_cancels_raw_frame_read_context(tmp_path) -> None:
+    coordinator = GuiTaskCoordinator()
+    context = coordinator.begin(
+        task_kind=GuiTaskKind.RAW_FRAME_READ,
+        project_dir=tmp_path / "project",
+        raw_video_path=tmp_path / "raw.avi",
+    )
+
+    coordinator.invalidate_inputs()
+
+    assert context.cancellation_requested is True
+    assert (
+        coordinator.is_current(
+            context,
+            project_dir=tmp_path / "project",
+            raw_video_path=tmp_path / "raw.avi",
+        )
+        is False
+    )
+
+
 def test_runner_exposes_context_and_forwards_cancellation_request(
     application: QCoreApplication,
     tmp_path,

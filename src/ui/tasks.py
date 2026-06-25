@@ -26,6 +26,7 @@ class GuiTaskKind(StrEnum):
 
     RAW_PROBE = "raw_probe"
     RAW_SEQUENTIAL_COUNT = "raw_sequential_count"
+    RAW_FRAME_READ = "raw_frame_read"
     CAGE_DETECTION = "cage_detection"
     PREPROCESS_RUN = "preprocess_run"
 
@@ -294,6 +295,7 @@ class GuiTaskCoordinator:
             if context.task_kind in {
                 GuiTaskKind.RAW_PROBE,
                 GuiTaskKind.RAW_SEQUENTIAL_COUNT,
+                GuiTaskKind.RAW_FRAME_READ,
                 GuiTaskKind.CAGE_DETECTION,
                 GuiTaskKind.PREPROCESS_RUN,
             }:
@@ -309,6 +311,7 @@ class GuiTaskCoordinator:
             if context.task_kind in {
                 GuiTaskKind.RAW_PROBE,
                 GuiTaskKind.RAW_SEQUENTIAL_COUNT,
+                GuiTaskKind.RAW_FRAME_READ,
                 GuiTaskKind.CAGE_DETECTION,
                 GuiTaskKind.PREPROCESS_RUN,
             }:
