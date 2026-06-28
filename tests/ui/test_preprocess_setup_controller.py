@@ -679,6 +679,292 @@ def test_resolved_pre_crop_roi_is_stored_in_state(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("mode", "arguments", "expected_config", "expected_roi"),
+    [
+        (
+            PreCropMode.NONE,
+            {},
+            {"enabled": False, "mode": "none"},
+            PreCropROI(x=0, y=0, width=100, height=80),
+        ),
+        (
+            PreCropMode.VERTICAL_KEEP_LEFT,
+            {"boundary_px": 40},
+            {"enabled": True, "mode": "vertical_keep_left", "boundary_px": 40},
+            PreCropROI(x=0, y=0, width=40, height=80),
+        ),
+        (
+            PreCropMode.VERTICAL_KEEP_RIGHT,
+            {"boundary_px": 40},
+            {"enabled": True, "mode": "vertical_keep_right", "boundary_px": 40},
+            PreCropROI(x=40, y=0, width=60, height=80),
+        ),
+        (
+            PreCropMode.HORIZONTAL_KEEP_UPPER,
+            {"boundary_px": 30},
+            {"enabled": True, "mode": "horizontal_keep_upper", "boundary_px": 30},
+            PreCropROI(x=0, y=0, width=100, height=30),
+        ),
+        (
+            PreCropMode.HORIZONTAL_KEEP_LOWER,
+            {"boundary_px": 30},
+            {"enabled": True, "mode": "horizontal_keep_lower", "boundary_px": 30},
+            PreCropROI(x=0, y=30, width=100, height=50),
+        ),
+        (
+            PreCropMode.MANUAL_RECTANGLE,
+            {"rectangle": (10, 5, 50, 40)},
+            {
+                "enabled": True,
+                "mode": "manual_rectangle",
+                "manual_rectangle": (10, 5, 50, 40),
+            },
+            PreCropROI(x=10, y=5, width=50, height=40),
+        ),
+    ],
+)
+def test_visual_pre_crop_controls_produce_existing_pre_crop_config(
+    tmp_path: Path,
+    qt_application: object,
+    mode: PreCropMode,
+    arguments: dict[str, Any],
+    expected_config: dict[str, object],
+    expected_roi: PreCropROI,
+) -> None:
+    del qt_application
+    from ui.pages.trim_precrop_page import TrimPreCropPage
+
+    controller = _ready_controller(tmp_path)
+    page = TrimPreCropPage(controller)
+
+    page._apply_pre_crop_controls(mode=mode, **arguments)
+
+    assert controller.state.pre_crop_config is not None
+    assert controller.state.pre_crop_config.model_dump(mode="python", exclude_none=True) == (
+        expected_config
+    )
+    assert controller.state.resolved_pre_crop is not None
+    assert controller.state.resolved_pre_crop.roi == expected_roi
+
+
+def test_visual_split_edit_updates_numeric_boundary(
+    tmp_path: Path,
+    qt_application: object,
+) -> None:
+    del qt_application
+    from ui.pages.trim_precrop_page import TrimPreCropPage
+
+    controller = _ready_controller(tmp_path)
+    page = TrimPreCropPage(controller)
+
+    page._visual_pre_crop_changed(PreCropMode.VERTICAL_KEEP_LEFT.value, 42)
+
+    assert page.boundary.value() == 42
+    assert controller.state.pre_crop_config is not None
+    assert controller.state.pre_crop_config.mode == "vertical_keep_left"
+    assert controller.state.pre_crop_config.boundary_px == 42
+    assert controller.state.resolved_pre_crop is not None
+    assert controller.state.resolved_pre_crop.roi == PreCropROI(
+        x=0,
+        y=0,
+        width=42,
+        height=80,
+    )
+
+
+def test_visual_manual_rectangle_edit_updates_numeric_config(
+    tmp_path: Path,
+    qt_application: object,
+) -> None:
+    del qt_application
+    from ui.pages.trim_precrop_page import TrimPreCropPage
+
+    controller = _ready_controller(tmp_path)
+    page = TrimPreCropPage(controller)
+
+    page._visual_pre_crop_changed(PreCropMode.MANUAL_RECTANGLE.value, (5, 6, 40, 20))
+
+    assert page.rectangle_inputs["x"].value() == 5
+    assert page.rectangle_inputs["y"].value() == 6
+    assert page.rectangle_inputs["width"].value() == 40
+    assert page.rectangle_inputs["height"].value() == 20
+    assert controller.state.pre_crop_config is not None
+    assert controller.state.pre_crop_config.manual_rectangle == (5, 6, 40, 20)
+
+
+def test_numeric_pre_crop_edits_update_visual_overlay(
+    tmp_path: Path,
+    qt_application: object,
+) -> None:
+    del qt_application
+    from ui.pages.trim_precrop_page import TrimPreCropPage
+
+    controller = _ready_controller(tmp_path)
+    page = TrimPreCropPage(controller)
+    page.mode.setCurrentIndex(page.mode.findData(PreCropMode.MANUAL_RECTANGLE.value))
+    page.rectangle_inputs["x"].setValue(5)
+    page.rectangle_inputs["y"].setValue(6)
+    page.rectangle_inputs["width"].setValue(40)
+    page.rectangle_inputs["height"].setValue(20)
+
+    overlay = page.frame_view.pre_crop_overlay
+
+    assert overlay.mode == PreCropMode.MANUAL_RECTANGLE.value
+    assert overlay.roi == (5, 6, 40, 20)
+
+
+def test_manual_rectangle_visual_constraint_and_rejection() -> None:
+    from ui.widgets.video_frame_view import constrain_manual_pre_crop_rectangle
+
+    assert constrain_manual_pre_crop_rectangle((-5, 70, 50, 30), (100, 80)) == (
+        0,
+        50,
+        50,
+        30,
+    )
+    with pytest.raises(ValueError, match="positive size"):
+        constrain_manual_pre_crop_rectangle((0, 0, 0, 10), (100, 80))
+    with pytest.raises(ValueError, match="positive size"):
+        constrain_manual_pre_crop_rectangle((0, 0, 10, -1), (100, 80))
+
+
+def test_disable_and_reset_pre_crop_match_current_semantic_model(
+    tmp_path: Path,
+    qt_application: object,
+) -> None:
+    del qt_application
+    from ui.pages.trim_precrop_page import TrimPreCropPage
+
+    controller = _ready_controller(tmp_path)
+    page = TrimPreCropPage(controller)
+
+    page._apply_pre_crop_controls(
+        mode=PreCropMode.VERTICAL_KEEP_LEFT,
+        boundary_px=30,
+    )
+    page._disable_pre_crop()
+
+    assert controller.state.pre_crop_config is not None
+    assert controller.state.pre_crop_config.enabled is False
+    assert controller.state.pre_crop_config.mode == "none"
+    assert controller.state.resolved_pre_crop is not None
+    assert controller.state.resolved_pre_crop.roi == PreCropROI(
+        x=0,
+        y=0,
+        width=100,
+        height=80,
+    )
+
+    page._reset_pre_crop_to_full_frame()
+
+    assert controller.state.pre_crop_config is not None
+    assert controller.state.pre_crop_config.enabled is True
+    assert controller.state.pre_crop_config.mode == "manual_rectangle"
+    assert controller.state.pre_crop_config.manual_rectangle == (0, 0, 100, 80)
+    assert controller.state.resolved_pre_crop is not None
+    assert controller.state.resolved_pre_crop.roi == PreCropROI(
+        x=0,
+        y=0,
+        width=100,
+        height=80,
+    )
+
+
+def test_split_mode_reset_uses_active_full_span(
+    tmp_path: Path,
+    qt_application: object,
+) -> None:
+    del qt_application
+    from ui.pages.trim_precrop_page import TrimPreCropPage
+
+    controller = _ready_controller(tmp_path)
+    page = TrimPreCropPage(controller)
+
+    page._apply_pre_crop_controls(
+        mode=PreCropMode.VERTICAL_KEEP_LEFT,
+        boundary_px=30,
+    )
+    page._reset_pre_crop_to_full_frame()
+
+    assert controller.state.pre_crop_config is not None
+    assert controller.state.pre_crop_config.mode == "vertical_keep_left"
+    assert controller.state.pre_crop_config.boundary_px == 100
+    assert controller.state.resolved_pre_crop is not None
+    assert controller.state.resolved_pre_crop.roi == PreCropROI(
+        x=0,
+        y=0,
+        width=100,
+        height=80,
+    )
+
+
+def test_overlay_coordinate_conversion_excludes_viewer_letterboxing(
+    qt_application: object,
+) -> None:
+    del qt_application
+    from PySide6.QtCore import QPointF
+
+    from ui.widgets.video_frame_view import VideoFrameView
+
+    view = VideoFrameView()
+    view.resize(300, 300)
+    view.set_frame(np.zeros((80, 100, 3), dtype=np.uint8))
+    target = view.image_target_rect()
+
+    assert view.widget_to_frame_point(QPointF(target.left() - 1, target.center().y())) is None
+    assert view.widget_to_frame_point(target.center()) == (50, 40)
+
+
+def test_no_op_pre_crop_edit_does_not_invalidate_crop_review(
+    tmp_path: Path,
+) -> None:
+    controller = _ready_controller(tmp_path)
+    controller.configure_trim_and_pre_crop(
+        start_frame=0,
+        end_frame_exclusive=None,
+        mode=PreCropMode.VERTICAL_KEEP_LEFT,
+        boundary_px=40,
+    )
+    candidate = object()
+    accepted = object()
+    controller.state.candidate_crop_plan = candidate
+    controller.state.accepted_crop_plan = accepted
+    previous_revision = controller.state.crop_review_revision
+
+    controller.configure_trim_and_pre_crop(
+        start_frame=0,
+        end_frame_exclusive=None,
+        mode=PreCropMode.VERTICAL_KEEP_LEFT,
+        boundary_px=40,
+    )
+
+    assert controller.state.candidate_crop_plan is candidate
+    assert controller.state.accepted_crop_plan is accepted
+    assert controller.state.crop_review_revision == previous_revision
+
+
+def test_raw_video_change_clears_visual_pre_crop_overlay_roi(
+    tmp_path: Path,
+    qt_application: object,
+) -> None:
+    del qt_application
+    from ui.pages.trim_precrop_page import TrimPreCropPage
+
+    controller = _ready_controller(tmp_path)
+    page = TrimPreCropPage(controller)
+    page._apply_pre_crop_controls(
+        mode=PreCropMode.MANUAL_RECTANGLE,
+        rectangle=(5, 5, 30, 20),
+    )
+
+    controller.set_raw_video_path(tmp_path / "replacement.avi")
+    page.refresh_from_state()
+
+    assert controller.state.resolved_pre_crop is None
+    assert page.frame_view.pre_crop_overlay.roi is None
+
+
 def test_state_cannot_advance_without_project() -> None:
     controller = _controller_with_probe()
 

@@ -26,7 +26,7 @@ from ui.controllers.preprocess_setup_controller import (
     SetupValidationError,
 )
 from ui.tasks import GuiTaskContext, GuiTaskRunner, TaskAlreadyRunningError
-from ui.widgets.video_frame_view import VideoFrameView
+from ui.widgets.video_frame_view import PreCropOverlay, VideoFrameView
 
 _MAX_FRAME_OR_COORDINATE = 2_147_483_647
 
@@ -139,6 +139,16 @@ class TrimPreCropPage(QWidget):
         self.rectangle_widget = QWidget()
         self.rectangle_widget.setLayout(rectangle_layout)
 
+        self.disable_pre_crop_button = QPushButton("Disable pre-crop")
+        self.reset_pre_crop_button = QPushButton("Reset pre-crop to full raw frame")
+        reset_row = QHBoxLayout()
+        reset_row.addWidget(self.disable_pre_crop_button)
+        reset_row.addWidget(self.reset_pre_crop_button)
+        self.pre_crop_visual_hint = QLabel(
+            "Visual edits use raw decode-frame coordinates. Disable stores mode "
+            "'none'; reset stores an active full-frame rectangle/span when possible."
+        )
+        self.pre_crop_visual_hint.setWordWrap(True)
         self.resolved_roi = QLabel("Not resolved")
         self.resolved_roi.setStyleSheet("font-family: monospace;")
         pre_crop_layout = QVBoxLayout(pre_crop_group)
@@ -146,6 +156,8 @@ class TrimPreCropPage(QWidget):
         pre_crop_layout.addWidget(self.mode)
         pre_crop_layout.addLayout(boundary_row)
         pre_crop_layout.addWidget(self.rectangle_widget)
+        pre_crop_layout.addLayout(reset_row)
+        pre_crop_layout.addWidget(self.pre_crop_visual_hint)
         pre_crop_layout.addWidget(QLabel("Resolved ROI (x, y, width, height)"))
         pre_crop_layout.addWidget(self.resolved_roi)
 
@@ -172,11 +184,16 @@ class TrimPreCropPage(QWidget):
         self.jump_step.currentIndexChanged.connect(self._jump_step_changed)
         self.frame_scrubber.sliderMoved.connect(self._raw_frame_scrubber_moved)
         self.frame_scrubber.sliderReleased.connect(self._raw_frame_scrubber_released)
+        self.frame_view.pre_crop_geometry_changed.connect(
+            self._visual_pre_crop_changed
+        )
         self.set_start_button.clicked.connect(self._set_start_to_current)
         self.set_end_button.clicked.connect(self._set_end_to_current)
         self.set_end_plus_one_button.clicked.connect(self._set_end_to_current_plus_one)
         self.clear_start_button.clicked.connect(self._clear_start)
         self.clear_end_button.clicked.connect(self._clear_end)
+        self.disable_pre_crop_button.clicked.connect(self._disable_pre_crop)
+        self.reset_pre_crop_button.clicked.connect(self._reset_pre_crop_to_full_frame)
         self.mode.currentIndexChanged.connect(self._mode_changed)
         self.boundary.valueChanged.connect(self._inputs_changed)
         for spin_box in self.rectangle_inputs.values():
@@ -216,6 +233,7 @@ class TrimPreCropPage(QWidget):
         self._update_control_visibility()
         self._update_semantics()
         self._refresh_resolved_roi()
+        self._refresh_pre_crop_overlay()
         self._refresh_navigation_controls()
 
     def is_valid(self) -> bool:
@@ -289,6 +307,7 @@ class TrimPreCropPage(QWidget):
             self.resolved_roi.setText(
                 f"{resolved.roi.x}, {resolved.roi.y}, {resolved.roi.width}, {resolved.roi.height}"
             )
+            self._refresh_pre_crop_overlay()
             self.status_message.emit("Trim and pre-crop are valid.")
             self.validity_changed.emit()
             return True
@@ -312,6 +331,33 @@ class TrimPreCropPage(QWidget):
         else:
             roi = resolved.roi
             self.resolved_roi.setText(f"{roi.x}, {roi.y}, {roi.width}, {roi.height}")
+        self._refresh_pre_crop_overlay()
+
+    def _refresh_pre_crop_overlay(self) -> None:
+        config = self.controller.state.pre_crop_config
+        resolved = self.controller.state.resolved_pre_crop
+        mode = config.mode if config is not None else str(self.mode.currentData())
+        boundary = config.boundary_px if config is not None else None
+        if boundary is None and PreCropMode(mode) not in {
+            PreCropMode.NONE,
+            PreCropMode.MANUAL_RECTANGLE,
+        }:
+            boundary = self.boundary.value()
+        roi = None
+        if resolved is not None:
+            roi = (
+                resolved.roi.x,
+                resolved.roi.y,
+                resolved.roi.width,
+                resolved.roi.height,
+            )
+        self.frame_view.set_pre_crop_overlay(
+            PreCropOverlay(
+                mode=mode,
+                roi=roi,
+                boundary_px=boundary,
+            )
+        )
 
     def _load_initial_frame_if_needed(self) -> None:
         state = self.controller.state
@@ -611,6 +657,76 @@ class TrimPreCropPage(QWidget):
         self.refresh_from_state()
         self.status_message.emit("Trim and pre-crop are valid.")
         self.validity_changed.emit()
+
+    def _visual_pre_crop_changed(self, mode_value: str, geometry: object) -> None:
+        try:
+            mode = PreCropMode(mode_value)
+        except ValueError:
+            self._show_expected_error(f"Unsupported visual pre-crop mode: {mode_value}")
+            return
+        if mode is PreCropMode.MANUAL_RECTANGLE:
+            if not (
+                isinstance(geometry, tuple)
+                and len(geometry) == 4
+                and all(isinstance(value, int) for value in geometry)
+            ):
+                self._show_expected_error("Visual rectangle edit returned invalid geometry.")
+                return
+            self._apply_pre_crop_controls(mode=mode, rectangle=geometry)
+            return
+        if not isinstance(geometry, int):
+            self._show_expected_error("Visual split edit returned invalid geometry.")
+            return
+        self._apply_pre_crop_controls(mode=mode, boundary_px=geometry)
+
+    def _disable_pre_crop(self) -> None:
+        self._apply_pre_crop_controls(mode=PreCropMode.NONE)
+
+    def _reset_pre_crop_to_full_frame(self) -> None:
+        raw_probe = self.controller.state.raw_probe
+        if raw_probe is None:
+            self._show_expected_error("Probe a raw video before resetting pre-crop.")
+            return
+        mode = PreCropMode(self.mode.currentData())
+        if mode is PreCropMode.VERTICAL_KEEP_LEFT:
+            self._apply_pre_crop_controls(mode=mode, boundary_px=raw_probe.width)
+        elif mode is PreCropMode.VERTICAL_KEEP_RIGHT:
+            self._apply_pre_crop_controls(mode=mode, boundary_px=0)
+        elif mode is PreCropMode.HORIZONTAL_KEEP_UPPER:
+            self._apply_pre_crop_controls(mode=mode, boundary_px=raw_probe.height)
+        elif mode is PreCropMode.HORIZONTAL_KEEP_LOWER:
+            self._apply_pre_crop_controls(mode=mode, boundary_px=0)
+        else:
+            self._apply_pre_crop_controls(
+                mode=PreCropMode.MANUAL_RECTANGLE,
+                rectangle=(0, 0, raw_probe.width, raw_probe.height),
+            )
+
+    def _apply_pre_crop_controls(
+        self,
+        *,
+        mode: PreCropMode,
+        boundary_px: int | None = None,
+        rectangle: tuple[int, int, int, int] | None = None,
+    ) -> None:
+        self._refreshing = True
+        try:
+            index = self.mode.findData(mode.value)
+            self.mode.setCurrentIndex(max(index, 0))
+            if boundary_px is not None:
+                self.boundary.setValue(boundary_px)
+            if rectangle is not None:
+                for name, value in zip(
+                    ("x", "y", "width", "height"),
+                    rectangle,
+                    strict=True,
+                ):
+                    self.rectangle_inputs[name].setValue(value)
+        finally:
+            self._refreshing = False
+        self._update_control_visibility()
+        self._update_semantics()
+        self._validate_inputs()
 
     def _show_expected_error(self, message: str) -> None:
         self.error_label.setText(message)
