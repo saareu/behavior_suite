@@ -38,6 +38,7 @@ ManualPlanBuilder = Callable[..., CropPlan]
 
 _POINT_LABELS = ("top-left", "top-right", "bottom-right", "bottom-left")
 _PREVIEW_MASK_COORDINATE_SHIFT = 8
+DETECTOR_SETTING_FIELDS = tuple(CageDetectConfig.model_fields)
 
 
 class CropReviewValidationError(ValueError):
@@ -61,6 +62,23 @@ class CropReviewComputation:
     crop_plan: CropPlan
     prepared_preview: np.ndarray
     detector_diagnostics: dict[str, object] | None
+
+
+@dataclass(frozen=True, slots=True)
+class DetectorSettingsResetResult:
+    """Summary of one detector-default reset operation."""
+
+    changed_fields: tuple[str, ...]
+    invalidated_candidate: bool
+    invalidated_accepted: bool
+    preserved_manual_acceptance: bool
+    config: PreprocessConfig
+
+    @property
+    def already_at_defaults(self) -> bool:
+        """Return whether the reset was a no-op."""
+
+        return not self.changed_fields
 
 
 def read_video_frame(video_path: Path, frame_index: int) -> np.ndarray:
@@ -479,6 +497,77 @@ class CropReviewController:
         self.state.last_validation_error = None
         return updated
 
+    def detector_settings_modified_fields(self) -> tuple[str, ...]:
+        """Return cage-detection fields whose values differ from loaded defaults."""
+
+        config = self.state.preprocess_config
+        if config is None:
+            return ()
+        default_config = self._detector_defaults_config()
+        current = config.cage_detect.model_dump(mode="python")
+        defaults = default_config.cage_detect.model_dump(mode="python")
+        return tuple(
+            field
+            for field in DETECTOR_SETTING_FIELDS
+            if current[field] != defaults[field]
+        )
+
+    def reset_detector_settings_to_defaults(self) -> DetectorSettingsResetResult:
+        """Reset only cage-detection settings from loaded preprocess defaults."""
+
+        config = self.state.preprocess_config
+        if config is None:
+            raise self._new_validation_error("Load a preprocess configuration first.")
+        default_config = self._detector_defaults_config()
+        changed_fields = self.detector_settings_modified_fields()
+        if not changed_fields:
+            self.state.last_validation_error = None
+            return DetectorSettingsResetResult(
+                changed_fields=(),
+                invalidated_candidate=False,
+                invalidated_accepted=False,
+                preserved_manual_acceptance=False,
+                config=config,
+            )
+
+        updated = PreprocessConfig.model_validate(
+            {
+                **config.model_dump(mode="python"),
+                "cage_detect": default_config.cage_detect,
+            }
+        )
+        self.state.store_preprocess_config(updated)
+
+        invalidated_candidate = self._clear_automatic_candidate()
+        invalidated_accepted = self._clear_automatic_acceptance()
+        preserved_manual_acceptance = (
+            self.state.accepted_crop_plan is not None
+            and self.state.accepted_crop_plan.mode is CropMode.MANUAL
+        )
+        if invalidated_candidate or invalidated_accepted:
+            self.state.crop_review_revision += 1
+            self._seen_crop_review_revision = self.state.crop_review_revision
+        if invalidated_candidate or invalidated_accepted:
+            self.state.crop_review_status = (
+                "Detector settings reset to defaults; rerun automatic detection."
+            )
+        elif preserved_manual_acceptance:
+            self.state.crop_review_status = (
+                "Detector settings reset to defaults; accepted manual crop preserved."
+            )
+        else:
+            self.state.crop_review_status = (
+                "Detector settings reset to defaults; automatic detection must be rerun."
+            )
+        self.state.last_validation_error = None
+        return DetectorSettingsResetResult(
+            changed_fields=changed_fields,
+            invalidated_candidate=invalidated_candidate,
+            invalidated_accepted=invalidated_accepted,
+            preserved_manual_acceptance=preserved_manual_acceptance,
+            config=updated,
+        )
+
     def set_crop_mode(self, mode: CropReviewMode | str) -> CropReviewMode:
         """Select automatic or manual review and invalidate prior acceptance."""
 
@@ -624,6 +713,31 @@ class CropReviewController:
         self.state.invalidate_crop_review(status)
         self._seen_crop_review_revision = self.state.crop_review_revision
         self._clear_preview()
+
+    def _detector_defaults_config(self) -> PreprocessConfig:
+        default_config = (
+            self.state.default_preprocess_config
+            or self.state.original_preprocess_config
+            or PreprocessConfig()
+        )
+        return PreprocessConfig.model_validate(default_config.model_dump(mode="python"))
+
+    def _clear_automatic_candidate(self) -> bool:
+        candidate = self.state.candidate_crop_plan
+        if candidate is None or candidate.mode is not CropMode.AUTOMATIC:
+            return False
+        self.state.candidate_crop_plan = None
+        self.state.detector_diagnostics = None
+        if self._preview_crop_plan is candidate:
+            self._clear_preview()
+        return True
+
+    def _clear_automatic_acceptance(self) -> bool:
+        accepted = self.state.accepted_crop_plan
+        if accepted is None or accepted.mode is not CropMode.AUTOMATIC:
+            return False
+        self.state.accepted_crop_plan = None
+        return True
 
     def _clear_preview(self) -> None:
         self._prepared_preview = None

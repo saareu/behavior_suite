@@ -132,6 +132,11 @@ class PreprocessSetupController:
         return config
 
     def _apply_config(self, config: PreprocessConfig, path: Path | None) -> None:
+        default_path = self.default_config_path().resolve(strict=False)
+        if path is None or path.resolve(strict=False) == default_path:
+            self.state.default_preprocess_config = PreprocessConfig.model_validate(
+                config.model_dump(mode="python")
+            )
         self.state.set_loaded_preprocess_config(config)
         self.state.config_path = path
         self.state.start_frame = config.trim.start_frame or 0

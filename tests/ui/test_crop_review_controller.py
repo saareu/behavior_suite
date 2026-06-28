@@ -5,7 +5,15 @@ import numpy as np
 import pytest
 
 from preprocess.cage_detection import CageDetectionResult
-from preprocess.config import CanonicalResolutionConfig, PrepareConfig, PreprocessConfig
+from preprocess.config import (
+    CageDetectConfig,
+    CanonicalResolutionConfig,
+    EncodingConfig,
+    FFmpegEncodingConfig,
+    PrepareConfig,
+    PreprocessConfig,
+    TrimConfig,
+)
 from preprocess.crop_plan import CropMode, CropPlan
 from preprocess.exceptions import CageDetectionError, CropPlanError, VideoProbeError
 from preprocess.manual_crop import make_manual_crop_plan
@@ -23,6 +31,19 @@ from ui.widgets.video_frame_view import fit_image_target_rect
 
 FRAME = np.full((80, 100, 3), 120, dtype=np.uint8)
 POINTS = ((10.0, 10.0), (90.0, 10.0), (90.0, 70.0), (10.0, 70.0))
+
+
+@pytest.fixture
+def qt_application(monkeypatch: pytest.MonkeyPatch) -> object:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    if not isinstance(app, QApplication):
+        pytest.skip("A non-GUI Qt application already exists.")
+    return app
 
 
 def _config() -> PreprocessConfig:
@@ -54,9 +75,73 @@ def _probe(path: Path) -> VideoProbeResult:
     )
 
 
-def _state(tmp_path: Path, *, start_frame: int = 5) -> PreprocessSetupState:
+def _detector_defaults_config() -> PreprocessConfig:
+    return PreprocessConfig(
+        cage_detect=CageDetectConfig(
+            sample_step=123,
+            pad_px=7,
+            threshold=77,
+            pre_crop_expansion_percent=22.5,
+            dilate_kernel_size=15,
+            erode_kernel_size=11,
+            rim_close_kernel_size=17,
+            minimum_cage_width_fraction=0.43,
+            minimum_cage_height_fraction=0.44,
+            minimum_contour_area=321.5,
+            fit_tolerance_px=9,
+        )
+    )
+
+
+def _modified_detector_config() -> PreprocessConfig:
+    return PreprocessConfig(
+        trim=TrimConfig(start_frame=5, end_frame=15),
+        prepare=PrepareConfig(
+            roi_margin_px=9,
+            perspective_interpolation="linear",
+            canonical_resolution=CanonicalResolutionConfig(
+                enabled=True,
+                width=120,
+                height=82,
+            ),
+        ),
+        cage_detect=CageDetectConfig(
+            sample_step=456,
+            pad_px=3,
+            threshold=155,
+            pre_crop_expansion_percent=18.0,
+            dilate_kernel_size=19,
+            erode_kernel_size=13,
+            rim_close_kernel_size=21,
+            minimum_cage_width_fraction=0.52,
+            minimum_cage_height_fraction=0.53,
+            minimum_contour_area=654.5,
+            fit_tolerance_px=12,
+        ),
+        encoding=EncodingConfig(
+            ffmpeg=FFmpegEncodingConfig(
+                container="mp4",
+                codec="libx264",
+                pixel_format="yuv420p",
+                preset="slow",
+                crf=23,
+                bframes=0,
+                faststart=True,
+            )
+        ),
+    )
+
+
+def _state(
+    tmp_path: Path,
+    *,
+    start_frame: int = 5,
+    config: PreprocessConfig | None = None,
+    default_config: PreprocessConfig | None = None,
+) -> PreprocessSetupState:
     raw_path = tmp_path / "raw.avi"
-    config = _config()
+    config = config or _config()
+    default_config = default_config or PreprocessConfig()
     pre_crop = resolve_pre_crop(config.pre_crop, (100, 80))
     return PreprocessSetupState(
         project=Project(root_dir=tmp_path, name="Project"),
@@ -65,7 +150,14 @@ def _state(tmp_path: Path, *, start_frame: int = 5) -> PreprocessSetupState:
         raw_video_path=raw_path,
         raw_probe=_probe(raw_path),
         preprocess_config=config,
+        original_preprocess_config=PreprocessConfig.model_validate(
+            config.model_dump(mode="python")
+        ),
+        default_preprocess_config=PreprocessConfig.model_validate(
+            default_config.model_dump(mode="python")
+        ),
         start_frame=start_frame,
+        end_frame_exclusive=config.trim.end_frame,
         pre_crop_config=config.pre_crop,
         resolved_pre_crop=pre_crop,
         trim_pre_crop_valid=True,
@@ -270,6 +362,205 @@ def test_detector_setting_change_uses_typed_copy_and_invalidates_acceptance(
     assert updated.cage_detect.threshold == 111
     assert controller.state.accepted_crop_plan is None
     assert controller.state.candidate_crop_plan is None
+
+
+def test_reset_detector_settings_restores_loaded_defaults_without_hardcoded_values(
+    tmp_path: Path,
+) -> None:
+    default_config = _detector_defaults_config()
+    current_config = _modified_detector_config()
+    state = _state(tmp_path, config=current_config, default_config=default_config)
+    controller = CropReviewController(
+        state,
+        detector=_detector,
+        frame_reader=lambda _path, _index: FRAME.copy(),
+    )
+
+    result = controller.reset_detector_settings_to_defaults()
+
+    assert result.changed_fields == tuple(CageDetectConfig.model_fields)
+    assert state.preprocess_config is not None
+    assert state.preprocess_config.cage_detect == default_config.cage_detect
+    assert state.preprocess_config.cage_detect.sample_step == 123
+    assert state.preprocess_config.cage_detect.threshold == 77
+
+
+def test_detector_settings_modified_fields_report_differences(
+    tmp_path: Path,
+) -> None:
+    default_config = _detector_defaults_config()
+    current_config = PreprocessConfig(
+        cage_detect=CageDetectConfig(
+            **{
+                **default_config.cage_detect.model_dump(mode="python"),
+                "sample_step": 999,
+                "threshold": 44,
+            }
+        )
+    )
+    state = _state(tmp_path, config=current_config, default_config=default_config)
+    controller = CropReviewController(state)
+
+    assert controller.detector_settings_modified_fields() == (
+        "sample_step",
+        "threshold",
+    )
+
+
+def test_detector_defaults_indicator_updates_in_headless_page(
+    tmp_path: Path,
+    qt_application: object,
+) -> None:
+    del qt_application
+    from ui.pages.crop_review_page import CropReviewPage
+
+    default_config = _detector_defaults_config()
+    current_config = PreprocessConfig(
+        cage_detect=CageDetectConfig(
+            **{
+                **default_config.cage_detect.model_dump(mode="python"),
+                "sample_step": 999,
+            }
+        )
+    )
+    setup_controller = PreprocessSetupController(
+        state=_state(tmp_path, config=current_config, default_config=default_config)
+    )
+    page = CropReviewPage(setup_controller)
+
+    assert "Modified from defaults" in page.detector_defaults_status.text()
+    assert "sample step" in page.detector_defaults_status.text()
+
+    page._reset_detector_settings_to_defaults()
+
+    assert page.detector_defaults_status.text() == "Detector settings use defaults."
+    assert setup_controller.state.preprocess_config is not None
+    assert setup_controller.state.preprocess_config.cage_detect == (
+        default_config.cage_detect
+    )
+
+
+def test_reset_detector_settings_at_defaults_is_no_op(tmp_path: Path) -> None:
+    default_config = _detector_defaults_config()
+    state = _state(tmp_path, config=default_config, default_config=default_config)
+    controller = CropReviewController(
+        state,
+        detector=_detector,
+        frame_reader=lambda _path, _index: FRAME.copy(),
+    )
+    controller.run_automatic_detection()
+    controller.accept_crop()
+    candidate = state.candidate_crop_plan
+    accepted = state.accepted_crop_plan
+    previous_revision = state.crop_review_revision
+
+    result = controller.reset_detector_settings_to_defaults()
+
+    assert result.already_at_defaults is True
+    assert state.candidate_crop_plan is candidate
+    assert state.accepted_crop_plan is accepted
+    assert state.crop_review_revision == previous_revision
+
+
+def test_reset_detector_settings_invalidates_automatic_candidate_when_changed(
+    tmp_path: Path,
+) -> None:
+    default_config = _detector_defaults_config()
+    state = _state(
+        tmp_path,
+        config=_modified_detector_config(),
+        default_config=default_config,
+    )
+    controller = CropReviewController(
+        state,
+        detector=_detector,
+        frame_reader=lambda _path, _index: FRAME.copy(),
+    )
+    controller.run_automatic_detection()
+
+    result = controller.reset_detector_settings_to_defaults()
+
+    assert result.invalidated_candidate is True
+    assert state.candidate_crop_plan is None
+    assert state.accepted_crop_plan is None
+    assert controller.prepared_preview is None
+    assert state.crop_review_status == (
+        "Detector settings reset to defaults; rerun automatic detection."
+    )
+
+
+def test_reset_detector_settings_invalidates_accepted_automatic_crop_when_changed(
+    tmp_path: Path,
+) -> None:
+    default_config = _detector_defaults_config()
+    state = _state(
+        tmp_path,
+        config=_modified_detector_config(),
+        default_config=default_config,
+    )
+    controller = CropReviewController(
+        state,
+        detector=_detector,
+        frame_reader=lambda _path, _index: FRAME.copy(),
+    )
+    controller.run_automatic_detection()
+    controller.accept_crop()
+
+    result = controller.reset_detector_settings_to_defaults()
+
+    assert result.invalidated_candidate is True
+    assert result.invalidated_accepted is True
+    assert state.candidate_crop_plan is None
+    assert state.accepted_crop_plan is None
+
+
+def test_reset_detector_settings_preserves_accepted_manual_crop(
+    tmp_path: Path,
+) -> None:
+    default_config = _detector_defaults_config()
+    state = _state(
+        tmp_path,
+        config=_modified_detector_config(),
+        default_config=default_config,
+    )
+    controller = CropReviewController(
+        state,
+        detector=_detector,
+        frame_reader=lambda _path, _index: FRAME.copy(),
+    )
+    _select_manual_candidate(controller)
+    accepted = controller.accept_crop()
+    candidate = state.candidate_crop_plan
+
+    result = controller.reset_detector_settings_to_defaults()
+
+    assert result.preserved_manual_acceptance is True
+    assert state.candidate_crop_plan is candidate
+    assert state.accepted_crop_plan is accepted
+    assert state.accepted_crop_plan.mode is CropMode.MANUAL
+
+
+def test_reset_detector_settings_preserves_trim_pre_crop_timing_and_encoding(
+    tmp_path: Path,
+) -> None:
+    default_config = _detector_defaults_config()
+    current_config = _modified_detector_config()
+    state = _state(tmp_path, config=current_config, default_config=default_config)
+    before_trim = (state.start_frame, state.end_frame_exclusive)
+    before_pre_crop = (state.pre_crop_config, state.resolved_pre_crop)
+    before_timing = current_config.timing
+    before_prepare = current_config.prepare
+    before_encoding = current_config.encoding
+    controller = CropReviewController(state)
+
+    controller.reset_detector_settings_to_defaults()
+
+    assert (state.start_frame, state.end_frame_exclusive) == before_trim
+    assert (state.pre_crop_config, state.resolved_pre_crop) == before_pre_crop
+    assert state.preprocess_config is not None
+    assert state.preprocess_config.timing == before_timing
+    assert state.preprocess_config.prepare == before_prepare
+    assert state.preprocess_config.encoding == before_encoding
 
 
 def test_manual_collection_preserves_prescribed_order_and_rejects_wrong_order(

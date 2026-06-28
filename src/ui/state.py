@@ -96,6 +96,7 @@ class PreprocessSetupState:
     raw_frame_navigation_step: int = 10
     preprocess_config: PreprocessConfig | None = None
     original_preprocess_config: PreprocessConfig | None = None
+    default_preprocess_config: PreprocessConfig | None = None
     config_dirty: bool = False
     encode_settings_valid: bool = True
     config_path: Path | None = None

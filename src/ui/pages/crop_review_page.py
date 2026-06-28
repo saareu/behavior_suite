@@ -46,6 +46,19 @@ from ui.widgets.crop_overlay_view import CropOverlayView
 from ui.widgets.video_frame_view import VideoFrameView
 
 _MAX_INT = 2_147_483_647
+_DETECTOR_FIELD_LABELS = {
+    "sample_step": "sample step",
+    "pad_px": "padding",
+    "threshold": "threshold",
+    "pre_crop_expansion_percent": "pre-crop expansion",
+    "dilate_kernel_size": "dilate kernel",
+    "erode_kernel_size": "erode kernel",
+    "rim_close_kernel_size": "rim close kernel",
+    "minimum_cage_width_fraction": "minimum width fraction",
+    "minimum_cage_height_fraction": "minimum height fraction",
+    "minimum_contour_area": "minimum contour area",
+    "fit_tolerance_px": "fit tolerance",
+}
 
 
 class CropReviewPage(QWidget):
@@ -196,8 +209,16 @@ class CropReviewPage(QWidget):
 
         self.find_button = QPushButton("Find Cage")
         self.retry_button = QPushButton("Retry")
+        self.reset_detector_defaults_button = QPushButton(
+            "Reset detector settings to defaults"
+        )
+        self.detector_defaults_status = QLabel()
+        self.detector_defaults_status.setWordWrap(True)
         self.find_button.clicked.connect(self._run_detection)
         self.retry_button.clicked.connect(self._run_detection)
+        self.reset_detector_defaults_button.clicked.connect(
+            self._reset_detector_settings_to_defaults
+        )
         actions = QHBoxLayout()
         actions.addWidget(self.find_button)
         actions.addWidget(self.retry_button)
@@ -206,6 +227,8 @@ class CropReviewPage(QWidget):
         layout.addLayout(form)
         layout.addWidget(self.advanced_toggle)
         layout.addWidget(self.advanced_widget)
+        layout.addWidget(self.detector_defaults_status)
+        layout.addWidget(self.reset_detector_defaults_button)
         layout.addLayout(actions)
 
         setting_widgets = (
@@ -347,6 +370,7 @@ class CropReviewPage(QWidget):
             self.fit_tolerance.setValue(detector.fit_tolerance_px)
         self.canonical_width.setEnabled(self.canonical_enabled.isChecked())
         self.canonical_height.setEnabled(self.canonical_enabled.isChecked())
+        self._refresh_detector_defaults_status()
         self._refreshing = False
         self.automatic_group.setEnabled(
             state.crop_mode is CropReviewMode.AUTOMATIC and not self._busy
@@ -544,6 +568,35 @@ class CropReviewPage(QWidget):
         except CropReviewValidationError as exc:
             self._show_expected_error(str(exc))
 
+    def _reset_detector_settings_to_defaults(self) -> None:
+        try:
+            result = self.controller.reset_detector_settings_to_defaults()
+        except CropReviewValidationError as exc:
+            self._show_expected_error(str(exc))
+            return
+        self.error_label.clear()
+        self.refresh_from_state()
+        if result.already_at_defaults:
+            self.status_message.emit("Detector settings already using defaults.")
+        elif result.invalidated_accepted:
+            self.status_message.emit(
+                "Detector settings reset to defaults; automatic crop invalidated. "
+                "Rerun automatic detection."
+            )
+        elif result.invalidated_candidate:
+            self.status_message.emit(
+                "Detector settings reset to defaults; automatic candidate invalidated. "
+                "Rerun automatic detection."
+            )
+        elif result.preserved_manual_acceptance:
+            self.status_message.emit(
+                "Detector settings reset to defaults; accepted manual crop preserved."
+            )
+        else:
+            self.status_message.emit(
+                "Detector settings reset to defaults; automatic detection must be rerun."
+            )
+
     def _mode_changed(self) -> None:
         if self._refreshing:
             return
@@ -618,6 +671,14 @@ class CropReviewPage(QWidget):
         self.diagnostics["roi"].setText(
             f"({roi.x}, {roi.y}, {roi.width}, {roi.height})"
         )
+
+    def _refresh_detector_defaults_status(self) -> None:
+        modified = self.controller.detector_settings_modified_fields()
+        if not modified:
+            self.detector_defaults_status.setText("Detector settings use defaults.")
+            return
+        labels = ", ".join(_DETECTOR_FIELD_LABELS.get(field, field) for field in modified)
+        self.detector_defaults_status.setText(f"Modified from defaults: {labels}.")
 
     def _toggle_advanced(self, checked: bool) -> None:
         self.advanced_toggle.setArrowType(
