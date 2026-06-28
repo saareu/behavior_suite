@@ -20,15 +20,20 @@ approved specification revision explicitly changes them. In particular:
 - External timing retains exact untrimmed readable-frame-count validation.
 - No frame resampling, dropping, duplication, interpolation, or reordering is
   introduced.
-- A validated, explicitly accepted `CropPlan` remains mandatory.
+- For the current V1/V2 perspective workflow, a validated, explicitly accepted
+  `CropPlan` remains mandatory. V2.6 broadens the long-term design language so
+  future final spatial geometry modes may use another explicit raw-to-prepared
+  transform authority, but no current `CropPlan` behavior is changed by this
+  plan.
 - Pre-crop remains part of the final raw-to-prepared transform.
 - The six official artifact names and roles remain unchanged.
 - Core services remain authoritative; the GUI remains an orchestration and
   display layer.
 
 This plan covers six candidate improvements: timing-unit plausibility warning,
-visual trim navigation, visual pre-crop selection, detector-default reset,
-better progress and cancellation, and an optional reusable raw-probe cache.
+visual trim navigation, visual pre-crop selection plus final spatial geometry
+mode design, detector-default reset, better progress and cancellation, and an
+optional reusable raw-probe cache.
 None is present in the v1 tag merely because it is described here.
 
 ## 2. Explicit non-goals
@@ -61,7 +66,7 @@ The following are outside this plan:
 | --- | --- | --- |
 | 1. Timing-unit plausibility warning | **P0 — scientific safety / workflow correctness** | The first field test demonstrated that a structurally valid but incorrectly declared timing unit can imply an extreme FPS. A prominent warning improves the user's scientific interpretation without changing data or blocking unusual experiments. |
 | 2. Visual trim navigation | **P1 — major usability improvement** | Visual decode-frame selection removes error-prone transcription while preserving the existing numeric `[start, end)` contract. |
-| 3. Visual pre-crop selection | **P1 — major usability improvement** | Visual boundaries and rectangles make a permanent geometry decision reviewable. It depends on exact raw-image coordinate mapping and existing core validation. |
+| 3. Visual pre-crop and spatial geometry modes | **P1 — major usability improvement / design correction** | Visual boundaries and rectangles make a permanent geometry decision reviewable. V2.6 also defines future final spatial geometry modes so `CropPlan` remains valid for perspective workflows without becoming the only possible geometry authority. |
 | 4. Detector settings reset | **P2 — quality-of-life improvement** | Typed defaults already exist and current editing is valid. A clear reset improves reproducibility and recovery from experiments but does not address a current scientific failure. |
 | 5. Better progress and cancellation UX | **P1 — major usability improvement** | Long counts and processing stages currently have safe worker ownership but limited observability and incomplete user-directed cancellation. Honest stage progress and cleanup materially improve long-run operation. |
 | 6. Reusable raw probe cache | **P1 — major usability improvement** | Full sequential counts are expensive and repeated across restarts. Safe reuse is valuable, but conservative fingerprinting and provenance are required so usability never overrides source identity. |
@@ -231,9 +236,34 @@ Changing the displayed frame alone changes no scientific input. The existing
 typed trim path and invalidation rules run only when Start or End Exclusive is
 set or edited.
 
-### Milestone V2.6 — Visual pre-crop selection (P1)
+### Milestone V2.6 — Visual pre-crop and final spatial geometry modes (P1)
 
-Extend the same raw-frame viewer with a dedicated pre-crop overlay supporting:
+The detailed design is recorded in
+`docs/preprocess_v2_6_geometry_modes_design.md`. The current perspective
+`CropPlan` workflow remains valid:
+
+```text
+raw video
+→ optional pre-crop
+→ automatic cage detection or manual four corners
+→ perspective CropPlan
+→ rectification / rotation / canonical scale-pad
+→ prepared video
+```
+
+V2.6 corrects the long-term geometry model: `CropPlan` is the authority for the
+current perspective mode, but every prepared video should ultimately retain one
+authoritative transform description sufficient to map prepared coordinates back
+to raw-video coordinates without hidden GUI state. Future final spatial modes
+may include:
+
+- `identity`
+- `axis_aligned_pre_crop_only`
+- `perspective_crop_plan`
+- `composed_geometry`
+
+The first V2.6 implementation should remain narrow. It should extend the V2.5
+raw-frame viewer with a dedicated pre-crop overlay supporting:
 
 - Vertical boundary with Keep Left and Keep Right.
 - Horizontal boundary with Keep Upper and Keep Lower.
@@ -244,7 +274,7 @@ Extend the same raw-frame viewer with a dedicated pre-crop overlay supporting:
 Overlay interactions produce only candidate numeric inputs. They are converted
 to a typed `PreCropConfig` and passed through the existing
 `resolve_pre_crop()` path. The GUI shall not reproduce its validation or
-raw-to-pre-crop homography logic.
+raw-to-pre-crop transform logic.
 
 Boundary lines represent half-open image edges: Keep Left retains `[0, x)`,
 Keep Right retains `[x, width)`, Keep Upper retains `[0, y)`, and Keep Lower
@@ -253,9 +283,14 @@ retains `[y, height)`. A manual rectangle is stored as integer
 letterboxing from image coordinates and cover the right/bottom exclusive edge.
 
 Numeric controls and overlay stay synchronized in both directions. Clear/Reset
-creates the existing disabled/`none` config and full-frame resolved ROI. Any
-effective pre-crop change clears candidate and accepted crops and prior run
-display exactly as v1 does.
+creates the existing disabled/`none` config and full-frame resolved ROI.
+Changing only `start_frame` or `end_frame_exclusive` must not invalidate
+selected spatial geometry for an unchanged raw video. Effective spatial
+geometry changes still invalidate accepted geometry review.
+
+The first implementation must not introduce a new `GeometryPlan`, change
+current `CropPlan` behavior, alter metadata or sync schemas, or implement
+identity, pre-crop-only, or composed-geometry processing.
 
 ### Milestone V2.7 — Detector settings reset to defaults (P2)
 
@@ -311,7 +346,7 @@ V2.2 Progress protocol + count/detection cancellation ─┐       │
                                                        │
                                                        └─ V2.4 Probe cache
 
-V2.2 task/progress foundation ── V2.5 Visual trim ── V2.6 Visual pre-crop
+V2.2 task/progress foundation ── V2.5 Visual trim ── V2.6 Visual pre-crop + geometry modes
 
 V2.7 Detector reset (independent after v2 state conventions stabilize)
 
@@ -321,8 +356,9 @@ All milestones ─────────────────────�
 V2.1 has no cache or visual-navigation dependency and is the recommended first
 implementation milestone. V2.4 follows cancellation instrumentation so failed
 or cancelled counts cannot be persisted. V2.6 reuses V2.5's viewer and exact
-coordinate mapping. V2.7 is technically independent but follows shared GUI
-state changes to avoid rework.
+coordinate mapping, while documenting future non-perspective geometry modes.
+V2.7 is technically independent but follows shared GUI state changes to avoid
+rework.
 
 ## 6. Core-data-model changes
 
@@ -402,8 +438,13 @@ Required invalidation behavior:
 - Changing timing selection still clears the prior run result but not crop
   acceptance.
 - Navigating to another display frame changes no workflow input.
-- Setting trim or changing pre-crop clears candidate crop, accepted crop, and
-  run result.
+- Changing only trim changes which frames are processed and clears prior run
+  output, but must not invalidate accepted spatial geometry for an unchanged
+  raw video.
+- Changing effective spatial geometry, including pre-crop geometry, manual
+  four-corner points, automatic detection output, geometry-affecting output
+  settings, or raw video identity, clears accepted geometry and prior run
+  output.
 - Loading a count from validated cache invalidates a previously validated MAT
   selection if its exact-count dependency changes.
 - Detector reset invalidates crop/run state only when reset changes an effective
@@ -534,8 +575,9 @@ automatic/external-timing and manual/no-external-timing cases as comparisons.
 3. Visual navigation displays verified raw decode frames at first, interior,
    trim-start, trim-end-exclusive, and last valid indices. Prepared sync maps
    the selected range exactly.
-4. Each pre-crop mode produces the expected retained raw region, accepted
-   `CropPlan`, final video geometry, and metadata transform.
+4. In the first perspective-mode implementation, each visual pre-crop mode
+   produces the expected retained raw region, accepted `CropPlan`, final video
+   geometry, and metadata transform.
 5. Detector reset restores the documented fields, leaves canonical settings
    unchanged, and requires re-detection only after an effective change.
 6. Progress is observed for every listed long stage. Percent and ETA appear
@@ -582,7 +624,9 @@ must stop for specification review rather than extending this plan implicitly.
 5. Implement V2.4 fingerprinted optional cache using the completed-count and
    cancellation contracts.
 6. Implement V2.5 exact raw-frame navigation and visual trim.
-7. Implement V2.6 visual pre-crop on the same viewer/mapping layer.
+7. Implement V2.6 visual pre-crop and geometry-mode design on the same
+   viewer/mapping layer, keeping current perspective `CropPlan` processing
+   unchanged.
 8. Implement V2.7 detector-default reset.
 9. Complete V2.8 automated and real-data acceptance before considering a v2
    release tag.
@@ -618,7 +662,9 @@ and acceptance evidence.
 10. `Add visual trim navigation workflow`
     - Viewer controls, task integration, `[start, end)` UI tests.
 11. `Add visual pre-crop overlays`
-    - Boundary/rectangle interaction, typed core delegation, mapping tests.
+    - Boundary/rectangle interaction, typed core delegation, mapping tests, and
+      geometry-mode design documentation. Do not add non-`CropPlan` processing
+      modes in this commit.
 12. `Add detector settings default reset`
     - Controller/page changes and exact invalidation/default tests.
 13. `Document v2 acceptance evidence`
