@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from preprocess.config import MaskRectangleConfig
 from preprocess.exceptions import CageDetectionCancelledError, PreprocessError
 from ui.controllers.crop_review_controller import (
     CropReviewComputation,
@@ -43,7 +44,7 @@ from ui.tasks import (
     TaskAlreadyRunningError,
 )
 from ui.widgets.crop_overlay_view import CropOverlayView
-from ui.widgets.video_frame_view import VideoFrameView
+from ui.widgets.video_frame_view import MaskOverlay, VideoFrameView
 
 _MAX_INT = 2_147_483_647
 _DETECTOR_FIELD_LABELS = {
@@ -100,6 +101,13 @@ class CropReviewPage(QWidget):
         self.raw_view = CropOverlayView()
         self.raw_view.raw_point_clicked.connect(self._manual_point_clicked)
         self.preview_view = VideoFrameView()
+        self._selected_mask_shape_index: int | None = None
+        self._mask_drawing_mode = "select"
+        self._pending_polygon_vertices: list[tuple[int, int]] = []
+        self.preview_view.mask_shape_selected.connect(self._select_mask_shape_from_view)
+        self.preview_view.mask_rectangle_created.connect(self._add_mask_rectangle)
+        self.preview_view.mask_rectangle_changed.connect(self._replace_mask_rectangle)
+        self.preview_view.mask_polygon_vertex_added.connect(self._add_mask_polygon_vertex)
         raw_group = QGroupBox("Raw review frame")
         raw_layout = QVBoxLayout(raw_group)
         self.frame_status = QLabel("No representative frame loaded.")
@@ -118,6 +126,7 @@ class CropReviewPage(QWidget):
         controls_layout.addWidget(self._build_automatic_group())
         controls_layout.addWidget(self._build_manual_group())
         controls_layout.addWidget(self._build_diagnostics_group())
+        controls_layout.addWidget(self._build_mask_group())
         self.busy_indicator = QProgressBar()
         self.busy_indicator.setRange(0, 0)
         self.busy_indicator.setVisible(False)
@@ -292,6 +301,44 @@ class CropReviewPage(QWidget):
         form.addRow("Pre-crop ROI", self.diagnostics["roi"])
         return group
 
+    def _build_mask_group(self) -> QGroupBox:
+        self.mask_group = QGroupBox("Static prepared-coordinate exclusion mask")
+        self.mask_enabled = QCheckBox("Enable static exclusion mask")
+        self.mask_enabled.toggled.connect(self._mask_enabled_changed)
+        self.add_rectangle_button = QPushButton("Add rectangle")
+        self.add_polygon_button = QPushButton("Add polygon")
+        self.finish_polygon_button = QPushButton("Finish polygon")
+        self.cancel_polygon_button = QPushButton("Cancel polygon")
+        self.delete_shape_button = QPushButton("Delete selected shape")
+        self.clear_masks_button = QPushButton("Clear all masks")
+        self.mask_shape_select = QComboBox()
+        self.mask_status = QLabel("No mask shapes.")
+        self.mask_status.setWordWrap(True)
+        self.add_rectangle_button.clicked.connect(self._begin_mask_rectangle)
+        self.add_polygon_button.clicked.connect(self._begin_mask_polygon)
+        self.finish_polygon_button.clicked.connect(self._finish_mask_polygon)
+        self.cancel_polygon_button.clicked.connect(self._cancel_mask_polygon)
+        self.delete_shape_button.clicked.connect(self._delete_selected_mask_shape)
+        self.clear_masks_button.clicked.connect(self._clear_all_mask_shapes)
+        self.mask_shape_select.currentIndexChanged.connect(self._mask_selection_changed)
+
+        layout = QVBoxLayout(self.mask_group)
+        layout.addWidget(self.mask_enabled)
+        row = QHBoxLayout()
+        row.addWidget(self.add_rectangle_button)
+        row.addWidget(self.add_polygon_button)
+        layout.addLayout(row)
+        polygon_row = QHBoxLayout()
+        polygon_row.addWidget(self.finish_polygon_button)
+        polygon_row.addWidget(self.cancel_polygon_button)
+        layout.addLayout(polygon_row)
+        layout.addWidget(QLabel("Select shape"))
+        layout.addWidget(self.mask_shape_select)
+        layout.addWidget(self.delete_shape_button)
+        layout.addWidget(self.clear_masks_button)
+        layout.addWidget(self.mask_status)
+        return self.mask_group
+
     @staticmethod
     def _int_spin(minimum: int, maximum: int, *, step: int = 1) -> QSpinBox:
         spin = QSpinBox()
@@ -382,7 +429,8 @@ class CropReviewPage(QWidget):
             f"Next required point: {self.controller.next_manual_point_label}"
         )
         self.raw_view.set_frame(self.controller.representative_frame)
-        self.preview_view.set_frame(self.controller.prepared_preview)
+        prepared_preview = self.controller.prepared_preview
+        self.preview_view.set_frame(prepared_preview)
         frame_index = self.controller.representative_frame_index
         self.frame_status.setText(
             "No representative frame loaded."
@@ -403,10 +451,11 @@ class CropReviewPage(QWidget):
                 and not self._busy
             ),
         )
+        self._refresh_mask_controls(prepared_preview is not None)
         self._refresh_diagnostics()
         self.accept_button.setEnabled(
             candidate is not None
-            and self.controller.prepared_preview is not None
+            and prepared_preview is not None
             and not self._busy
         )
         if self.controller.can_advance():
@@ -597,6 +646,223 @@ class CropReviewPage(QWidget):
                 "Detector settings reset to defaults; automatic detection must be rerun."
             )
 
+    def _refresh_mask_controls(self, preview_available: bool) -> None:
+        config = self.controller.state.preprocess_config
+        mask = None if config is None else config.mask
+        self.mask_enabled.blockSignals(True)
+        self.mask_shape_select.blockSignals(True)
+        try:
+            self.mask_enabled.setChecked(False if mask is None else mask.enabled)
+            self.mask_shape_select.clear()
+            shapes = [] if mask is None else mask.shapes
+            for index, shape in enumerate(shapes):
+                self.mask_shape_select.addItem(_mask_shape_label(index, shape), index)
+            if (
+                self._selected_mask_shape_index is not None
+                and self._selected_mask_shape_index < len(shapes)
+            ):
+                self.mask_shape_select.setCurrentIndex(self._selected_mask_shape_index)
+            else:
+                self._selected_mask_shape_index = None
+        finally:
+            self.mask_enabled.blockSignals(False)
+            self.mask_shape_select.blockSignals(False)
+        shapes_payload = (
+            ()
+            if mask is None
+            else tuple(shape.model_dump(mode="python") for shape in mask.shapes)
+        )
+        self.preview_view.set_mask_overlay(
+            MaskOverlay(
+                shapes=shapes_payload,
+                selected_index=self._selected_mask_shape_index,
+                pending_polygon=tuple(self._pending_polygon_vertices),
+                editing_mode=(
+                    "disabled"
+                    if not preview_available or self._busy
+                    else self._mask_drawing_mode
+                ),
+                enabled=False if mask is None else mask.enabled,
+            )
+        )
+        self.mask_group.setEnabled(not self._busy)
+        self.add_rectangle_button.setEnabled(preview_available and not self._busy)
+        self.add_polygon_button.setEnabled(preview_available and not self._busy)
+        self.finish_polygon_button.setEnabled(
+            preview_available
+            and not self._busy
+            and self._mask_drawing_mode == "polygon"
+        )
+        self.cancel_polygon_button.setEnabled(
+            preview_available
+            and not self._busy
+            and self._mask_drawing_mode == "polygon"
+        )
+        has_selection = self._selected_mask_shape_index is not None
+        self.delete_shape_button.setEnabled(has_selection and not self._busy)
+        self.clear_masks_button.setEnabled(bool(shapes_payload) and not self._busy)
+        if self._mask_drawing_mode == "polygon":
+            self.mask_status.setText(
+                f"Drawing polygon: {len(self._pending_polygon_vertices)} vertices. "
+                "Click the prepared preview, then Finish polygon."
+            )
+        elif self._mask_drawing_mode == "rectangle":
+            self.mask_status.setText("Drag on the prepared preview to add a rectangle.")
+        elif not shapes_payload:
+            self.mask_status.setText("No mask shapes.")
+        elif has_selection:
+            self.mask_status.setText(
+                f"Selected mask shape {self._selected_mask_shape_index + 1} of "
+                f"{len(shapes_payload)}."
+            )
+        else:
+            self.mask_status.setText(f"{len(shapes_payload)} mask shape(s).")
+
+    def _mask_enabled_changed(self, enabled: bool) -> None:
+        if self._refreshing:
+            return
+        try:
+            changed = self.controller.set_static_mask_enabled(enabled)
+        except CropReviewValidationError as exc:
+            self._show_expected_error(str(exc))
+            self.refresh_from_state()
+            return
+        self.error_label.clear()
+        self.refresh_from_state()
+        if changed:
+            self.status_message.emit("Static exclusion mask changed; rerun preprocessing.")
+        else:
+            self.status_message.emit("Static exclusion mask already unchanged.")
+
+    def _begin_mask_rectangle(self) -> None:
+        self._mask_drawing_mode = "rectangle"
+        self._pending_polygon_vertices.clear()
+        self.refresh_from_state()
+
+    def _begin_mask_polygon(self) -> None:
+        self._mask_drawing_mode = "polygon"
+        self._pending_polygon_vertices.clear()
+        self.refresh_from_state()
+
+    def _finish_mask_polygon(self) -> None:
+        try:
+            self._selected_mask_shape_index = self.controller.add_static_mask_polygon(
+                tuple(self._pending_polygon_vertices)
+            )
+        except CropReviewValidationError as exc:
+            self._show_expected_error(str(exc))
+            self.refresh_from_state()
+            return
+        self._pending_polygon_vertices.clear()
+        self._mask_drawing_mode = "select"
+        self.error_label.clear()
+        self.refresh_from_state()
+        self.status_message.emit("Static exclusion polygon added; rerun preprocessing.")
+
+    def _cancel_mask_polygon(self) -> None:
+        self._pending_polygon_vertices.clear()
+        self._mask_drawing_mode = "select"
+        self.refresh_from_state()
+        self.status_message.emit("In-progress polygon mask cancelled.")
+
+    def _select_mask_shape_from_view(self, index: int) -> None:
+        self._selected_mask_shape_index = index
+        self._mask_drawing_mode = "select"
+        self.refresh_from_state()
+
+    def _mask_selection_changed(self) -> None:
+        if self._refreshing:
+            return
+        self._selected_mask_shape_index = self.mask_shape_select.currentData()
+        self._mask_drawing_mode = "select"
+        self.refresh_from_state()
+
+    def _add_mask_rectangle(self, geometry: object) -> None:
+        if not _is_rectangle_tuple(geometry):
+            self._show_expected_error("Rectangle mask geometry is invalid.")
+            return
+        try:
+            self._selected_mask_shape_index = self.controller.add_static_mask_rectangle(
+                geometry
+            )
+        except CropReviewValidationError as exc:
+            self._show_expected_error(str(exc))
+            self.refresh_from_state()
+            return
+        self._mask_drawing_mode = "select"
+        self.error_label.clear()
+        self.refresh_from_state()
+        self.status_message.emit("Static exclusion rectangle added; rerun preprocessing.")
+
+    def _replace_mask_rectangle(self, index: int, geometry: object) -> None:
+        if not _is_rectangle_tuple(geometry):
+            self._show_expected_error("Rectangle mask geometry is invalid.")
+            return
+        try:
+            changed = self.controller.replace_static_mask_shape(
+                index,
+                MaskRectangleConfig(
+                    type="rectangle",
+                    x=geometry[0],
+                    y=geometry[1],
+                    width=geometry[2],
+                    height=geometry[3],
+                ),
+            )
+        except CropReviewValidationError as exc:
+            self._show_expected_error(str(exc))
+            self.refresh_from_state()
+            return
+        self._selected_mask_shape_index = index
+        self.error_label.clear()
+        self.refresh_from_state()
+        if changed:
+            self.status_message.emit("Static exclusion rectangle changed; rerun preprocessing.")
+
+    def _add_mask_polygon_vertex(self, vertex: object) -> None:
+        if (
+            not isinstance(vertex, tuple)
+            or len(vertex) != 2
+            or not all(isinstance(value, int) for value in vertex)
+        ):
+            self._show_expected_error("Polygon vertex is invalid.")
+            return
+        self._pending_polygon_vertices.append(vertex)
+        self.refresh_from_state()
+
+    def _delete_selected_mask_shape(self) -> None:
+        if self._selected_mask_shape_index is None:
+            self._show_expected_error("Select a mask shape to delete.")
+            return
+        try:
+            changed = self.controller.delete_static_mask_shape(
+                self._selected_mask_shape_index
+            )
+        except CropReviewValidationError as exc:
+            self._show_expected_error(str(exc))
+            self.refresh_from_state()
+            return
+        self._selected_mask_shape_index = None
+        self.error_label.clear()
+        self.refresh_from_state()
+        if changed:
+            self.status_message.emit("Static exclusion mask shape deleted; rerun preprocessing.")
+
+    def _clear_all_mask_shapes(self) -> None:
+        try:
+            changed = self.controller.clear_static_mask_shapes()
+        except CropReviewValidationError as exc:
+            self._show_expected_error(str(exc))
+            self.refresh_from_state()
+            return
+        self._selected_mask_shape_index = None
+        self._pending_polygon_vertices.clear()
+        self._mask_drawing_mode = "select"
+        self.error_label.clear()
+        self.refresh_from_state()
+        if changed:
+            self.status_message.emit("Static exclusion masks cleared; rerun preprocessing.")
+
     def _mode_changed(self) -> None:
         if self._refreshing:
             return
@@ -700,6 +966,7 @@ class CropReviewPage(QWidget):
         self.automatic_mode.setEnabled(not busy)
         self.manual_mode.setEnabled(not busy)
         self.clear_points_button.setEnabled(not busy)
+        self.mask_group.setEnabled(not busy)
         self.accept_button.setEnabled(not busy and self.accept_button.isEnabled())
         self.raw_view.setEnabled(not busy)
         self.automatic_group.setEnabled(
@@ -724,3 +991,23 @@ class CropReviewPage(QWidget):
         self.success_label.clear()
         self.unexpected_error.emit(str(exc))
         self.validity_changed.emit()
+
+
+def _mask_shape_label(index: int, shape: object) -> str:
+    shape_type = getattr(shape, "type", "shape")
+    if shape_type == "rectangle":
+        return (
+            f"{index + 1}: rectangle "
+            f"({shape.x}, {shape.y}, {shape.width}, {shape.height})"
+        )
+    if shape_type == "polygon":
+        return f"{index + 1}: polygon ({len(shape.vertices)} vertices)"
+    return f"{index + 1}: mask shape"
+
+
+def _is_rectangle_tuple(value: object) -> bool:
+    return (
+        isinstance(value, tuple)
+        and len(value) == 4
+        and all(isinstance(item, int) for item in value)
+    )

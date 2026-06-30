@@ -12,12 +12,14 @@ from pathlib import Path
 import yaml
 
 from preprocess.background import BackgroundEstimateResult, validate_background
-from preprocess.config import PreprocessConfig
+from preprocess.config import MaskConfig, PreprocessConfig
 from preprocess.crop_plan import CropMode, CropPlan
 from preprocess.exceptions import (
     BackgroundGenerationError,
     MetadataArtifactError,
+    VideoPreparationError,
 )
+from preprocess.masking import serialize_static_mask, validate_static_mask
 from preprocess.models import (
     ExternalTimeSelection,
     FPSHeaderSource,
@@ -132,7 +134,7 @@ _REQUIRED_NESTED_FIELDS: dict[str, set[str]] = {
         "output_dtype",
     },
     "sync": {"path", "sync_schema_version", "frame_count_used_for_sleap"},
-    "mask": {"enabled", "shapes"},
+    "mask": {"enabled", "coordinate_space", "fill_value", "shapes"},
     "validation": {"status", "prepared_video", "background"},
     "software_environment": {
         "python_version",
@@ -420,7 +422,7 @@ def build_prepare_metadata(
             "sync_schema_version": PREPARED_SYNC_SCHEMA_VERSION,
             "frame_count_used_for_sleap": (prepared_validation.opencv_readable_frame_count),
         },
-        "mask": {"enabled": False, "shapes": []},
+        "mask": serialize_static_mask(preprocess_config.mask),
         "validation": {
             "status": validation_status,
             "prepared_video": prepared_validation.model_dump(mode="json"),
@@ -625,10 +627,11 @@ def validate_prepare_metadata(metadata: dict[str, object]) -> None:
             raise MetadataArtifactError("Passed metadata requires a passed background summary.")
 
     mask = sections["mask"]
-    if mask["enabled"] is not False or mask["shapes"] != []:
-        raise MetadataArtifactError(
-            "Mask metadata must remain disabled with no shapes in this milestone."
-        )
+    try:
+        mask_config = MaskConfig.model_validate(mask)
+        validate_static_mask(mask_config, prepared_size)
+    except (ValueError, VideoPreparationError) as exc:
+        raise MetadataArtifactError(f"Mask metadata is invalid: {exc}") from exc
     _positive_number(
         "encoding.output_fps_header",
         encoding["output_fps_header"],

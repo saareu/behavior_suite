@@ -1,7 +1,7 @@
 """Pydantic configuration models and YAML loading for preprocessing."""
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -132,21 +132,153 @@ class CageDetectConfig(_StrictConfigModel):
         return value
 
 
+class MaskRectangleConfig(_StrictConfigModel):
+    """Axis-aligned static mask rectangle in prepared-pixel coordinates."""
+
+    type: Literal["rectangle"] = "rectangle"
+    x: int
+    y: int
+    width: int
+    height: int
+
+    @field_validator("x", "y", "width", "height", mode="before")
+    @classmethod
+    def validate_integer(cls, value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("Rectangle mask coordinates must be integer pixels.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_positive_size(self) -> "MaskRectangleConfig":
+        if self.width <= 0 or self.height <= 0:
+            raise ValueError("Rectangle masks require positive width and height.")
+        return self
+
+
+def _polygon_signed_area(vertices: tuple[tuple[int, int], ...]) -> float:
+    area = 0.0
+    for index, (x0, y0) in enumerate(vertices):
+        x1, y1 = vertices[(index + 1) % len(vertices)]
+        area += x0 * y1 - x1 * y0
+    return area / 2.0
+
+
+def _orientation(
+    a: tuple[int, int],
+    b: tuple[int, int],
+    c: tuple[int, int],
+) -> int:
+    value = (b[1] - a[1]) * (c[0] - b[0]) - (b[0] - a[0]) * (c[1] - b[1])
+    return (value > 0) - (value < 0)
+
+
+def _point_on_segment(
+    point: tuple[int, int],
+    segment_start: tuple[int, int],
+    segment_end: tuple[int, int],
+) -> bool:
+    return (
+        min(segment_start[0], segment_end[0])
+        <= point[0]
+        <= max(segment_start[0], segment_end[0])
+        and min(segment_start[1], segment_end[1])
+        <= point[1]
+        <= max(segment_start[1], segment_end[1])
+        and _orientation(segment_start, segment_end, point) == 0
+    )
+
+
+def _segments_intersect(
+    first_start: tuple[int, int],
+    first_end: tuple[int, int],
+    second_start: tuple[int, int],
+    second_end: tuple[int, int],
+) -> bool:
+    first_orientation = _orientation(first_start, first_end, second_start)
+    second_orientation = _orientation(first_start, first_end, second_end)
+    third_orientation = _orientation(second_start, second_end, first_start)
+    fourth_orientation = _orientation(second_start, second_end, first_end)
+    if first_orientation != second_orientation and third_orientation != fourth_orientation:
+        return True
+    return (
+        _point_on_segment(second_start, first_start, first_end)
+        or _point_on_segment(second_end, first_start, first_end)
+        or _point_on_segment(first_start, second_start, second_end)
+        or _point_on_segment(first_end, second_start, second_end)
+    )
+
+
+def _polygon_is_simple(vertices: tuple[tuple[int, int], ...]) -> bool:
+    edge_count = len(vertices)
+    for first_index in range(edge_count):
+        first_start = vertices[first_index]
+        first_end = vertices[(first_index + 1) % edge_count]
+        for second_index in range(first_index + 1, edge_count):
+            if second_index in {
+                first_index,
+                (first_index + 1) % edge_count,
+                (first_index - 1) % edge_count,
+            }:
+                continue
+            second_start = vertices[second_index]
+            second_end = vertices[(second_index + 1) % edge_count]
+            if _segments_intersect(first_start, first_end, second_start, second_end):
+                return False
+    return True
+
+
+class MaskPolygonConfig(_StrictConfigModel):
+    """Simple polygon static mask in prepared-pixel coordinates."""
+
+    type: Literal["polygon"] = "polygon"
+    vertices: tuple[tuple[int, int], ...]
+
+    @field_validator("vertices", mode="before")
+    @classmethod
+    def validate_vertices(cls, value: object) -> tuple[tuple[int, int], ...]:
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("Polygon mask vertices must be a sequence.")
+        vertices: list[tuple[int, int]] = []
+        for vertex in value:
+            if not isinstance(vertex, (list, tuple)) or len(vertex) != 2:
+                raise ValueError("Each polygon mask vertex must contain x and y.")
+            x, y = vertex
+            if (
+                isinstance(x, bool)
+                or isinstance(y, bool)
+                or not isinstance(x, int)
+                or not isinstance(y, int)
+            ):
+                raise ValueError("Polygon mask vertices must use integer pixels.")
+            vertices.append((x, y))
+        return tuple(vertices)
+
+    @model_validator(mode="after")
+    def validate_polygon(self) -> "MaskPolygonConfig":
+        if len(self.vertices) < 3:
+            raise ValueError("Polygon masks require at least three vertices.")
+        if len(set(self.vertices)) != len(self.vertices):
+            raise ValueError("Polygon masks must not repeat vertices.")
+        if _polygon_signed_area(self.vertices) == 0:
+            raise ValueError("Polygon masks must have nonzero area.")
+        if not _polygon_is_simple(self.vertices):
+            raise ValueError("Polygon masks must be simple and non-self-intersecting.")
+        return self
+
+
+MaskShapeConfig = Annotated[
+    MaskRectangleConfig | MaskPolygonConfig,
+    Field(discriminator="type"),
+]
+
+
 class MaskConfig(_StrictConfigModel):
     """Reserved static prepared-coordinate masking configuration."""
 
     enabled: bool = False
-    coordinate_space: Literal["prepared_video"] = "prepared_video"
-    fill_value_bgr: tuple[int, int, int] = (0, 0, 0)
-    shapes: list[dict[str, Any]] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def reject_unimplemented_masking(self) -> "MaskConfig":
-        if any(value < 0 or value > 255 for value in self.fill_value_bgr):
-            raise ValueError("mask.fill_value_bgr entries must be between 0 and 255.")
-        if self.enabled or self.shapes:
-            raise ValueError("Static masking is not supported in the first development sprint.")
-        return self
+    coordinate_space: Literal["prepared_pixels"] = "prepared_pixels"
+    fill_value: Literal["black"] = "black"
+    shapes: list[MaskShapeConfig] = Field(default_factory=list)
 
 
 class FFmpegEncodingConfig(_StrictConfigModel):

@@ -16,6 +16,10 @@ from preprocess.cage_detection import CageDetectionResult, detect_cage_crop_plan
 from preprocess.config import (
     CageDetectConfig,
     CanonicalResolutionConfig,
+    MaskConfig,
+    MaskPolygonConfig,
+    MaskRectangleConfig,
+    MaskShapeConfig,
     PrepareConfig,
     PreprocessConfig,
 )
@@ -24,15 +28,17 @@ from preprocess.exceptions import (
     CageDetectionCancelledError,
     CropPlanError,
     PreprocessError,
+    VideoPreparationError,
 )
 from preprocess.manual_crop import make_manual_crop_plan
+from preprocess.masking import apply_static_mask_to_frame, validate_static_mask
 from preprocess.models import OperationProgress
 from preprocess.pre_crop import ResolvedPreCrop
 from preprocess.video_probe import read_raw_frame_at_index
 from ui.state import CropReviewMode, PreprocessSetupState
 
 FrameReader = Callable[[Path, int], np.ndarray]
-PreviewBuilder = Callable[[np.ndarray, CropPlan, str], np.ndarray]
+PreviewBuilder = Callable[..., np.ndarray]
 AutomaticDetector = Callable[..., CageDetectionResult]
 ManualPlanBuilder = Callable[..., CropPlan]
 
@@ -91,6 +97,7 @@ def build_crop_preview(
     raw_frame: np.ndarray,
     crop_plan: CropPlan,
     perspective_interpolation: str,
+    mask_config: MaskConfig | None = None,
 ) -> np.ndarray:
     """Transform and clip one raw frame using validated CropPlan geometry.
 
@@ -158,6 +165,8 @@ def build_crop_preview(
     )
     clipped_preview = np.array(preview, copy=True)
     clipped_preview[footprint == 0] = 0
+    if mask_config is not None:
+        return apply_static_mask_to_frame(clipped_preview, mask_config)
     return clipped_preview
 
 
@@ -187,6 +196,7 @@ class CropReviewController:
         self._representative_frame: np.ndarray | None = None
         self._representative_frame_index: int | None = None
         self._prepared_preview: np.ndarray | None = None
+        self._prepared_preview_unmasked: np.ndarray | None = None
         self._preview_crop_plan: CropPlan | None = None
         self._manual_points: list[tuple[float, float]] = []
         self._upstream_context = self._context_key()
@@ -206,9 +216,17 @@ class CropReviewController:
 
     @property
     def prepared_preview(self) -> np.ndarray | None:
-        """Return the current non-artifact prepared crop preview."""
+        """Return the current non-artifact prepared crop preview with mask applied."""
 
-        return self._prepared_preview
+        if self._prepared_preview_unmasked is None:
+            return None
+        config = self.state.preprocess_config
+        if config is None:
+            return np.array(self._prepared_preview_unmasked, copy=True)
+        return apply_static_mask_to_frame(
+            self._prepared_preview_unmasked,
+            config.mask,
+        )
 
     @property
     def manual_points(self) -> tuple[tuple[float, float], ...]:
@@ -497,6 +515,101 @@ class CropReviewController:
         self.state.last_validation_error = None
         return updated
 
+    def prepared_preview_size_wh(self) -> tuple[int, int] | None:
+        """Return the current prepared-preview dimensions when a candidate exists."""
+
+        if self._prepared_preview_unmasked is not None:
+            height, width = self._prepared_preview_unmasked.shape[:2]
+            return width, height
+        candidate = self.state.candidate_crop_plan
+        if candidate is not None:
+            return candidate.prepared_size_wh
+        accepted = self.state.accepted_crop_plan
+        if accepted is not None:
+            return accepted.prepared_size_wh
+        return None
+
+    def set_static_mask_enabled(self, enabled: bool) -> bool:
+        """Enable or disable static prepared-pixel mask rendering."""
+
+        config = self._require_config()
+        mask = MaskConfig.model_validate(
+            {
+                **config.mask.model_dump(mode="python"),
+                "enabled": enabled,
+            }
+        )
+        return self._store_mask_config(mask)
+
+    def add_static_mask_rectangle(
+        self,
+        rectangle_xywh: tuple[int, int, int, int],
+    ) -> int:
+        """Append one prepared-coordinate rectangle mask and return its index."""
+
+        x, y, width, height = rectangle_xywh
+        shape = MaskRectangleConfig(
+            type="rectangle",
+            x=x,
+            y=y,
+            width=width,
+            height=height,
+        )
+        return self._append_static_mask_shape(shape)
+
+    def add_static_mask_polygon(self, vertices: tuple[tuple[int, int], ...]) -> int:
+        """Append one prepared-coordinate polygon mask and return its index."""
+
+        shape = MaskPolygonConfig(type="polygon", vertices=vertices)
+        return self._append_static_mask_shape(shape)
+
+    def replace_static_mask_shape(self, index: int, shape: MaskShapeConfig) -> bool:
+        """Replace one static mask shape without changing shape order."""
+
+        config = self._require_config()
+        shapes = list(config.mask.shapes)
+        if index < 0 or index >= len(shapes):
+            raise self._new_validation_error("Selected mask shape does not exist.")
+        shapes[index] = shape
+        return self._store_mask_config(
+            MaskConfig.model_validate(
+                {
+                    **config.mask.model_dump(mode="python"),
+                    "shapes": shapes,
+                }
+            )
+        )
+
+    def delete_static_mask_shape(self, index: int) -> bool:
+        """Delete one selected static mask shape."""
+
+        config = self._require_config()
+        shapes = list(config.mask.shapes)
+        if index < 0 or index >= len(shapes):
+            raise self._new_validation_error("Selected mask shape does not exist.")
+        del shapes[index]
+        return self._store_mask_config(
+            MaskConfig.model_validate(
+                {
+                    **config.mask.model_dump(mode="python"),
+                    "shapes": shapes,
+                }
+            )
+        )
+
+    def clear_static_mask_shapes(self) -> bool:
+        """Remove all static mask shapes while preserving enabled state."""
+
+        config = self._require_config()
+        return self._store_mask_config(
+            MaskConfig.model_validate(
+                {
+                    **config.mask.model_dump(mode="python"),
+                    "shapes": [],
+                }
+            )
+        )
+
     def detector_settings_modified_fields(self) -> tuple[str, ...]:
         """Return cage-detection fields whose values differ from loaded defaults."""
 
@@ -705,7 +818,8 @@ class CropReviewController:
         self.state.candidate_crop_plan = result.crop_plan
         self.state.accepted_crop_plan = None
         self.state.detector_diagnostics = result.detector_diagnostics
-        self._prepared_preview = np.array(result.prepared_preview, copy=True)
+        self._prepared_preview_unmasked = np.array(result.prepared_preview, copy=True)
+        self._prepared_preview = self.prepared_preview
         self._preview_crop_plan = result.crop_plan
         self.state.last_validation_error = None
 
@@ -741,7 +855,50 @@ class CropReviewController:
 
     def _clear_preview(self) -> None:
         self._prepared_preview = None
+        self._prepared_preview_unmasked = None
         self._preview_crop_plan = None
+
+    def _require_config(self) -> PreprocessConfig:
+        config = self.state.preprocess_config
+        if config is None:
+            raise self._new_validation_error("Load a preprocess configuration first.")
+        return config
+
+    def _append_static_mask_shape(self, shape: MaskShapeConfig) -> int:
+        config = self._require_config()
+        shapes = [*config.mask.shapes, shape]
+        self._store_mask_config(
+            MaskConfig.model_validate(
+                {
+                    **config.mask.model_dump(mode="python"),
+                    "enabled": True,
+                    "shapes": shapes,
+                }
+            )
+        )
+        return len(shapes) - 1
+
+    def _store_mask_config(self, mask: MaskConfig) -> bool:
+        config = self._require_config()
+        preview_size = self.prepared_preview_size_wh()
+        if preview_size is not None:
+            try:
+                validate_static_mask(mask, preview_size)
+            except (ValueError, VideoPreparationError) as exc:
+                raise self._new_validation_error(f"Invalid static mask: {exc}") from exc
+        if mask == config.mask:
+            self.state.last_validation_error = None
+            return False
+        updated = PreprocessConfig.model_validate(
+            {
+                **config.model_dump(mode="python"),
+                "mask": mask,
+            }
+        )
+        self.state.store_preprocess_config(updated)
+        self._prepared_preview = self.prepared_preview
+        self.state.last_validation_error = None
+        return True
 
     def _require_context(self) -> tuple[Path, PreprocessConfig, ResolvedPreCrop]:
         path = self.state.raw_video_path

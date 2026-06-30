@@ -31,8 +31,8 @@ cage_detect:
 
 mask:
   enabled: false
-  coordinate_space: prepared_video
-  fill_value_bgr: [0, 0, 0]
+  coordinate_space: prepared_pixels
+  fill_value: black
   shapes: []
 
 encoding:

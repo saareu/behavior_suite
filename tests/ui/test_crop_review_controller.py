@@ -10,6 +10,7 @@ from preprocess.config import (
     CanonicalResolutionConfig,
     EncodingConfig,
     FFmpegEncodingConfig,
+    MaskConfig,
     PrepareConfig,
     PreprocessConfig,
     TrimConfig,
@@ -17,6 +18,7 @@ from preprocess.config import (
 from preprocess.crop_plan import CropMode, CropPlan
 from preprocess.exceptions import CageDetectionError, CropPlanError, VideoProbeError
 from preprocess.manual_crop import make_manual_crop_plan
+from preprocess.masking import apply_static_mask_to_frame
 from preprocess.models import OperationProgress, VideoProbeResult
 from preprocess.pre_crop import PreCropMode, resolve_pre_crop
 from project.models import Project
@@ -561,6 +563,116 @@ def test_reset_detector_settings_preserves_trim_pre_crop_timing_and_encoding(
     assert state.preprocess_config.timing == before_timing
     assert state.preprocess_config.prepare == before_prepare
     assert state.preprocess_config.encoding == before_encoding
+
+
+def test_static_mask_preview_uses_shared_helper_and_prepared_coordinates(
+    tmp_path: Path,
+) -> None:
+    config = PreprocessConfig.model_validate(
+        {
+            **_config().model_dump(mode="python"),
+            "mask": MaskConfig(
+                enabled=True,
+                shapes=[
+                    {"type": "rectangle", "x": 0, "y": 0, "width": 6, "height": 4}
+                ],
+            ),
+        }
+    )
+    state = _state(tmp_path, config=config)
+    controller = CropReviewController(
+        state,
+        detector=_detector,
+        frame_reader=lambda _path, _index: FRAME.copy(),
+    )
+
+    candidate = controller.run_automatic_detection()
+    preview = controller.prepared_preview
+    unmasked = build_crop_preview(FRAME, candidate, config.prepare.perspective_interpolation)
+    expected = apply_static_mask_to_frame(unmasked, config.mask)
+
+    assert preview is not None
+    np.testing.assert_array_equal(preview, expected)
+    assert np.all(preview[:4, :6] == 0)
+
+
+def test_static_mask_change_invalidates_run_but_preserves_crop_trim_precrop_and_timing(
+    tmp_path: Path,
+) -> None:
+    state = _state(tmp_path)
+    controller = CropReviewController(
+        state,
+        detector=_detector,
+        frame_reader=lambda _path, _index: FRAME.copy(),
+    )
+    controller.run_automatic_detection()
+    accepted = controller.accept_crop()
+    candidate = state.candidate_crop_plan
+    trim = (state.start_frame, state.end_frame_exclusive)
+    pre_crop = (state.pre_crop_config, state.resolved_pre_crop)
+    timing = (
+        state.timing_mode,
+        state.timing_status,
+        state.external_time_selection,
+        state.external_time_vector_seconds,
+    )
+    state.run_status = "Completed"
+
+    changed = controller.add_static_mask_rectangle((1, 1, 4, 4))
+
+    assert changed == 0
+    assert state.candidate_crop_plan is candidate
+    assert state.accepted_crop_plan is accepted
+    assert state.accepted_crop_plan is not None
+    assert state.accepted_crop_plan.accepted_by_user is True
+    assert (state.start_frame, state.end_frame_exclusive) == trim
+    assert (state.pre_crop_config, state.resolved_pre_crop) == pre_crop
+    assert (
+        state.timing_mode,
+        state.timing_status,
+        state.external_time_selection,
+        state.external_time_vector_seconds,
+    ) == timing
+    assert state.run_status == "Configuration changed"
+
+
+def test_no_op_static_mask_edit_does_not_invalidate_run_readiness(
+    tmp_path: Path,
+) -> None:
+    state = _state(tmp_path)
+    controller = CropReviewController(
+        state,
+        detector=_detector,
+        frame_reader=lambda _path, _index: FRAME.copy(),
+    )
+    controller.run_automatic_detection()
+    controller.add_static_mask_rectangle((1, 1, 4, 4))
+    assert state.preprocess_config is not None
+    shape = state.preprocess_config.mask.shapes[0]
+    state.run_status = "Completed"
+
+    changed = controller.replace_static_mask_shape(0, shape)
+
+    assert changed is False
+    assert state.run_status == "Completed"
+
+
+def test_invalid_static_mask_rejected_in_crop_review_before_storage(
+    tmp_path: Path,
+) -> None:
+    state = _state(tmp_path)
+    controller = CropReviewController(
+        state,
+        detector=_detector,
+        frame_reader=lambda _path, _index: FRAME.copy(),
+    )
+    controller.run_automatic_detection()
+
+    with pytest.raises(CropReviewValidationError, match="Invalid static mask"):
+        controller.add_static_mask_rectangle((99, 0, 2, 2))
+
+    assert state.preprocess_config is not None
+    assert state.preprocess_config.mask.shapes == []
 
 
 def test_manual_collection_preserves_prescribed_order_and_rejects_wrong_order(

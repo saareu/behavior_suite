@@ -51,7 +51,6 @@ def test_invalid_trim_range_is_rejected() -> None:
     [
         ("timing", "allow_frame_resampling", True),
         ("timing", "require_one_to_one_frame_mapping", False),
-        ("mask", "enabled", True),
     ],
 )
 def test_unsupported_configuration_combination_is_rejected(
@@ -61,6 +60,39 @@ def test_unsupported_configuration_combination_is_rejected(
 ) -> None:
     values = _default_mapping()
     values[section][key] = value
+
+    with pytest.raises(ValidationError):
+        PreprocessConfig.model_validate(values)
+
+
+def test_static_mask_configuration_supports_rectangles_and_polygons() -> None:
+    values = _default_mapping()
+    values["mask"] = {
+        "enabled": True,
+        "coordinate_space": "prepared_pixels",
+        "fill_value": "black",
+        "shapes": [
+            {"type": "rectangle", "x": 1, "y": 2, "width": 3, "height": 4},
+            {"type": "polygon", "vertices": [(0, 0), (4, 0), (2, 3)]},
+        ],
+    }
+
+    config = PreprocessConfig.model_validate(values)
+
+    assert config.mask.enabled is True
+    assert config.mask.coordinate_space == "prepared_pixels"
+    assert config.mask.fill_value == "black"
+    assert [shape.type for shape in config.mask.shapes] == ["rectangle", "polygon"]
+
+
+def test_static_mask_rejects_non_black_fill_and_invalid_shape() -> None:
+    values = _default_mapping()
+    values["mask"] = {
+        "enabled": True,
+        "coordinate_space": "prepared_pixels",
+        "fill_value": "white",
+        "shapes": [{"type": "rectangle", "x": 1, "y": 2, "width": 0, "height": 4}],
+    }
 
     with pytest.raises(ValidationError):
         PreprocessConfig.model_validate(values)
