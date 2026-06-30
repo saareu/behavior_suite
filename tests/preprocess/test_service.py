@@ -10,12 +10,14 @@ from preprocess.background import BackgroundEstimateResult
 from preprocess.config import (
     CanonicalResolutionConfig,
     DebugConfig,
+    MaskConfig,
     PrepareConfig,
     PreprocessConfig,
     TrimConfig,
 )
 from preprocess.crop_plan import CropMode
 from preprocess.exceptions import (
+    FFmpegRuntimeError,
     PreprocessCancelledError,
     PreprocessServiceError,
     VideoPreparationError,
@@ -131,6 +133,11 @@ def _request(
 
 def _install_probe(monkeypatch: pytest.MonkeyPatch, probe: VideoProbeResult) -> None:
     monkeypatch.setattr(service_module, "probe_video", lambda *_args, **_kwargs: probe)
+    monkeypatch.setattr(
+        service_module,
+        "ensure_supported_ffmpeg_runtime",
+        lambda **_kwargs: SimpleNamespace(ffmpeg=SimpleNamespace(path=Path("ffmpeg"))),
+    )
 
 
 def _install_fake_success_pipeline(
@@ -218,6 +225,42 @@ def test_service_rejects_absent_crop_plan(tmp_path: Path, monkeypatch: pytest.Mo
     result = PreprocessService().run(_request(project_dir, raw_path, crop_plan=None))
     assert result.success is False
     assert "CropPlan is required" in result.message
+
+
+def test_service_rejects_unsupported_ffmpeg_before_internal_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = _project(tmp_path)
+    raw_path = tmp_path / "raw.avi"
+    raw_path.write_bytes(b"raw")
+    monkeypatch.setattr(
+        service_module,
+        "ensure_supported_ffmpeg_runtime",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            FFmpegRuntimeError(
+                "Unsupported FFmpeg runtime.\n"
+                "- ffmpeg at C:\\old\\ffmpeg.exe does not support required option -fps_mode.\n"
+                "Remedy: scripts\\install_windows_gui.bat"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        service_module,
+        "probe_video",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("probe should not run after failed preflight")
+        ),
+    )
+
+    result = PreprocessService().run(_request(project_dir, raw_path))
+
+    assert result.success is False
+    assert "FFmpeg runtime preflight" in result.message
+    assert "-fps_mode" in result.message
+    assert "install_windows_gui.bat" in result.message
+    assert not (project_dir / "preprocess" / ".internal").exists()
+    assert not (project_dir / "preprocess" / "prepared_video.mp4").exists()
 
 
 @pytest.mark.parametrize("plan_accepted,request_accepted", [(False, True), (True, False)])
@@ -417,6 +460,36 @@ def test_no_ttl_success_marks_raw_pts_not_extracted(
     assert sync.external_time_status == "not_provided"
     assert sync.raw_pts_status == "not_extracted"
     assert np.all(np.isnan(sync.raw_pts_time_sec))
+
+
+def test_service_rejects_out_of_bounds_mask_before_official_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = _project(tmp_path)
+    raw_path = tmp_path / "raw.avi"
+    raw_path.write_bytes(b"raw")
+    _install_probe(monkeypatch, _probe(raw_path))
+    _install_fake_success_pipeline(monkeypatch, _validation())
+    config = PreprocessConfig.model_validate(
+        {
+            **_config().model_dump(mode="python"),
+            "mask": MaskConfig(
+                enabled=True,
+                shapes=[
+                    {"type": "rectangle", "x": 63, "y": 0, "width": 2, "height": 2}
+                ],
+            ),
+        }
+    )
+
+    result = PreprocessService().run(_request(project_dir, raw_path, config=config))
+
+    assert result.success is False
+    assert "metadata construction" in result.message
+    assert "Mask metadata is invalid" in result.message
+    assert not (project_dir / "preprocess" / "prepare_meta.json").exists()
+    assert not (project_dir / "preprocess" / "prepared_video.mp4").exists()
 
 
 def test_open_ended_no_ttl_uses_completed_prepared_count(

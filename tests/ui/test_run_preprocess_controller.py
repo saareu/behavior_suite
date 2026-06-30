@@ -11,6 +11,11 @@ from PySide6.QtWidgets import QApplication
 
 from preprocess.config import CanonicalResolutionConfig, PrepareConfig, PreprocessConfig
 from preprocess.crop_plan import CropPlan
+from preprocess.ffmpeg_runtime import (
+    ExecutableStatus,
+    FFmpegCapabilityStatus,
+    FFmpegRuntimePreflight,
+)
 from preprocess.manual_crop import make_manual_crop_plan
 from preprocess.models import (
     ExternalTimeSelection,
@@ -155,6 +160,73 @@ def _success_result(state: PreprocessSetupState) -> PreprocessResult:
     )
 
 
+def _supported_runtime(**_kwargs: Any) -> FFmpegRuntimePreflight:
+    ffmpeg = ExecutableStatus(
+        name="ffmpeg",
+        path=Path(r"C:\conda\envs\behavior_suite_gui\Library\bin\ffmpeg.exe"),
+        callable=True,
+        banner="ffmpeg version 7.1.1",
+        returncode=0,
+    )
+    ffprobe = ExecutableStatus(
+        name="ffprobe",
+        path=Path(r"C:\conda\envs\behavior_suite_gui\Library\bin\ffprobe.exe"),
+        callable=True,
+        banner="ffprobe version 7.1.1",
+        returncode=0,
+    )
+    return FFmpegRuntimePreflight(
+        ffmpeg=ffmpeg,
+        ffprobe=ffprobe,
+        capabilities=FFmpegCapabilityStatus(
+            path=ffmpeg.path or Path("ffmpeg"),
+            callable=True,
+            fps_mode_supported=True,
+            enc_time_base_demux_supported=True,
+            returncode=0,
+            modern_stage_timestamp_contract_supported=True,
+            probe_command=("ffmpeg", "-enc_time_base", "demux", "-fps_mode", "passthrough"),
+            probe_returncode=0,
+        ),
+        supported=True,
+        errors=(),
+    )
+
+
+def _unsupported_runtime(**_kwargs: Any) -> FFmpegRuntimePreflight:
+    ffmpeg = ExecutableStatus(
+        name="ffmpeg",
+        path=Path(r"C:\old\ffmpeg.exe"),
+        callable=True,
+        banner="ffmpeg version 4.3.1",
+        returncode=0,
+    )
+    ffprobe = ExecutableStatus(
+        name="ffprobe",
+        path=Path(r"C:\old\ffprobe.exe"),
+        callable=True,
+        banner="ffprobe version 4.3.1",
+        returncode=0,
+    )
+    return FFmpegRuntimePreflight(
+        ffmpeg=ffmpeg,
+        ffprobe=ffprobe,
+        capabilities=FFmpegCapabilityStatus(
+            path=ffmpeg.path or Path("ffmpeg"),
+            callable=True,
+            fps_mode_supported=False,
+            enc_time_base_demux_supported=False,
+            returncode=0,
+            modern_stage_timestamp_contract_supported=False,
+            probe_command=("ffmpeg", "-enc_time_base", "demux", "-fps_mode", "passthrough"),
+            probe_returncode=1,
+            probe_stderr="Unrecognized option 'fps_mode'.",
+        ),
+        supported=False,
+        errors=("ffmpeg at C:\\old\\ffmpeg.exe does not support required option -fps_mode.",),
+    )
+
+
 class _FakeService:
     def __init__(self, result: PreprocessResult) -> None:
         self.result = result
@@ -294,7 +366,11 @@ def test_run_action_uses_task_runner_and_service(tmp_path: Path) -> None:
     service = _FakeService(_success_result(state))
     runner = _ImmediateRunner()
     stages: list[str] = []
-    controller = RunPreprocessController(state, service=service)
+    controller = RunPreprocessController(
+        state,
+        service=service,
+        ffmpeg_preflight=_supported_runtime,
+    )
 
     request = controller.start_run(runner, on_stage=stages.append)
 
@@ -313,13 +389,36 @@ def test_duplicate_run_is_rejected_while_active(tmp_path: Path) -> None:
     state = _ready_state(tmp_path)
     service = _FakeService(_success_result(state))
     runner = _DeferredRunner()
-    controller = RunPreprocessController(state, service=service)
+    controller = RunPreprocessController(
+        state,
+        service=service,
+        ffmpeg_preflight=_supported_runtime,
+    )
     controller.start_run(runner)
 
     with pytest.raises(RunPreprocessValidationError, match="already running"):
         controller.start_run(runner)
 
     assert service.requests == []
+
+
+def test_run_start_blocks_after_failed_ffmpeg_preflight(tmp_path: Path) -> None:
+    state = _ready_state(tmp_path)
+    service = _FakeService(_success_result(state))
+    runner = _ImmediateRunner()
+    controller = RunPreprocessController(
+        state,
+        service=service,
+        ffmpeg_preflight=_unsupported_runtime,
+    )
+
+    with pytest.raises(RunPreprocessValidationError, match="-fps_mode"):
+        controller.start_run(runner)
+
+    assert runner.operations == []
+    assert service.requests == []
+    assert state.preprocess_task_running is False
+    assert "-fps_mode" in (state.last_validation_error or "")
 
 
 def test_success_summary_displays_all_six_official_outputs(tmp_path: Path) -> None:
@@ -397,7 +496,11 @@ def test_stale_pipeline_progress_and_completion_are_ignored(
     service = _FakeService(_success_result(state))
     runner = _DeferredRunner()
     visible_progress: list[GuiTaskProgressEvent] = []
-    controller = RunPreprocessController(state, service=service)
+    controller = RunPreprocessController(
+        state,
+        service=service,
+        ffmpeg_preflight=_supported_runtime,
+    )
     controller.start_run(runner, on_progress=visible_progress.append)
     context = runner.kwargs["context"]
     assert isinstance(context, GuiTaskContext)
@@ -422,7 +525,14 @@ def test_stale_pipeline_progress_and_completion_are_ignored(
     assert state.preprocess_result is None
 
 
-def test_run_page_shows_cancel_only_while_pipeline_is_active(tmp_path: Path) -> None:
+def test_run_page_shows_cancel_only_while_pipeline_is_active(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "ui.controllers.run_preprocess_controller.preflight_ffmpeg_runtime",
+        _supported_runtime,
+    )
     state = _ready_state(tmp_path)
     page = RunValidatePage(PreprocessSetupController(state=state))
 

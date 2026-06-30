@@ -45,6 +45,10 @@ class VideoPreparationError(PreprocessError):
     """Raised when a video preparation stage cannot complete safely."""
 
 
+class FFmpegRuntimeError(VideoPreparationError):
+    """Raised when the selected FFmpeg/ffprobe runtime is missing or unsupported."""
+
+
 class VideoValidationError(PreprocessError):
     """Raised when a prepared video fails one or more hard validation gates."""
 

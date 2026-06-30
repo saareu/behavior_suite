@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -11,7 +12,11 @@ from preprocess.config import (
     PreprocessConfig,
 )
 from preprocess.crop_plan import CropPlan
-from preprocess.exceptions import PreprocessCancelledError, VideoPreparationError
+from preprocess.exceptions import (
+    FFmpegRuntimeError,
+    PreprocessCancelledError,
+    VideoPreparationError,
+)
 from preprocess.manual_crop import make_manual_crop_plan
 from preprocess.video_prepare import (
     build_ffmpeg_prepare_command,
@@ -78,6 +83,14 @@ def _fractional_perspective_plan(config: PreprocessConfig) -> CropPlan:
     )
 
 
+def _install_supported_runtime(monkeypatch: pytest.MonkeyPatch, ffmpeg: Path) -> None:
+    monkeypatch.setattr(
+        video_prepare,
+        "ensure_supported_ffmpeg_runtime",
+        lambda **_kwargs: SimpleNamespace(ffmpeg=SimpleNamespace(path=ffmpeg)),
+    )
+
+
 def test_resolve_ffmpeg_binary_prefers_configured_path(tmp_path: Path) -> None:
     configured = tmp_path / "managed-ffmpeg.exe"
     configured.write_bytes(b"binary")
@@ -98,8 +111,11 @@ def test_resolve_ffmpeg_binary_uses_path_fallback(
 ) -> None:
     discovered = tmp_path / "ffmpeg.exe"
     discovered.write_bytes(b"binary")
-    monkeypatch.setattr(video_prepare, "_bundled_binary_candidates", lambda _name: ())
-    monkeypatch.setattr(video_prepare.shutil, "which", lambda _name: str(discovered))
+    monkeypatch.setattr(
+        video_prepare,
+        "_resolve_ffmpeg_binary",
+        lambda _configured_path=None: discovered.resolve(),
+    )
 
     assert resolve_ffmpeg_binary() == discovered.resolve()
 
@@ -107,10 +123,15 @@ def test_resolve_ffmpeg_binary_uses_path_fallback(
 def test_resolve_ffmpeg_binary_fails_clearly_when_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(video_prepare, "_bundled_binary_candidates", lambda _name: ())
-    monkeypatch.setattr(video_prepare.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        video_prepare,
+        "_resolve_ffmpeg_binary",
+        lambda _configured_path=None: (_ for _ in ()).throw(
+            FFmpegRuntimeError("ffmpeg executable was not found")
+        ),
+    )
 
-    with pytest.raises(VideoPreparationError, match="configured, bundled, or PATH"):
+    with pytest.raises(VideoPreparationError, match="ffmpeg executable was not found"):
         resolve_ffmpeg_binary()
 
 
@@ -329,6 +350,7 @@ def test_stage_a_partial_progress_does_not_claim_false_percentage(
     raw_path.write_bytes(b"raw")
     config = _config(canonical_enabled=False, canonical_size_wh=(320, 240))
     plan = _landscape_plan(config).model_copy(update={"accepted_by_user": True})
+    _install_supported_runtime(monkeypatch, tmp_path / "ffmpeg.exe")
     monkeypatch.setattr(video_prepare.subprocess, "Popen", _CompletedProgressProcess)
     progress = []
 
@@ -344,6 +366,8 @@ def test_stage_a_partial_progress_does_not_claim_false_percentage(
     )
 
     assert result.processed_video_time_sec == pytest.approx(2.5)
+    assert result.ffmpeg_command[result.ffmpeg_command.index("-enc_time_base") + 1] == "demux"
+    assert result.ffmpeg_command[result.ffmpeg_command.index("-fps_mode") + 1] == "passthrough"
     assert all(event.completed_units is None for event in progress)
     assert all(event.total_units is None for event in progress)
     assert all(event.is_indeterminate is True for event in progress)
@@ -384,6 +408,7 @@ def test_stage_a_cancellation_terminates_process_and_removes_partial_output(
     output_path = tmp_path / "intermediate.mp4"
     config = _config(canonical_enabled=False, canonical_size_wh=(320, 240))
     plan = _landscape_plan(config).model_copy(update={"accepted_by_user": True})
+    _install_supported_runtime(monkeypatch, tmp_path / "ffmpeg.exe")
     monkeypatch.setattr(video_prepare.subprocess, "Popen", _CancellableProcess)
     checks = 0
 

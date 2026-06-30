@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import platform
+import sys
 import tempfile
 from collections.abc import Mapping
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -13,10 +16,15 @@ import numpy as np
 import typer
 from pydantic import ValidationError
 
+import preprocess as preprocess_package
 from preprocess.cage_detection import detect_cage_crop_plan
 from preprocess.config import PreCropConfig, PreprocessConfig, load_preprocess_config
 from preprocess.crop_plan import CropPlan
 from preprocess.exceptions import PreprocessError
+from preprocess.ffmpeg_runtime import (
+    format_preflight_summary,
+    preflight_ffmpeg_runtime,
+)
 from preprocess.mat_sync_reader import (
     convert_timing_vector_to_seconds,
     validate_external_timing_vector,
@@ -351,6 +359,26 @@ def _score_text(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.6g}"
 
 
+@app.command("doctor")
+def doctor() -> None:
+    """Check that the local runtime can run preprocessing safely."""
+
+    try:
+        package_version = version("behavior-suite")
+    except PackageNotFoundError:
+        package_version = "not installed as a distribution"
+    package_location = Path(preprocess_package.__file__).resolve()
+    preflight = preflight_ffmpeg_runtime()
+
+    typer.echo(f"Python executable: {sys.executable}")
+    typer.echo(f"Python version: {platform.python_version()}")
+    typer.echo(f"behavior-suite version: {package_version}")
+    typer.echo(f"behavior-suite package location: {package_location}")
+    typer.echo(format_preflight_summary(preflight))
+    if not preflight.supported:
+        raise typer.Exit(code=1)
+
+
 @preprocess_app.command("detect-crop")
 def detect_crop(
     project_dir: Annotated[Path, typer.Option("--project-dir", help="Existing project root.")],
@@ -383,6 +411,7 @@ def detect_crop(
             raw_video,
             require_sequential_count=False,
             cache_path=get_raw_probe_cache_path(project.root_dir / "preprocess"),
+            ffprobe_path=config.encoding.ffmpeg.ffprobe_path,
         )
         trim = resolve_trim_range(
             request_start_frame=start_frame,

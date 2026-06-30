@@ -409,6 +409,10 @@ class PreprocessSetupController:
         if self._probe_function is probe_video and task_preprocess_dir is not None:
             arguments["cache_path"] = get_raw_probe_cache_path(task_preprocess_dir)
             arguments["force_recount"] = force_recount
+            if self.state.preprocess_config is not None:
+                arguments["ffprobe_path"] = (
+                    self.state.preprocess_config.encoding.ffmpeg.ffprobe_path
+                )
         return self._probe_function(path, **arguments)
 
     def apply_raw_video_probe(

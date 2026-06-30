@@ -10,10 +10,12 @@ from preprocess.background import validate_background
 from preprocess.config import (
     BackgroundConfig,
     CanonicalResolutionConfig,
+    MaskConfig,
     PrepareConfig,
     PreprocessConfig,
 )
 from preprocess.exceptions import VideoPreparationError
+from preprocess.ffmpeg_runtime import ensure_supported_ffmpeg_runtime
 from preprocess.manual_crop import make_manual_crop_plan
 from preprocess.metadata import validate_prepare_metadata
 from preprocess.models import PreprocessExecutionContext, PreprocessRequest
@@ -39,7 +41,9 @@ _FRACTIONAL_PERSPECTIVE_POINTS = np.array(
 
 def _require_ffmpeg() -> tuple[Path, Path]:
     try:
-        return resolve_ffmpeg_binary(), resolve_ffprobe_binary()
+        ffmpeg, ffprobe = resolve_ffmpeg_binary(), resolve_ffprobe_binary()
+        ensure_supported_ffmpeg_runtime(ffmpeg_path=ffmpeg, ffprobe_path=ffprobe)
+        return ffmpeg, ffprobe
     except VideoPreparationError as exc:
         pytest.skip(str(exc))
 
@@ -186,6 +190,78 @@ def test_complete_preprocess_service_run_produces_valid_official_artifacts(tmp_p
     ]
     assert stage_a_frame_events
     assert all(event.total_units == 4 for event in stage_a_frame_events)
+
+
+@pytest.mark.integration
+def test_static_mask_is_applied_to_prepared_video_background_and_metadata(
+    tmp_path: Path,
+) -> None:
+    ffmpeg, ffprobe = _require_ffmpeg()
+    project = ProjectService().create_project(tmp_path, "MaskedServiceProject")
+    raw_path = _write_raw_video(tmp_path / "raw_masked.avi")
+    config = PreprocessConfig.model_validate(
+        {
+            **_config(ffmpeg, ffprobe).model_dump(mode="python"),
+            "mask": MaskConfig(
+                enabled=True,
+                shapes=[
+                    {"type": "rectangle", "x": 0, "y": 0, "width": 10, "height": 8},
+                    {"type": "polygon", "vertices": [(20, 5), (30, 5), (25, 14)]},
+                ],
+            ),
+        }
+    )
+    request = PreprocessRequest(
+        project_dir=project.root_dir,
+        raw_video_path=raw_path,
+        config=config,
+        start_frame=2,
+        end_frame_exclusive=6,
+        crop_plan=_crop_plan(config, accepted=True),
+        crop_accepted_by_user=True,
+    )
+
+    result = PreprocessService().run(request)
+
+    assert result.success is True, result.message
+    assert result.outputs is not None
+    outputs = result.outputs
+    validation = validate_prepared_video(
+        outputs.prepared_video_path,
+        expected_frame_count=4,
+        expected_size_wh=(64, 48),
+    )
+    assert validation.is_valid is True
+    capture = cv2.VideoCapture(str(outputs.prepared_video_path))
+    try:
+        success, frame = capture.read()
+    finally:
+        capture.release()
+    assert success is True
+    assert frame is not None
+    assert frame.shape[:2] == (48, 64)
+    assert int(frame[:8, :10].max()) <= 5
+
+    background = cv2.imread(str(outputs.cropped_background_path), cv2.IMREAD_UNCHANGED)
+    assert background is not None
+    validate_background(background, (64, 48))
+    assert int(background[:8, :10].max()) <= 5
+
+    sync = load_prepared_sync_npz(outputs.prepared_sync_path)
+    assert sync.raw_decode_frame_idx.tolist() == [2, 3, 4, 5]
+    assert sync.frame_count_used_for_sleap == 4
+    with outputs.prepare_meta_path.open("r", encoding="utf-8") as stream:
+        metadata = json.load(stream)
+    validate_prepare_metadata(metadata)
+    assert metadata["mask"] == {
+        "enabled": True,
+        "coordinate_space": "prepared_pixels",
+        "fill_value": "black",
+        "shapes": [
+            {"type": "rectangle", "x": 0, "y": 0, "width": 10, "height": 8},
+            {"type": "polygon", "vertices": [[20, 5], [30, 5], [25, 14]]},
+        ],
+    }
 
 
 @pytest.mark.integration

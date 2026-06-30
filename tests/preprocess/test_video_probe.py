@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from preprocess import video_probe
-from preprocess.exceptions import VideoProbeCancelledError, VideoProbeError
+from preprocess.exceptions import FFmpegRuntimeError, VideoProbeCancelledError, VideoProbeError
 from preprocess.models import RawReadableCountProvenance
 from preprocess.raw_probe_cache import (
     RAW_PROBE_CACHE_SCHEMA_VERSION,
@@ -416,7 +416,13 @@ def test_readable_video_remains_probeable_without_ffprobe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     video_path = _write_tiny_video(tmp_path / "tiny.avi")
-    monkeypatch.setattr(video_probe.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        video_probe,
+        "resolve_ffprobe_binary",
+        lambda _path=None: (_ for _ in ()).throw(
+            FFmpegRuntimeError("ffprobe executable was not found")
+        ),
+    )
 
     result = video_probe.probe_video(video_path, require_sequential_count=False)
 

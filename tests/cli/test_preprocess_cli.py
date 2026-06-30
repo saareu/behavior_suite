@@ -11,6 +11,11 @@ from typer.testing import CliRunner
 from cli import preprocess as cli_module
 from preprocess.config import CanonicalResolutionConfig, PrepareConfig, PreprocessConfig
 from preprocess.crop_plan import CropMode
+from preprocess.ffmpeg_runtime import (
+    ExecutableStatus,
+    FFmpegCapabilityStatus,
+    FFmpegRuntimePreflight,
+)
 from preprocess.manual_crop import make_manual_crop_plan
 from preprocess.models import (
     PreprocessOutputs,
@@ -135,10 +140,86 @@ def _install_fake_service(
     monkeypatch.setattr(cli_module, "PreprocessService", FakeService)
 
 
+def _runtime_preflight(*, supported: bool) -> FFmpegRuntimePreflight:
+    ffmpeg = ExecutableStatus(
+        name="ffmpeg",
+        path=Path(r"C:\conda\envs\behavior_suite_gui\Library\bin\ffmpeg.exe"),
+        callable=True,
+        banner="ffmpeg version 7.1.1",
+        returncode=0,
+    )
+    ffprobe = ExecutableStatus(
+        name="ffprobe",
+        path=Path(r"C:\conda\envs\behavior_suite_gui\Library\bin\ffprobe.exe"),
+        callable=True,
+        banner="ffprobe version 7.1.1",
+        returncode=0,
+    )
+    capabilities = FFmpegCapabilityStatus(
+        path=ffmpeg.path or Path("ffmpeg"),
+        callable=True,
+        fps_mode_supported=supported,
+        enc_time_base_demux_supported=supported,
+        returncode=0,
+        modern_stage_timestamp_contract_supported=supported,
+        probe_command=("ffmpeg", "-enc_time_base", "demux", "-fps_mode", "passthrough"),
+        probe_returncode=0 if supported else 1,
+        probe_stderr=None if supported else "Unrecognized option 'fps_mode'.",
+    )
+    return FFmpegRuntimePreflight(
+        ffmpeg=ffmpeg,
+        ffprobe=ffprobe,
+        capabilities=capabilities,
+        supported=supported,
+        errors=()
+        if supported
+        else ("ffmpeg at C:\\old\\ffmpeg.exe does not support required option -fps_mode.",),
+    )
+
+
 def test_top_level_help_works() -> None:
     result = runner.invoke(cli_module.app, ["--help"])
     assert result.exit_code == 0
     assert "preprocess" in result.output
+
+
+def test_doctor_exits_zero_for_supported_mocked_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli_module,
+        "preflight_ffmpeg_runtime",
+        lambda: _runtime_preflight(supported=True),
+    )
+
+    result = runner.invoke(cli_module.app, ["doctor"])
+
+    assert result.exit_code == 0, result.output
+    assert "Python executable:" in result.output
+    assert "behavior-suite package location:" in result.output
+    assert "ffmpeg version 7.1.1" in result.output
+    assert "supports_fps_mode: yes" in result.output
+    assert "supports_named_enc_time_base_demux: yes" in result.output
+    assert "supports_modern_stage_timestamp_contract: yes" in result.output
+
+
+def test_doctor_exits_nonzero_for_unsupported_mocked_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli_module,
+        "preflight_ffmpeg_runtime",
+        lambda: _runtime_preflight(supported=False),
+    )
+
+    result = runner.invoke(cli_module.app, ["doctor"])
+
+    assert result.exit_code == 1
+    assert "unsupported" in result.output
+    assert "supports_fps_mode: no" in result.output
+    assert "supports_named_enc_time_base_demux: no" in result.output
+    assert "supports_modern_stage_timestamp_contract: no" in result.output
+    assert "scripts\\install_windows_gui.bat" in result.output
 
 
 def test_preprocess_help_works() -> None:

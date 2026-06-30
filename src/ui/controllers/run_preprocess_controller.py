@@ -17,6 +17,11 @@ from pydantic import ValidationError
 
 from preprocess.config import PreprocessConfig, TrimConfig
 from preprocess.exceptions import PreprocessCancelledError, PreprocessError
+from preprocess.ffmpeg_runtime import (
+    INSTALLER_REMEDIATION,
+    FFmpegRuntimePreflight,
+    preflight_ffmpeg_runtime,
+)
 from preprocess.models import (
     OperationProgress,
     PreprocessExecutionContext,
@@ -104,6 +109,15 @@ class RunResultSummary:
     artifacts_validated: bool
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeReadinessSummary:
+    """Short GUI projection of the supported FFmpeg runtime preflight."""
+
+    supported: bool
+    message: str
+    detail: str
+
+
 def _official_output_rows(outputs: PreprocessOutputs) -> tuple[tuple[str, Path], ...]:
     return (
         ("Prepared video", outputs.prepared_video_path),
@@ -138,11 +152,13 @@ class RunPreprocessController:
         service: _ServiceProtocol | None = None,
         folder_opener: FolderOpener = open_folder_in_platform_explorer,
         task_coordinator: GuiTaskCoordinator | None = None,
+        ffmpeg_preflight: Callable[..., FFmpegRuntimePreflight] | None = None,
     ) -> None:
         self.state = state
         self._service = service or PreprocessService()
         self._folder_opener = folder_opener
         self.task_coordinator = task_coordinator or GuiTaskCoordinator()
+        self._ffmpeg_preflight = ffmpeg_preflight or preflight_ffmpeg_runtime
         self._started_monotonic: float | None = None
 
     def validate_preconditions(self) -> None:
@@ -317,6 +333,9 @@ class RunPreprocessController:
             raise self._validation_error("A preprocessing task is already running.")
         self._set_stage("Preparing preprocessing run", on_stage)
         request = self.build_request()
+        runtime = self.runtime_readiness_summary()
+        if not runtime.supported:
+            raise self._validation_error(runtime.detail)
         try:
             context = self.task_coordinator.begin(
                 task_kind=GuiTaskKind.PREPROCESS_RUN,
@@ -407,6 +426,40 @@ class RunPreprocessController:
                 raise self._validation_error(str(exc)) from exc
             raise
         return request
+
+    def runtime_readiness_summary(self) -> RuntimeReadinessSummary:
+        """Return a concise FFmpeg readiness summary for Run and Validate."""
+
+        config = self.state.preprocess_config
+        if config is None:
+            message = "FFmpeg runtime: not checked — preprocessing config is not loaded."
+            return RuntimeReadinessSummary(
+                supported=False,
+                message=message,
+                detail=message,
+            )
+        preflight = self._ffmpeg_preflight(
+            ffmpeg_path=config.encoding.ffmpeg.ffmpeg_path,
+            ffprobe_path=config.encoding.ffmpeg.ffprobe_path,
+        )
+        if preflight.supported:
+            path = preflight.ffmpeg.path
+            return RuntimeReadinessSummary(
+                supported=True,
+                message=f"FFmpeg runtime: ready ({path})",
+                detail="FFmpeg runtime is supported.",
+            )
+        first_error = preflight.errors[0] if preflight.errors else "Unknown FFmpeg runtime error."
+        detail = (
+            "FFmpeg runtime is unsupported.\n"
+            f"{first_error}\n"
+            f"Remedy: {preflight.remediation or INSTALLER_REMEDIATION}"
+        )
+        return RuntimeReadinessSummary(
+            supported=False,
+            message=f"FFmpeg runtime: unsupported — {first_error}",
+            detail=detail,
+        )
 
     def execute_request(
         self,

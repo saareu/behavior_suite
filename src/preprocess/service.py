@@ -7,7 +7,6 @@ import logging
 import math
 import platform
 import shutil
-import subprocess
 import time
 import uuid
 from importlib.metadata import PackageNotFoundError, version
@@ -28,6 +27,11 @@ from preprocess.exceptions import (
     PreprocessCancelledError,
     PreprocessError,
     PreprocessServiceError,
+)
+from preprocess.ffmpeg_runtime import (
+    check_executable_version,
+    ensure_supported_ffmpeg_runtime,
+    resolve_ffprobe_binary,
 )
 from preprocess.logging_utils import create_processing_logger
 from preprocess.metadata import (
@@ -60,7 +64,6 @@ from preprocess.sync_writer import (
 from preprocess.validation import PreparedVideoValidationResult, validate_prepared_video
 from preprocess.video_prepare import (
     reencode_intermediate_with_opencv,
-    resolve_ffprobe_binary,
     run_ffmpeg_prepare,
 )
 from preprocess.video_probe import probe_video
@@ -378,16 +381,8 @@ def _build_sync(
 def _executable_version(executable: Path | None) -> str | None:
     if executable is None:
         return None
-    try:
-        completed = subprocess.run(
-            [str(executable), "-version"], capture_output=True, text=True, check=False, timeout=10
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if completed.returncode != 0:
-        return None
-    lines = completed.stdout.splitlines()
-    return lines[0].strip() if lines else None
+    status = check_executable_version(executable.name.split(".")[0], executable)
+    return status.banner if status.callable else None
 
 
 def _software_environment(
@@ -550,6 +545,19 @@ class PreprocessService:
             report("Preparing preprocessing run")
             raise_if_cancelled()
             project = ProjectService().open_project(request.project_dir)
+
+            current_stage = "configuration validation"
+            try:
+                config = PreprocessConfig.model_validate(request.config.model_dump(mode="python"))
+            except ValidationError as exc:
+                raise PreprocessServiceError(f"Preprocess configuration is invalid: {exc}") from exc
+
+            current_stage = "FFmpeg runtime preflight"
+            ensure_supported_ffmpeg_runtime(
+                ffmpeg_path=config.encoding.ffmpeg.ffmpeg_path,
+                ffprobe_path=config.encoding.ffmpeg.ffprobe_path,
+            )
+
             outputs = PreprocessOutputs.from_preprocess_dir(get_preprocess_dir(project))
             internal_dir = outputs.preprocess_dir / ".internal"
             internal_dir.mkdir(parents=True, exist_ok=True)
@@ -558,13 +566,7 @@ class PreprocessService:
             staged_outputs = PreprocessOutputs.from_preprocess_dir(staging_dir)
             logger = create_processing_logger(outputs.processing_log_path)
             logger.info("run started project=%s", project.name)
-
-            current_stage = "configuration validation"
             logger.info("stage=config_validation")
-            try:
-                config = PreprocessConfig.model_validate(request.config.model_dump(mode="python"))
-            except ValidationError as exc:
-                raise PreprocessServiceError(f"Preprocess configuration is invalid: {exc}") from exc
 
             current_stage = "raw video probe"
             logger.info("stage=raw_video_probe")
@@ -577,6 +579,7 @@ class PreprocessService:
                 require_sequential_count=requires_raw_count,
                 cancellation_requested=execution.cancellation_requested,
                 cache_path=get_raw_probe_cache_path(outputs.preprocess_dir),
+                ffprobe_path=config.encoding.ffmpeg.ffprobe_path,
             )
 
             current_stage = "trim resolution"

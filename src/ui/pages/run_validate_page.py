@@ -101,6 +101,12 @@ class RunValidatePage(QWidget):
         action_row.addWidget(self.open_folder_button)
         action_row.addStretch(1)
 
+        self.ffmpeg_runtime_label = QLabel()
+        self.ffmpeg_runtime_label.setWordWrap(True)
+        self.ffmpeg_runtime_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+
         self.activity = QProgressBar()
         self.activity.setRange(0, 0)
         self.activity.setVisible(False)
@@ -142,6 +148,7 @@ class RunValidatePage(QWidget):
         content_layout.addWidget(review_group)
         content_layout.addWidget(output_group)
         content_layout.addLayout(action_row)
+        content_layout.addWidget(self.ffmpeg_runtime_label)
         content_layout.addLayout(activity_row)
         content_layout.addWidget(self.progress_details)
         content_layout.addWidget(result_group)
@@ -192,10 +199,15 @@ class RunValidatePage(QWidget):
         else:
             self._clear_review()
         running = self.controller.state.preprocess_task_running
+        runtime = self.controller.runtime_readiness_summary()
+        self.ffmpeg_runtime_label.setText(runtime.message)
+        self.ffmpeg_runtime_label.setStyleSheet(
+            "color: #176b2c;" if runtime.supported else "color: #b00020;"
+        )
         self.activity.setVisible(running)
         self.cancel_button.setVisible(running)
         self.cancel_button.setEnabled(running)
-        self.run_button.setEnabled(self.controller.can_run())
+        self.run_button.setEnabled(self.controller.can_run() and runtime.supported)
         self.open_folder_button.setEnabled(
             not running and self.controller.can_open_preprocess_folder()
         )

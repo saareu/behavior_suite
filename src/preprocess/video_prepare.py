@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 import os
 import queue
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,17 +26,27 @@ from preprocess.crop_plan import (
 )
 from preprocess.exceptions import (
     CropPlanError,
+    FFmpegRuntimeError,
     PreprocessCancelledError,
     VideoPreparationError,
     VideoValidationError,
 )
+from preprocess.ffmpeg_runtime import (
+    ensure_supported_ffmpeg_runtime,
+)
+from preprocess.ffmpeg_runtime import (
+    resolve_ffmpeg_binary as _resolve_ffmpeg_binary,
+)
+from preprocess.ffmpeg_runtime import (
+    resolve_ffprobe_binary as _resolve_ffprobe_binary,
+)
+from preprocess.masking import apply_static_mask_to_frame, validate_static_mask
 from preprocess.models import OperationProgress
 from preprocess.validation import (
     PreparedVideoValidationResult,
     validate_prepared_video,
 )
 
-_BINARY_DIRECTORY_NAME = "bin"
 # Stage A decomposes a composed float64 CropPlan transform. This local integer
 # tolerance admits only floating-point solve/composition noise; it is not a
 # tolerance on the user's raw quadrilateral or a license to alter crop geometry.
@@ -118,60 +127,30 @@ class FinalReencodeResult(BaseModel):
     validation_result: PreparedVideoValidationResult
 
 
-def _bundled_binary_candidates(binary_name: str) -> tuple[Path, ...]:
-    executable_name = f"{binary_name}.exe" if os.name == "nt" else binary_name
-    repository_root = Path(__file__).resolve().parents[2]
-    candidates = [repository_root / _BINARY_DIRECTORY_NAME / executable_name]
-    frozen_root = getattr(sys, "_MEIPASS", None)
-    if frozen_root is not None:
-        candidates.insert(
-            0,
-            Path(str(frozen_root)) / _BINARY_DIRECTORY_NAME / executable_name,
-        )
-    return tuple(candidates)
-
-
-def _resolve_binary(binary_name: str, configured_path: Path | None) -> Path:
-    if configured_path is not None:
-        explicit_path = Path(configured_path).expanduser().resolve()
-        if not explicit_path.is_file():
-            raise VideoPreparationError(
-                f"Configured {binary_name} executable does not exist: {explicit_path}"
-            )
-        return explicit_path
-
-    for candidate in _bundled_binary_candidates(binary_name):
-        if candidate.is_file():
-            return candidate.resolve()
-
-    discovered = shutil.which(binary_name)
-    if discovered is None:
-        raise VideoPreparationError(
-            f"{binary_name} executable was not found in configured, bundled, or PATH locations."
-        )
-    return Path(discovered).expanduser().resolve()
-
-
 def resolve_ffmpeg_binary(configured_path: Path | None = None) -> Path:
-    """Resolve ffmpeg by explicit path, bundled location, then ``PATH``.
+    """Resolve ffmpeg through the shared runtime resolver.
 
     Raises:
-        VideoPreparationError: If an explicit path is invalid or no executable
-            can be resolved.
+        VideoPreparationError: If no executable can be resolved.
     """
 
-    return _resolve_binary("ffmpeg", configured_path)
+    try:
+        return _resolve_ffmpeg_binary(configured_path)
+    except FFmpegRuntimeError as exc:
+        raise VideoPreparationError(str(exc)) from exc
 
 
 def resolve_ffprobe_binary(configured_path: Path | None = None) -> Path:
-    """Resolve ffprobe by explicit path, bundled location, then ``PATH``.
+    """Resolve ffprobe through the shared runtime resolver.
 
     Raises:
-        VideoPreparationError: If an explicit path is invalid or no executable
-            can be resolved.
+        VideoPreparationError: If no executable can be resolved.
     """
 
-    return _resolve_binary("ffprobe", configured_path)
+    try:
+        return _resolve_ffprobe_binary(configured_path)
+    except FFmpegRuntimeError as exc:
+        raise VideoPreparationError(str(exc)) from exc
 
 
 def _validate_trim(
@@ -748,6 +727,14 @@ def run_ffmpeg_prepare(
         raise VideoPreparationError(
             "CropPlan must be explicitly accepted before ffmpeg preparation."
         )
+    try:
+        runtime = ensure_supported_ffmpeg_runtime(
+            ffmpeg_path=config.encoding.ffmpeg.ffmpeg_path,
+            ffprobe_path=config.encoding.ffmpeg.ffprobe_path,
+        )
+    except FFmpegRuntimeError as exc:
+        raise VideoPreparationError(str(exc)) from exc
+    assert runtime.ffmpeg.path is not None
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path = output_path.resolve()
 
@@ -758,6 +745,7 @@ def run_ffmpeg_prepare(
         config,
         start_frame,
         end_frame_exclusive,
+        ffmpeg_binary=runtime.ffmpeg.path,
     )
     if expected_frame_count is not None and (
         isinstance(expected_frame_count, bool)
@@ -979,8 +967,10 @@ def reencode_intermediate_with_opencv(
     """Sequentially re-encode an ffmpeg intermediate through OpenCV.
 
     Exactly one output frame is written for each successful sequential input
-    decode. No resize, frame-rate conversion, temporal resampling, masking, or
-    other frame transform is performed. The output is written beside the
+    decode. No resize, frame-rate conversion, temporal resampling, or geometry
+    transform is performed. An enabled static prepared-coordinate mask is
+    applied after all Stage A spatial geometry and before final writing. The
+    output is written beside the
     requested destination under a temporary name, strictly validated, and
     atomically moved into place only after validation succeeds.
 
@@ -993,6 +983,10 @@ def reencode_intermediate_with_opencv(
 
     fps = _validate_stage_b_fps(output_fps)
     expected_size = _validate_stage_b_geometry(output_size_wh)
+    try:
+        validate_static_mask(config.mask, expected_size)
+    except VideoPreparationError as exc:
+        raise VideoPreparationError(f"Static mask configuration is invalid: {exc}") from exc
     if expected_frame_count is not None and (
         isinstance(expected_frame_count, bool)
         or not isinstance(expected_frame_count, int)
@@ -1096,7 +1090,12 @@ def reencode_intermediate_with_opencv(
                     f"Intermediate frame {frames_written} has size {frame_size}; "
                     f"expected {expected_size}. Stage B does not resize frames."
                 )
-            # Reserved insertion point for future prepared-coordinate transforms.
+            try:
+                frame = apply_static_mask_to_frame(frame, config.mask)
+            except VideoPreparationError as exc:
+                raise VideoPreparationError(
+                    f"Could not apply static mask to prepared frame {frames_written}: {exc}"
+                ) from exc
             try:
                 writer.write(frame)
             except cv2.error as exc:

@@ -100,6 +100,62 @@ The `project` module is shared infrastructure and is intentionally separate from
 
 ---
 
+## Windows GUI quick start
+
+The supported Windows desktop runtime is:
+
+```text
+Python 3.12
+conda-forge FFmpeg 7.1.x, including ffprobe from the same package
+conda-forge PySide6 / Qt GUI dependencies
+behavior_suite installed from the current checkout in editable mode
+```
+
+Recommended first-time setup:
+
+```bat
+REM 1. Install Miniforge or Anaconda once.
+REM 2. Clone this repository.
+scripts\install_windows_gui.bat
+scripts\launch_windows_gui.bat
+```
+
+The installer creates or updates the local `behavior_suite_gui` Conda
+environment from `environment-gui.yml`, installs Python 3.12, FFmpeg 7.1.1,
+ffprobe, and PySide6 6.11.1 from conda-forge, installs this checkout with
+`python -m pip install -e .`, verifies `PySide6.QtWidgets` imports correctly,
+and runs `behavior-suite doctor`. It does not require PowerShell, does not
+require `conda activate`, and does not modify the user's base environment.
+
+Normal update workflow:
+
+```bat
+git pull
+scripts\install_windows_gui.bat
+scripts\launch_windows_gui.bat
+```
+
+Check the selected runtime manually:
+
+```bat
+conda run -n behavior_suite_gui behavior-suite doctor
+conda run -n behavior_suite_gui ffmpeg -version
+```
+
+Arbitrary system-PATH FFmpeg installations are not the supported Windows GUI
+installation route. The application verifies the actual selected `ffmpeg` and
+`ffprobe` executables before preprocessing and rejects unsupported tools, such
+as FFmpeg builds that lack `-fps_mode` or named `-enc_time_base demux` support.
+
+macOS/Linux developers may continue to use a normal virtual environment or
+Conda environment and install the package with `pip install -e ".[dev,gui]"`,
+provided their selected FFmpeg/ffprobe runtime passes `behavior-suite doctor`.
+This pip-only GUI setup is for developer use and is not the supported Windows
+lab installer path. The tested first-time installer workflow above is currently
+Windows-specific and uses Conda-forge PySide6 instead of pip-installed PySide6.
+
+---
+
 ## Command-Line Interface
 
 Install the project and inspect the available preprocessing commands:
@@ -125,7 +181,10 @@ Crop detection never accepts a crop automatically. Review the detected JSON,
 create a separate accepted JSON with `accept-crop`, and pass only that accepted
 plan to `run`.
 
-### Desktop GUI setup
+### Developer pip-only desktop GUI setup
+
+This path is for non-lab developer environments. It is not the supported
+Windows GUI installer workflow above.
 
 ```powershell
 pip install -e ".[dev,gui]"
@@ -292,24 +351,11 @@ When temporal units are used, values are converted to seconds and stored as `ext
 
 ## Installation
 
-Installation instructions will be added when the initial core engine is implemented.
-
-The intended environment includes:
-
-```text
-Python
-NumPy
-OpenCV
-SciPy
-h5py
-Pydantic
-PyYAML
-ffmpeg
-ffprobe
-pytest
-```
-
-The desktop application will use managed or bundled `ffmpeg` and `ffprobe` binaries rather than relying on arbitrary system PATH settings.
+Use the Windows GUI quick start above for normal Windows desktop use. The
+supported Windows runtime baseline is Python 3.12 with conda-forge FFmpeg 7.1.1
+and conda-forge PySide6 6.11.1.
+The launcher runs through `conda run -n behavior_suite_gui`, so GUI startup and
+preprocessing do not silently fall back to an older system `ffmpeg.exe`.
 
 ---
 

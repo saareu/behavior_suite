@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import shutil
 import subprocess
 import time
 from collections.abc import Callable
@@ -15,7 +14,8 @@ from typing import Any
 import cv2
 import numpy as np
 
-from preprocess.exceptions import VideoProbeCancelledError, VideoProbeError
+from preprocess.exceptions import FFmpegRuntimeError, VideoProbeCancelledError, VideoProbeError
+from preprocess.ffmpeg_runtime import resolve_ffprobe_binary
 from preprocess.models import (
     OperationProgress,
     RawReadableCountProvenance,
@@ -85,7 +85,7 @@ def _rational_to_positive_float(value: Any) -> float | None:
     return numerator / denominator
 
 
-def probe_video_ffprobe(path: Path) -> dict[str, Any]:
+def probe_video_ffprobe(path: Path, *, ffprobe_path: Path | None = None) -> dict[str, Any]:
     """Return ffprobe JSON metadata for the first video stream.
 
     Raises:
@@ -95,12 +95,13 @@ def probe_video_ffprobe(path: Path) -> dict[str, Any]:
     """
 
     video_path = _validate_video_path(path)
-    ffprobe_binary = shutil.which("ffprobe")
-    if ffprobe_binary is None:
-        raise VideoProbeError("ffprobe executable was not found.")
+    try:
+        ffprobe_binary = resolve_ffprobe_binary(ffprobe_path)
+    except FFmpegRuntimeError as exc:
+        raise VideoProbeError(str(exc)) from exc
 
     command = [
-        ffprobe_binary,
+        str(ffprobe_binary),
         "-v",
         "error",
         "-select_streams",
@@ -392,6 +393,7 @@ def probe_video(
     progress_callback: Callable[[OperationProgress], None] | None = None,
     cache_path: Path | None = None,
     force_recount: bool = False,
+    ffprobe_path: Path | None = None,
 ) -> VideoProbeResult:
     """Probe a readable video with OpenCV and ffprobe when available.
 
@@ -463,7 +465,7 @@ def probe_video(
     ffprobe_metadata: dict[str, Any] | None = None
     ffprobe_error: str | None = None
     try:
-        ffprobe_metadata = probe_video_ffprobe(video_path)
+        ffprobe_metadata = probe_video_ffprobe(video_path, ffprobe_path=ffprobe_path)
     except VideoProbeError as exc:
         ffprobe_error = str(exc)
 

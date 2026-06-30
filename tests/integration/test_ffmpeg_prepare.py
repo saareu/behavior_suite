@@ -13,6 +13,7 @@ from preprocess.config import (
     PreprocessConfig,
 )
 from preprocess.exceptions import VideoPreparationError
+from preprocess.ffmpeg_runtime import ensure_supported_ffmpeg_runtime
 from preprocess.manual_crop import make_manual_crop_plan
 from preprocess.pre_crop import resolve_pre_crop
 from preprocess.video_prepare import (
@@ -63,7 +64,9 @@ _MARKER_COLORS_BGR = (
 
 def _require_ffmpeg() -> tuple[Path, Path]:
     try:
-        return resolve_ffmpeg_binary(), resolve_ffprobe_binary()
+        ffmpeg, ffprobe = resolve_ffmpeg_binary(), resolve_ffprobe_binary()
+        ensure_supported_ffmpeg_runtime(ffmpeg_path=ffmpeg, ffprobe_path=ffprobe)
+        return ffmpeg, ffprobe
     except VideoPreparationError as exc:
         pytest.skip(str(exc))
 

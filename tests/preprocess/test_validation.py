@@ -5,12 +5,13 @@ import numpy as np
 import pytest
 
 from preprocess import validation, video_prepare
-from preprocess.config import PreprocessConfig
+from preprocess.config import MaskConfig, PreprocessConfig
 from preprocess.exceptions import (
     PreprocessCancelledError,
     VideoPreparationError,
     VideoValidationError,
 )
+from preprocess.masking import apply_static_mask_to_frame, rasterize_static_mask
 from preprocess.validation import (
     PreparedVideoValidationResult,
     validate_prepared_video,
@@ -27,12 +28,13 @@ class _FakeCapture:
         size_wh: tuple[int, int] = (64, 48),
         fps: float = 10.0,
         readable_count: int = 3,
+        frames: list[np.ndarray] | None = None,
     ) -> None:
         self._opened = opened
         self._reported_count = reported_count
         self._size_wh = size_wh
         self._fps = fps
-        self._frames = [
+        self._frames = frames or [
             np.zeros((size_wh[1], size_wh[0], 3), dtype=np.uint8)
             for _index in range(readable_count)
         ]
@@ -66,12 +68,14 @@ class _FakeWriter:
     def __init__(self, path: str) -> None:
         self.path = Path(path)
         self.frames_written = 0
+        self.frames: list[np.ndarray] = []
         self.released = False
 
     def isOpened(self) -> bool:
         return True
 
-    def write(self, _frame: np.ndarray) -> None:
+    def write(self, frame: np.ndarray) -> None:
+        self.frames.append(np.array(frame, copy=True))
         self.frames_written += 1
 
     def release(self) -> None:
@@ -335,6 +339,134 @@ def test_nonpositive_or_nonfinite_stage_b_output_fps_fails(
         )
 
 
+def test_disabled_or_empty_static_mask_leaves_frames_unchanged() -> None:
+    frame = np.full((5, 6, 3), 100, dtype=np.uint8)
+
+    disabled = apply_static_mask_to_frame(
+        frame,
+        MaskConfig(
+            enabled=False,
+            shapes=[{"type": "rectangle", "x": 1, "y": 1, "width": 2, "height": 2}],
+        ),
+    )
+    empty = apply_static_mask_to_frame(frame, MaskConfig(enabled=True, shapes=[]))
+
+    np.testing.assert_array_equal(disabled, frame)
+    np.testing.assert_array_equal(empty, frame)
+
+
+def test_rectangle_static_mask_blacks_exact_prepared_pixel_region() -> None:
+    frame = np.full((5, 6, 3), 100, dtype=np.uint8)
+    mask = MaskConfig(
+        enabled=True,
+        shapes=[{"type": "rectangle", "x": 1, "y": 2, "width": 3, "height": 2}],
+    )
+
+    masked = apply_static_mask_to_frame(frame, mask)
+
+    assert np.all(masked[2:4, 1:4] == 0)
+    assert np.all(masked[:2] == 100)
+    assert np.all(masked[4] == 100)
+    assert np.all(masked[2:4, :1] == 100)
+    assert np.all(masked[2:4, 4:] == 100)
+
+
+def test_polygon_and_overlapping_static_masks_are_black() -> None:
+    mask = MaskConfig(
+        enabled=True,
+        shapes=[
+            {"type": "polygon", "vertices": [(1, 1), (5, 1), (1, 5)]},
+            {"type": "rectangle", "x": 2, "y": 2, "width": 3, "height": 2},
+        ],
+    )
+    frame = np.full((7, 7), 200, dtype=np.uint8)
+
+    raster = rasterize_static_mask(mask, (7, 7))
+    masked = apply_static_mask_to_frame(frame, mask)
+
+    assert raster[2, 2] == 255
+    assert raster[3, 4] == 255
+    assert masked[2, 2] == 0
+    assert masked[3, 4] == 0
+    assert masked[6, 6] == 200
+
+
+def test_static_mask_applies_to_grayscale_and_bgr_without_shape_change() -> None:
+    mask = MaskConfig(
+        enabled=True,
+        shapes=[{"type": "rectangle", "x": 0, "y": 0, "width": 2, "height": 2}],
+    )
+    gray = np.full((4, 5), 120, dtype=np.uint8)
+    bgr = np.full((4, 5, 3), 120, dtype=np.uint8)
+
+    masked_gray = apply_static_mask_to_frame(gray, mask)
+    masked_bgr = apply_static_mask_to_frame(bgr, mask)
+
+    assert masked_gray.shape == gray.shape
+    assert masked_bgr.shape == bgr.shape
+    assert np.all(masked_gray[:2, :2] == 0)
+    assert np.all(masked_bgr[:2, :2, :] == 0)
+    assert np.all(masked_gray[2:, 2:] == 120)
+    assert np.all(masked_bgr[2:, 2:, :] == 120)
+
+
+@pytest.mark.parametrize(
+    ("mask", "match"),
+    [
+        (
+            {
+                "enabled": True,
+                "shapes": [{"type": "rectangle", "x": 5, "y": 0, "width": 2, "height": 2}],
+            },
+            "outside",
+        ),
+        (
+            {
+                "enabled": True,
+                "shapes": [{"type": "polygon", "vertices": [(0, 0), (1, 1)]}],
+            },
+            "at least three",
+        ),
+        (
+            {
+                "enabled": True,
+                "shapes": [{"type": "polygon", "vertices": [(0, 0), (1, 1), (2, 2)]}],
+            },
+            "nonzero area",
+        ),
+        (
+            {
+                "enabled": True,
+                "shapes": [
+                    {"type": "polygon", "vertices": [(0, 0), (0, 1), (1, 0), (0, 2)]}
+                ],
+            },
+            "simple",
+        ),
+        (
+            {
+                "enabled": True,
+                "shapes": [{"type": "polygon", "vertices": [(0, 0), (6, 1), (0, 3)]}],
+            },
+            "outside",
+        ),
+        (
+            {
+                "enabled": True,
+                "shapes": [
+                    {"type": "rectangle", "x": 0.5, "y": 0, "width": 2, "height": 2}
+                ],
+            },
+            "integer",
+        ),
+    ],
+)
+def test_invalid_static_mask_geometry_fails_clearly(mask: dict, match: str) -> None:
+    with pytest.raises((ValueError, VideoPreparationError), match=match):
+        config = MaskConfig.model_validate(mask)
+        rasterize_static_mask(config, (6, 6))
+
+
 def test_stage_b_reports_monotonic_exact_frame_progress(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -381,6 +513,60 @@ def test_stage_b_reports_monotonic_exact_frame_progress(
     assert completed == [0, 3]
     assert all(event.total_units == 3 for event in progress)
     assert result.frames_written == 3
+
+
+def test_stage_b_static_mask_writes_black_pixels_without_changing_counts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intermediate = tmp_path / "intermediate.mp4"
+    intermediate.write_bytes(b"intermediate")
+    frame = np.full((48, 64, 3), 100, dtype=np.uint8)
+    capture = _FakeCapture(readable_count=2, reported_count=2, frames=[frame, frame.copy()])
+    writers: list[_FakeWriter] = []
+    monkeypatch.setattr(video_prepare.cv2, "VideoCapture", lambda _path: capture)
+    monkeypatch.setattr(
+        video_prepare.cv2,
+        "VideoWriter",
+        lambda path, *_args: writers.append(_FakeWriter(path)) or writers[-1],
+    )
+    monkeypatch.setattr(video_prepare.cv2, "VideoWriter_fourcc", lambda *_args: 0)
+    monkeypatch.setattr(
+        video_prepare,
+        "validate_prepared_video",
+        lambda *_args, **_kwargs: PreparedVideoValidationResult(
+            is_valid=True,
+            errors=(),
+            opencv_reported_frame_count=2,
+            opencv_readable_frame_count=2,
+            opencv_reported_size_wh=(64, 48),
+            opencv_reported_fps=10.0,
+            expected_frame_count=2,
+            expected_size_wh=(64, 48),
+        ),
+    )
+    config = PreprocessConfig(
+        mask=MaskConfig(
+            enabled=True,
+            shapes=[{"type": "rectangle", "x": 2, "y": 3, "width": 4, "height": 5}],
+        )
+    )
+
+    result = reencode_intermediate_with_opencv(
+        intermediate_video_path=intermediate,
+        prepared_video_path=tmp_path / "prepared.mp4",
+        output_fps=10.0,
+        output_size_wh=(64, 48),
+        config=config,
+        expected_frame_count=2,
+    )
+
+    assert result.frames_written == 2
+    assert len(writers) == 1
+    assert len(writers[0].frames) == 2
+    assert writers[0].frames[0].shape == (48, 64, 3)
+    assert np.all(writers[0].frames[0][3:8, 2:6] == 0)
+    assert np.all(writers[0].frames[0][:3] == 100)
 
 
 def test_stage_b_cancellation_preserves_existing_prepared_video(
