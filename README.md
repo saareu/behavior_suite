@@ -16,6 +16,18 @@ Current development focus:
 Subsystem 01 — Video Preprocessing
 ```
 
+Active Subsystem 01 documentation:
+
+```text
+docs/preprocess_subsystem_spec_v1.md
+docs/subsystem_01_status_and_roadmap.md
+docs/preprocess_v2_6_geometry_modes_design.md
+docs/ai_coding_guide.md
+```
+
+`docs/ai_coding_guide.md` is repository-wide development guidance, not a
+Subsystem 01 functional specification.
+
 Planned future subsystems include:
 
 ```text
@@ -246,7 +258,19 @@ The authoritative design document is:
 docs/preprocess_subsystem_spec_v1.md
 ```
 
-The implementation sequence is defined in:
+The current status, closure checks, and roadmap are summarized in:
+
+```text
+docs/subsystem_01_status_and_roadmap.md
+```
+
+The forward-looking spatial-geometry design reference is:
+
+```text
+docs/preprocess_v2_6_geometry_modes_design.md
+```
+
+The original v1 implementation sequence remains as historical planning context:
 
 ```text
 docs/preprocess_implementation_plan_v1.md

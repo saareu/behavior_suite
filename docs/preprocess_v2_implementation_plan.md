@@ -4,6 +4,25 @@
 **Planning baseline:** `preprocess-v1-field-tested` (`9074a1d`)  
 **Document date:** 2026-06-23
 
+## Current closure note
+
+This document remains useful milestone history and design context, but the compact current status, closure checks, and deferred roadmap for Subsystem 01 are now summarized in `docs/subsystem_01_status_and_roadmap.md`.
+
+The normal user workflow remains:
+
+```text
+Choose video
+→ inspect / trim / optionally pre-crop
+→ choose Detect cage automatically or Manual ROI
+→ review accepted geometry
+→ optionally add static exclusion masks
+→ prepare video
+```
+
+Future detector presets and scene characterization are optional developer/design concepts, not mandatory user-facing steps. Detector presets must be derived from representative frames plus an accepted automatic candidate or accepted manual ROI; they must not be recommended from FFmpeg/video probe facts alone.
+
+The V2.6 geometry design is broader than visual pre-crop. It covers future final spatial geometry modes and the requirement that every prepared video retain one authoritative raw-to-prepared and prepared-to-raw transform description.
+
 ## 1. V2 scope and relationship to the v1 tag
 
 Preprocess v2 is an incremental extension of the field-tested v1 subsystem. The

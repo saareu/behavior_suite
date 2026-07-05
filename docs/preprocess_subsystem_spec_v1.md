@@ -95,6 +95,39 @@ When implemented, the mask shall:
 7. Store mask geometry in `prepare_meta.json`.
 8. Not require a separate mask-image artifact.
 
+### 3.4 Current Closure Clarifications
+
+This specification remains the canonical source for Subsystem 01 scientific invariants and artifact contracts. Current implementation status, closure checks, and deferred roadmap items are summarized in `docs/subsystem_01_status_and_roadmap.md`.
+
+The ordinary user workflow should remain simple:
+
+```text
+Choose video
+→ inspect / trim / optionally pre-crop
+→ choose Detect cage automatically or Manual ROI
+→ review accepted geometry
+→ optionally add static exclusion masks
+→ prepare video
+```
+
+Internal detector-design concepts such as source facts, scene characterization, detector presets, camera context, or profile eligibility are not mandatory user-facing workflow steps.
+
+Source facts include raw width and height, aspect ratio, FPS, reported frame count, sequential readable-frame count, and useful container/codec facts. Scene characterization requires image content, such as representative frames, background images, possible cage contours, candidate ROI geometry, candidate occupancy, border/contour evidence, and detection confidence/diagnostics. Raw probing alone cannot know cage occupancy or identify the true ROI.
+
+Manual ROI remains a first-class route. Future geometry work may distinguish manual axis-aligned rectangles, manual quadrilateral CropPlans, and composed geometry, but the final prepared video frame remains rectangular. Irregular excluded regions belong in prepared-coordinate polygon masks, not in a non-rectangular prepared-video format.
+
+Subsystem 01 closure requires a narrow SLEAP handoff check:
+
+```text
+prepared-video readable-frame count
+=
+frame count SLEAP reads from that prepared video
+```
+
+This check does not include pose quality, tracking quality, confidence values, exported pose rows, or other SLEAP result semantics.
+
+Current trim support remains one contiguous `[start_frame, end_frame_exclusive)` interval. Future discontinuous trimming must preserve segment boundaries explicitly instead of silently concatenating non-consecutive raw intervals into one fake continuous video.
+
 ---
 
 ## 4. Definitions
