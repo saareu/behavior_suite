@@ -126,6 +126,9 @@ ffprobe, and PySide6 6.11.1 from conda-forge, installs this checkout with
 `python -m pip install -e .`, verifies `PySide6.QtWidgets` imports correctly,
 and runs `behavior-suite doctor`. It does not require PowerShell, does not
 require `conda activate`, and does not modify the user's base environment.
+If an older version of the installer previously installed PySide6 through pip,
+the current installer automatically repairs the environment by replacing that
+pip-managed Qt stack with the supported Conda-forge PySide6 runtime.
 
 Normal update workflow:
 

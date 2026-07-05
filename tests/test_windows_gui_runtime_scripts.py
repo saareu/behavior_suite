@@ -45,6 +45,14 @@ def test_windows_installer_uses_conda_run_and_doctor_without_powershell() -> Non
     assert "conda activate" not in text.lower()
     assert all(line.lower().startswith("call conda ") for line in conda_lines)
     assert "call conda env update -f" in text
+    assert (
+        "call conda run -n %ENV_NAME% python -m pip uninstall -y "
+        "PySide6 PySide6_Addons PySide6_Essentials shiboken6"
+    ) in text
+    assert (
+        'call conda install -n %ENV_NAME% -c conda-forge --force-reinstall '
+        '"pyside6=6.11.1" -y'
+    ) in text
     assert "call conda run -n %ENV_NAME% python -m pip install -e ." in text
     assert '".[gui]"' not in text
     assert "from PySide6.QtWidgets import QApplication" in text
@@ -56,6 +64,9 @@ def test_windows_installer_uses_conda_run_and_doctor_without_powershell() -> Non
     assert "REPO_ROOT=%SCRIPT_DIR%.." in text
     assert 'cd /d "%REPO_ROOT%"' in text
     assert "if errorlevel 1" in text.lower()
+    assert "Failed to force-reinstall Conda-forge PySide6 6.11.1" in text
+    assert "remove stale pip-managed PySide6 packages" in text
+    assert "The environment remains unable to load QtWidgets." in text
     assert "rmdir /s" not in text.lower()
     assert "del /s" not in text.lower()
     pip_install_lines = [
@@ -65,6 +76,20 @@ def test_windows_installer_uses_conda_run_and_doctor_without_powershell() -> Non
         "call conda run -n %ENV_NAME% python -m pip install -e ."
     ]
     assert all("pyside" not in line.lower() for line in pip_install_lines)
+    assert "python -m pip install -U PySide6" not in text
+    assert "python -m pip install PySide6" not in text
+    assert text.index("python -m pip uninstall -y PySide6") < text.index(
+        '--force-reinstall "pyside6=6.11.1"'
+    )
+    assert text.index('--force-reinstall "pyside6=6.11.1"') < text.index(
+        "python -m pip install -e ."
+    )
+    force_reinstall_section = text[
+        text.index('--force-reinstall "pyside6=6.11.1"') : text.index(
+            "python -m pip install -e ."
+        )
+    ]
+    assert "if errorlevel 1" in force_reinstall_section.lower()
     assert text.index("python -m pip install -e .") < text.index(
         "from PySide6.QtWidgets import QApplication"
     )

@@ -31,6 +31,20 @@ if errorlevel 1 (
     goto fail
 )
 
+set "STEP=removing stale pip-managed PySide6 packages from %ENV_NAME%"
+call conda run -n %ENV_NAME% python -m pip uninstall -y PySide6 PySide6_Addons PySide6_Essentials shiboken6
+if errorlevel 1 (
+    echo Failed to remove stale pip-managed PySide6 packages from %ENV_NAME%.
+    goto fail
+)
+
+set "STEP=reinstalling Conda-forge PySide6 runtime"
+call conda install -n %ENV_NAME% -c conda-forge --force-reinstall "pyside6=6.11.1" -y
+if errorlevel 1 (
+    echo Failed to force-reinstall Conda-forge PySide6 6.11.1 in %ENV_NAME%.
+    goto fail
+)
+
 set "STEP=installing behavior_suite editable package"
 call conda run -n %ENV_NAME% python -m pip install -e .
 if errorlevel 1 (
@@ -50,7 +64,8 @@ call conda run -n %ENV_NAME% python -c "from PySide6.QtWidgets import QApplicati
 if errorlevel 1 (
     echo PySide6/QtWidgets import failed in %ENV_NAME%.
     echo The supported Windows GUI runtime uses Conda-forge PySide6.
-    echo Rerun scripts\install_windows_gui.bat to repair the environment.
+    echo The installer attempted to remove stale pip-managed PySide6 packages and reinstall Conda-forge PySide6.
+    echo The environment remains unable to load QtWidgets.
     goto fail
 )
 
