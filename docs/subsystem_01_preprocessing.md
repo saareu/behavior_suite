@@ -1,8 +1,8 @@
 # Subsystem 01: Video Preprocessing
 
-**Status:** Functionally closed and entering maintenance  
-**Subsystem:** Raw behavioral-video preparation for SLEAP-compatible input  
-**Current source of truth:** This document, `docs/subsystem_01_status_and_roadmap.md`, and `docs/design/subsystem_01_geometry_modes.md`
+- **Status:** Functionally closed and entering maintenance
+- **Subsystem:** Raw behavioral-video preparation for SLEAP-compatible input
+- **Current source of truth:** This document, `docs/subsystem_01_status_and_roadmap.md`, and `docs/design/subsystem_01_geometry_modes.md`
 
 Subsystem 01 transforms raw behavioral videos into validated prepared videos while preserving frame identity, timing traceability, accepted spatial geometry, preprocessing settings, and artifact provenance.
 

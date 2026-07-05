@@ -10,4 +10,3 @@ Current active documentation is linked from the repository `README.md` and curre
 - `docs/subsystem_01_status_and_roadmap.md`
 - `docs/design/subsystem_01_geometry_modes.md`
 - `docs/development/ai_coding_guide.md`
-
