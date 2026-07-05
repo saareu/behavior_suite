@@ -1,6 +1,6 @@
 # Preprocess Subsystem Implementation Plan v2
 
-> **Archive notice:** This historical document is retained for traceability. It is not the current source of truth. See `docs/subsystem_01_preprocessing.md`, `docs/subsystem_01_status_and_roadmap.md`, and `docs/design/subsystem_01_geometry_modes.md`.
+> **Archive notice:** This historical document is retained for traceability. It is not the current source of truth. See `docs/subsystem_01/preprocessing.md`, `docs/subsystem_01/status_and_roadmap.md`, and `docs/subsystem_01/design/geometry_modes.md`.
 
 **Status:** Proposed implementation plan; requires review before implementation  
 **Planning baseline:** `preprocess-v1-field-tested` (`9074a1d`)  
@@ -8,7 +8,7 @@
 
 ## Current closure note
 
-This document remains useful milestone history and design context, but the compact current status, closure checks, and deferred roadmap for Subsystem 01 are now summarized in `docs/subsystem_01_status_and_roadmap.md`.
+This document remains useful milestone history and design context, but the compact current status, closure checks, and deferred roadmap for Subsystem 01 are now summarized in `docs/subsystem_01/status_and_roadmap.md`.
 
 The normal user workflow remains:
 

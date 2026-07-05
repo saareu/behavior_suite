@@ -1,6 +1,6 @@
 # Preprocess Subsystem Implementation Plan v1
 
-> **Archive notice:** This historical document is retained for traceability. It is not the current source of truth. See `docs/subsystem_01_preprocessing.md`, `docs/subsystem_01_status_and_roadmap.md`, and `docs/design/subsystem_01_geometry_modes.md`.
+> **Archive notice:** This historical document is retained for traceability. It is not the current source of truth. See `docs/subsystem_01/preprocessing.md`, `docs/subsystem_01/status_and_roadmap.md`, and `docs/subsystem_01/design/geometry_modes.md`.
 
 ## 1. Purpose
 

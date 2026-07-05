@@ -1,7 +1,7 @@
 # Subsystem 01 Design: Final Spatial Geometry Modes
 
 **Status:** Active future-facing design reference; no production behavior is changed by this document.
-**Relationship:** Complements `docs/subsystem_01_preprocessing.md` while preserving the approved artifact, frame identity, timing, and validation contracts until a separate implementation patch changes them explicitly.
+**Relationship:** Complements `docs/subsystem_01/preprocessing.md` while preserving the approved artifact, frame identity, timing, and validation contracts until a separate implementation patch changes them explicitly.
 
 ## 1. Purpose and relationship to the current Subsystem 01 contract
 

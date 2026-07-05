@@ -1,6 +1,6 @@
 # Documentation Consolidation Plan
 
-> **Archive notice:** This historical document is retained for traceability. It is not the current source of truth. See `docs/subsystem_01_preprocessing.md`, `docs/subsystem_01_status_and_roadmap.md`, and `docs/design/subsystem_01_geometry_modes.md`.
+> **Archive notice:** This historical document is retained for traceability. It is not the current source of truth. See `docs/subsystem_01/preprocessing.md`, `docs/subsystem_01/status_and_roadmap.md`, and `docs/subsystem_01/design/geometry_modes.md`.
 
 **Status date:** 2026-07-05  
 **Scope:** Audit tracked documentation, classify current sources of truth, and propose a low-risk consolidation plan.  
@@ -31,7 +31,7 @@ New documents created by this milestone:
 
 | Document | Intended classification |
 | --- | --- |
-| `docs/subsystem_01_status_and_roadmap.md` | Active current status and roadmap for Subsystem 01 |
+| `docs/subsystem_01/status_and_roadmap.md` | Active current status and roadmap for Subsystem 01 |
 | `docs/documentation_consolidation_plan.md` | Active consolidation plan until the documentation migration is completed |
 
 ---
@@ -46,7 +46,7 @@ This remains the authoritative functional specification for Subsystem 01 scienti
 
 ### Active current roadmap/status
 
-- `docs/subsystem_01_status_and_roadmap.md`
+- `docs/subsystem_01/status_and_roadmap.md`
 - `docs/preprocess_v2_implementation_plan.md`
 
 The new status document should become the compact current-status source. The V2 implementation plan remains useful for milestone history and pending V2 design context until its active items are migrated or closed.
@@ -115,10 +115,10 @@ README.md
     links to active docs
 
 docs/
-    subsystem_01_preprocessing.md
+    subsystem_01/preprocessing.md
         canonical functional specification
 
-    subsystem_01_status_and_roadmap.md
+    subsystem_01/status_and_roadmap.md
         implemented / validated / deferred / planned
 
     design/
@@ -147,7 +147,7 @@ Likely archive candidates after review:
 
 Conditional archive candidate:
 
-- `docs/preprocess_v2_implementation_plan.md`, after remaining active roadmap content is migrated into `docs/subsystem_01_status_and_roadmap.md` or an active design document.
+- `docs/preprocess_v2_implementation_plan.md`, after remaining active roadmap content is migrated into `docs/subsystem_01/status_and_roadmap.md` or an active design document.
 
 These files should not be moved until the user reviews this plan.
 
@@ -158,8 +158,8 @@ These files should not be moved until the user reviews this plan.
 In the proposed structure:
 
 - `README.md` remains the repository entry point, not a full specification.
-- A future `docs/subsystem_01_preprocessing.md` should become the single canonical Subsystem 01 functional spec, derived from `docs/preprocess_subsystem_spec_v1.md` plus accepted current clarifications.
-- `docs/subsystem_01_status_and_roadmap.md` should remain the current Subsystem 01 status/roadmap document.
+- A future `docs/subsystem_01/preprocessing.md` should become the single canonical Subsystem 01 functional spec, derived from `docs/preprocess_subsystem_spec_v1.md` plus accepted current clarifications.
+- `docs/subsystem_01/status_and_roadmap.md` should remain the current Subsystem 01 status/roadmap document.
 - `docs/preprocess_v2_6_geometry_modes_design.md` or its future location under `docs/design/` should remain the active geometry design reference until its decisions are folded into the canonical spec.
 - `docs/ai_coding_guide.md` or its future location under `docs/development/` should remain repository-wide development guidance.
 
@@ -168,8 +168,8 @@ In the proposed structure:
 ## 7. Migration plan with low-risk ordered steps
 
 1. Review and approve this consolidation plan.
-2. Review `docs/subsystem_01_status_and_roadmap.md` for factual accuracy.
-3. Create a future `docs/subsystem_01_preprocessing.md` by consolidating:
+2. Review `docs/subsystem_01/status_and_roadmap.md` for factual accuracy.
+3. Create a future `docs/subsystem_01/preprocessing.md` by consolidating:
    - `docs/preprocess_subsystem_spec_v1.md`;
    - accepted static-mask clarifications;
    - accepted geometry-mode transform rule from `docs/preprocess_v2_6_geometry_modes_design.md`;

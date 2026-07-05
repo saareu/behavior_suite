@@ -1,6 +1,6 @@
 # Preprocess Subsystem Specification v1
 
-> **Archive notice:** This historical document is retained for traceability. It is not the current source of truth. See `docs/subsystem_01_preprocessing.md`, `docs/subsystem_01_status_and_roadmap.md`, and `docs/design/subsystem_01_geometry_modes.md`.
+> **Archive notice:** This historical document is retained for traceability. It is not the current source of truth. See `docs/subsystem_01/preprocessing.md`, `docs/subsystem_01/status_and_roadmap.md`, and `docs/subsystem_01/design/geometry_modes.md`.
 
 ## 1. Document Control
 
@@ -99,7 +99,7 @@ When implemented, the mask shall:
 
 ### 3.4 Current Closure Clarifications
 
-This specification remains the canonical source for Subsystem 01 scientific invariants and artifact contracts. Current implementation status, closure checks, and deferred roadmap items are summarized in `docs/subsystem_01_status_and_roadmap.md`.
+This specification remains the canonical source for Subsystem 01 scientific invariants and artifact contracts. Current implementation status, closure checks, and deferred roadmap items are summarized in `docs/subsystem_01/status_and_roadmap.md`.
 
 The ordinary user workflow should remain simple:
 

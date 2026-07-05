@@ -7,16 +7,16 @@ This guide defines mandatory rules for AI-assisted development in the `behavior_
 Before modifying code, the coding assistant shall read:
 
 ```text
-docs/subsystem_01_preprocessing.md
-docs/subsystem_01_status_and_roadmap.md
+docs/subsystem_01/preprocessing.md
+docs/subsystem_01/status_and_roadmap.md
 docs/development/ai_coding_guide.md
 ```
 
 When documents conflict, priority is:
 
 ```text
-1. subsystem_01_preprocessing.md
-2. subsystem_01_status_and_roadmap.md
+1. subsystem_01/preprocessing.md
+2. subsystem_01/status_and_roadmap.md
 3. ai_coding_guide.md
 ```
 

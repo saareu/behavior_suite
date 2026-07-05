@@ -2,7 +2,7 @@
 
 - **Status:** Functionally closed and entering maintenance
 - **Subsystem:** Raw behavioral-video preparation for SLEAP-compatible input
-- **Current source of truth:** This document, `docs/subsystem_01_status_and_roadmap.md`, and `docs/design/subsystem_01_geometry_modes.md`
+- **Current source of truth:** This document, `docs/subsystem_01/status_and_roadmap.md`, and `docs/subsystem_01/design/geometry_modes.md`
 
 Subsystem 01 transforms raw behavioral videos into validated prepared videos while preserving frame identity, timing traceability, accepted spatial geometry, preprocessing settings, and artifact provenance.
 
@@ -157,7 +157,7 @@ Current behavior:
 - prepared video remains rectangular;
 - canonical output sizing preserves aspect ratio through uniform scaling and padding.
 
-Future geometry modes are designed separately in `docs/design/subsystem_01_geometry_modes.md`. They include identity, axis-aligned pre-crop-only, current perspective CropPlan, and future composed geometry. Those future modes are not implemented unless explicitly stated in a later scoped implementation.
+Future geometry modes are designed separately in `docs/subsystem_01/design/geometry_modes.md`. They include identity, axis-aligned pre-crop-only, current perspective CropPlan, and future composed geometry. Those future modes are not implemented unless explicitly stated in a later scoped implementation.
 
 Optional manual post-crop rotation remains deferred. Current documentation must not imply that existing four-corner CropPlan behavior has changed.
 

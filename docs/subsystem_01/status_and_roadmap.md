@@ -4,12 +4,12 @@
 **Status date:** 2026-07-05  
 **Purpose:** Compact current-status document for the current Subsystem 01 milestone, maintenance status, and deferred roadmap items.
 
-This document is a status and roadmap companion to the canonical functional specification in `docs/subsystem_01_preprocessing.md`. It does not replace the scientific invariants in that specification.
+This document is a status and roadmap companion to the canonical functional specification in `docs/subsystem_01/preprocessing.md`. It does not replace the scientific invariants in that specification.
 
 Active related documentation:
 
-- `docs/subsystem_01_preprocessing.md`
-- `docs/design/subsystem_01_geometry_modes.md`
+- `docs/subsystem_01/preprocessing.md`
+- `docs/subsystem_01/design/geometry_modes.md`
 - `docs/development/ai_coding_guide.md`
 
 ---
@@ -290,7 +290,7 @@ The final prepared video frame remains rectangular.
 
 Irregular excluded regions use prepared-coordinate polygon masks, not a non-rectangular prepared-video format.
 
-The broader final-spatial-geometry design is documented in `docs/design/subsystem_01_geometry_modes.md`.
+The broader final-spatial-geometry design is documented in `docs/subsystem_01/design/geometry_modes.md`.
 
 ---
 
