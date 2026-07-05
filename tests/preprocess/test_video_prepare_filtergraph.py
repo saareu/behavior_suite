@@ -17,7 +17,10 @@ from preprocess.exceptions import (
     PreprocessCancelledError,
     VideoPreparationError,
 )
-from preprocess.manual_crop import make_manual_crop_plan
+from preprocess.manual_crop import (
+    make_axis_aligned_rectangle_crop_plan,
+    make_manual_crop_plan,
+)
 from preprocess.video_prepare import (
     build_ffmpeg_prepare_command,
     build_prepare_filtergraph,
@@ -173,6 +176,26 @@ def test_filtergraph_contains_perspective_and_required_clockwise_rotation() -> N
     assert landscape_metadata.rotated_90 is False
     assert "transpose=clock" in portrait_filtergraph
     assert portrait_metadata.rotated_90 is True
+
+
+def test_axis_aligned_rectangle_filtergraph_preserves_portrait_orientation() -> None:
+    config = _config(canonical_enabled=False, canonical_size_wh=(400, 400))
+    plan = make_axis_aligned_rectangle_crop_plan(
+        raw_frame_shape=(320, 240),
+        rectangle_xywh=(40, 20, 60, 100),
+        pre_crop_roi=None,
+        canonical_resolution=config.prepare.canonical_resolution,
+    )
+
+    filtergraph, metadata = build_prepare_filtergraph(plan, config)
+
+    assert plan.rotated_90 is False
+    assert "transpose=" not in filtergraph
+    assert metadata.rotated_90 is False
+    assert metadata.rectified_content_size_wh == (60, 100)
+    assert metadata.pre_rotation_size_wh == (60, 100)
+    assert metadata.native_size_wh == (60, 100)
+    assert metadata.expected_output_size_wh == (60, 100)
 
 
 def test_filtergraph_applies_pre_crop_and_preserves_local_quad_metadata() -> None:

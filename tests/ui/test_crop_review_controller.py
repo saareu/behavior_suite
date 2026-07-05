@@ -17,7 +17,10 @@ from preprocess.config import (
 )
 from preprocess.crop_plan import CropMode, CropPlan
 from preprocess.exceptions import CageDetectionError, CropPlanError, VideoProbeError
-from preprocess.manual_crop import make_manual_crop_plan
+from preprocess.manual_crop import (
+    make_axis_aligned_rectangle_crop_plan,
+    make_manual_crop_plan,
+)
 from preprocess.masking import apply_static_mask_to_frame
 from preprocess.models import OperationProgress, VideoProbeResult
 from preprocess.pre_crop import PreCropMode, resolve_pre_crop
@@ -198,6 +201,7 @@ def _controller(
     frame_reader=None,
     detector=_detector,
     manual_plan_builder=make_manual_crop_plan,
+    manual_rectangle_plan_builder=make_axis_aligned_rectangle_crop_plan,
     preview_builder=build_crop_preview,
 ) -> CropReviewController:
     return CropReviewController(
@@ -205,6 +209,7 @@ def _controller(
         detector=detector,
         frame_reader=frame_reader or (lambda _path, _index: FRAME.copy()),
         manual_plan_builder=manual_plan_builder,
+        manual_rectangle_plan_builder=manual_rectangle_plan_builder,
         preview_builder=preview_builder,
     )
 
@@ -217,6 +222,15 @@ def _select_manual_candidate(controller: CropReviewController) -> CropPlan:
         plan = controller.add_manual_point(*point)
     assert plan is not None
     return plan
+
+
+def _select_rectangle_candidate(
+    controller: CropReviewController,
+    rectangle_xywh: tuple[int, int, int, int] = (10, 20, 40, 30),
+) -> CropPlan:
+    controller.load_representative_frame()
+    controller.set_crop_mode(CropReviewMode.MANUAL_RECTANGLE)
+    return controller.set_manual_rectangle(rectangle_xywh)
 
 
 def test_representative_frame_uses_start_then_frame_zero_fallback(tmp_path: Path) -> None:
@@ -440,6 +454,30 @@ def test_detector_defaults_indicator_updates_in_headless_page(
     assert setup_controller.state.preprocess_config.cage_detect == (
         default_config.cage_detect
     )
+
+
+def test_manual_rectangle_page_shows_live_rectangle_and_crop_size(
+    tmp_path: Path,
+    qt_application: object,
+) -> None:
+    del qt_application
+    from ui.pages.crop_review_page import CropReviewPage
+
+    setup_controller = PreprocessSetupController(state=_state(tmp_path))
+    page = CropReviewPage(setup_controller)
+    page.controller._frame_reader = lambda _path, _index: FRAME.copy()
+    page.controller.load_representative_frame()
+    page.controller.set_crop_mode(CropReviewMode.MANUAL_RECTANGLE)
+    page.controller.set_manual_rectangle((10, 20, 40, 30))
+
+    page.refresh_from_state()
+
+    assert "x: 10 px" in page.rectangle_geometry_label.text()
+    assert "y: 20 px" in page.rectangle_geometry_label.text()
+    assert "Width: 40 px" in page.rectangle_geometry_label.text()
+    assert "Height: 30 px" in page.rectangle_geometry_label.text()
+    assert "Width: 40 px" in page.crop_size_label.text()
+    assert "Height: 30 px" in page.crop_size_label.text()
 
 
 def test_reset_detector_settings_at_defaults_is_no_op(tmp_path: Path) -> None:
@@ -712,6 +750,123 @@ def test_manual_crop_delegates_plan_construction_to_core_helper(tmp_path: Path) 
     assert plan.accepted_by_user is False
     assert len(calls) == 1
     np.testing.assert_array_equal(calls[0], np.asarray(POINTS))
+
+
+def test_manual_four_corner_crop_size_uses_authoritative_native_geometry(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(tmp_path)
+
+    plan = _select_manual_candidate(controller)
+
+    assert plan.native_size_wh == (80, 60)
+    assert controller.crop_content_size_wh() == plan.native_size_wh
+
+
+def test_axis_aligned_rectangle_uses_core_width_height(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+
+    plan = _select_rectangle_candidate(controller, (10, 20, 40, 30))
+
+    assert controller.state.crop_mode is CropReviewMode.MANUAL_RECTANGLE
+    assert controller.manual_rectangle_xywh == (10, 20, 40, 30)
+    assert plan.native_size_wh == (40, 30)
+    assert controller.crop_content_size_wh() == (40, 30)
+    assert plan.rotated_90 is False
+
+
+def test_axis_aligned_rectangle_clamps_to_raw_and_pre_crop_bounds(
+    tmp_path: Path,
+) -> None:
+    config = PreprocessConfig(
+        pre_crop={
+            "enabled": True,
+            "mode": PreCropMode.MANUAL_RECTANGLE,
+            "manual_rectangle": (10, 10, 70, 50),
+        },
+        prepare=_config().prepare,
+    )
+    state = _state(tmp_path, config=config)
+    controller = CropReviewController(
+        state,
+        frame_reader=lambda _path, _index: FRAME.copy(),
+    )
+    controller.load_representative_frame()
+    controller.set_crop_mode(CropReviewMode.MANUAL_RECTANGLE)
+
+    plan = controller.set_manual_rectangle((0, 0, 100, 80))
+
+    assert controller.manual_rectangle_xywh == (10, 10, 70, 50)
+    assert plan.native_size_wh == (70, 50)
+
+
+def test_axis_aligned_rectangle_rejects_empty_selection(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+    controller.load_representative_frame()
+    controller.set_crop_mode(CropReviewMode.MANUAL_RECTANGLE)
+
+    with pytest.raises(CropReviewValidationError, match="positive"):
+        controller.set_manual_rectangle((10, 10, 0, 20))
+
+    assert controller.state.candidate_crop_plan is None
+    assert controller.state.accepted_crop_plan is None
+
+
+def test_axis_aligned_rectangle_rejects_invalid_odd_dimensions(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(tmp_path)
+    controller.load_representative_frame()
+    controller.set_crop_mode(CropReviewMode.MANUAL_RECTANGLE)
+
+    with pytest.raises(CropReviewValidationError, match="even"):
+        controller.set_manual_rectangle((10, 20, 41, 30))
+
+    assert controller.manual_rectangle_xywh == (10, 20, 41, 30)
+    assert controller.state.candidate_crop_plan is None
+    assert controller.state.accepted_crop_plan is None
+
+
+def test_axis_aligned_rectangle_does_not_run_or_mutate_detector(
+    tmp_path: Path,
+) -> None:
+    detector_calls = 0
+
+    def detector(_path, _config, _pre_crop):
+        nonlocal detector_calls
+        detector_calls += 1
+        return _detector(_path, _config, _pre_crop)
+
+    controller = _controller(tmp_path, detector=detector)
+
+    plan = _select_rectangle_candidate(controller)
+
+    assert detector_calls == 0
+    assert plan.mode is CropMode.MANUAL
+    assert controller.state.detector_diagnostics is None
+
+
+def test_axis_aligned_rectangle_delegates_plan_construction_to_core_helper(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[int, int, int, int]] = []
+    expected = make_axis_aligned_rectangle_crop_plan(
+        FRAME.shape[:2],
+        (10, 20, 40, 30),
+        None,
+        _config().prepare.canonical_resolution,
+    )
+
+    def builder(**kwargs) -> CropPlan:
+        calls.append(kwargs["rectangle_xywh"])
+        return expected
+
+    controller = _controller(tmp_path, manual_rectangle_plan_builder=builder)
+
+    plan = _select_rectangle_candidate(controller)
+
+    assert plan.accepted_by_user is False
+    assert calls == [(10, 20, 40, 30)]
 
 
 def test_invalid_manual_crop_does_not_create_candidate(tmp_path: Path) -> None:

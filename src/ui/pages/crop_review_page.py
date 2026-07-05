@@ -88,18 +88,22 @@ class CropReviewPage(QWidget):
 
         self.automatic_mode = QRadioButton("Automatic detection / retry")
         self.manual_mode = QRadioButton("Manual four-corner crop")
+        self.manual_rectangle_mode = QRadioButton("Axis-aligned rectangle")
         self.automatic_mode.toggled.connect(self._mode_changed)
         self.manual_mode.toggled.connect(self._mode_changed)
+        self.manual_rectangle_mode.toggled.connect(self._mode_changed)
         self.load_frame_button = QPushButton("Load Representative Frame")
         self.load_frame_button.clicked.connect(self._load_frame)
         mode_row = QHBoxLayout()
         mode_row.addWidget(self.automatic_mode)
         mode_row.addWidget(self.manual_mode)
+        mode_row.addWidget(self.manual_rectangle_mode)
         mode_row.addStretch(1)
         mode_row.addWidget(self.load_frame_button)
 
         self.raw_view = CropOverlayView()
         self.raw_view.raw_point_clicked.connect(self._manual_point_clicked)
+        self.raw_view.raw_rectangle_changed.connect(self._manual_rectangle_changed)
         self.preview_view = VideoFrameView()
         self._selected_mask_shape_index: int | None = None
         self._mask_drawing_mode = "select"
@@ -268,33 +272,44 @@ class CropReviewPage(QWidget):
         return self.automatic_group
 
     def _build_manual_group(self) -> QGroupBox:
-        self.manual_group = QGroupBox("Manual four-corner selection")
-        instructions = QLabel(
+        self.manual_group = QGroupBox("Manual selection")
+        self.manual_instructions = QLabel(
             "Click exactly: top-left → top-right → bottom-right → bottom-left. "
             "Points are kept in raw-frame coordinates and are never reordered."
         )
-        instructions.setWordWrap(True)
+        self.manual_instructions.setWordWrap(True)
         self.next_point_label = QLabel()
         self.next_point_label.setStyleSheet("font-weight: 600;")
+        self.rectangle_geometry_label = QLabel("Rectangle: not selected")
+        self.rectangle_geometry_label.setWordWrap(True)
+        self.crop_size_label = QLabel("Crop size: not available")
+        self.crop_size_label.setWordWrap(True)
         self.clear_points_button = QPushButton("Clear / Reset Points")
+        self.clear_rectangle_button = QPushButton("Clear Rectangle")
         self.clear_points_button.clicked.connect(self._clear_manual_points)
+        self.clear_rectangle_button.clicked.connect(self._clear_manual_rectangle)
         layout = QVBoxLayout(self.manual_group)
-        layout.addWidget(instructions)
+        layout.addWidget(self.manual_instructions)
         layout.addWidget(self.next_point_label)
+        layout.addWidget(self.rectangle_geometry_label)
+        layout.addWidget(self.crop_size_label)
         layout.addWidget(self.clear_points_button)
+        layout.addWidget(self.clear_rectangle_button)
         return self.manual_group
 
     def _build_diagnostics_group(self) -> QGroupBox:
         group = QGroupBox("Candidate diagnostics")
         self.diagnostics = {
             "size": QLabel("—"),
+            "crop_size": QLabel("—"),
             "fit": QLabel("—"),
             "rim": QLabel("—"),
             "rotation": QLabel("—"),
             "roi": QLabel("—"),
         }
         form = QFormLayout(group)
-        form.addRow("Detected output size", self.diagnostics["size"])
+        form.addRow("Prepared output size", self.diagnostics["size"])
+        form.addRow("Crop size", self.diagnostics["crop_size"])
         form.addRow("Fit score", self.diagnostics["fit"])
         form.addRow("Rim density", self.diagnostics["rim"])
         form.addRow("Rotation status", self.diagnostics["rotation"])
@@ -388,6 +403,9 @@ class CropReviewPage(QWidget):
         state = self.controller.state
         self.automatic_mode.setChecked(state.crop_mode is CropReviewMode.AUTOMATIC)
         self.manual_mode.setChecked(state.crop_mode is CropReviewMode.MANUAL)
+        self.manual_rectangle_mode.setChecked(
+            state.crop_mode is CropReviewMode.MANUAL_RECTANGLE
+        )
         config = state.preprocess_config
         if config is not None:
             detector = config.cage_detect
@@ -423,10 +441,43 @@ class CropReviewPage(QWidget):
             state.crop_mode is CropReviewMode.AUTOMATIC and not self._busy
         )
         self.manual_group.setEnabled(
-            state.crop_mode is CropReviewMode.MANUAL and not self._busy
+            state.crop_mode
+            in {CropReviewMode.MANUAL, CropReviewMode.MANUAL_RECTANGLE}
+            and not self._busy
+        )
+        rectangle_mode = state.crop_mode is CropReviewMode.MANUAL_RECTANGLE
+        self.manual_instructions.setText(
+            "Drag one source-image-axis-aligned rectangle on the raw frame. "
+            "Drag inside it to move it, or drag a corner handle to resize it."
+            if rectangle_mode
+            else (
+                "Click exactly: top-left → top-right → bottom-right → bottom-left. "
+                "Points are kept in raw-frame coordinates and are never reordered."
+            )
         )
         self.next_point_label.setText(
             f"Next required point: {self.controller.next_manual_point_label}"
+        )
+        self.next_point_label.setVisible(not rectangle_mode)
+        self.clear_points_button.setVisible(not rectangle_mode)
+        self.rectangle_geometry_label.setVisible(rectangle_mode)
+        self.clear_rectangle_button.setVisible(rectangle_mode)
+        rectangle = self.controller.manual_rectangle_xywh
+        self.rectangle_geometry_label.setText(
+            "Rectangle: not selected"
+            if rectangle is None
+            else (
+                f"x: {rectangle[0]} px\n"
+                f"y: {rectangle[1]} px\n"
+                f"Width: {rectangle[2]} px\n"
+                f"Height: {rectangle[3]} px"
+            )
+        )
+        crop_size = self.controller.crop_content_size_wh()
+        self.crop_size_label.setText(
+            "Crop size: not available"
+            if crop_size is None
+            else f"Crop size\nWidth: {crop_size[0]} px\nHeight: {crop_size[1]} px"
         )
         self.raw_view.set_frame(self.controller.representative_frame)
         prepared_preview = self.controller.prepared_preview
@@ -446,8 +497,13 @@ class CropReviewPage(QWidget):
             pre_crop_roi=None if pre_crop is None else pre_crop.roi,
             candidate_quad=candidate_quad,
             manual_points=self.controller.manual_points,
+            manual_rectangle_xywh=self.controller.manual_rectangle_xywh,
             manual_input_enabled=(
                 state.crop_mode is CropReviewMode.MANUAL
+                and not self._busy
+            ),
+            rectangle_input_enabled=(
+                state.crop_mode is CropReviewMode.MANUAL_RECTANGLE
                 and not self._busy
             ),
         )
@@ -866,11 +922,12 @@ class CropReviewPage(QWidget):
     def _mode_changed(self) -> None:
         if self._refreshing:
             return
-        mode = (
-            CropReviewMode.MANUAL
-            if self.manual_mode.isChecked()
-            else CropReviewMode.AUTOMATIC
-        )
+        if self.manual_rectangle_mode.isChecked():
+            mode = CropReviewMode.MANUAL_RECTANGLE
+        elif self.manual_mode.isChecked():
+            mode = CropReviewMode.MANUAL
+        else:
+            mode = CropReviewMode.AUTOMATIC
         try:
             self.controller.set_crop_mode(mode)
         except CropReviewValidationError as exc:
@@ -880,6 +937,8 @@ class CropReviewPage(QWidget):
         self.refresh_from_state()
         if mode is CropReviewMode.MANUAL:
             self.status_message.emit("Select four manual points in the prescribed order.")
+        elif mode is CropReviewMode.MANUAL_RECTANGLE:
+            self.status_message.emit("Draw an axis-aligned rectangle on the raw frame.")
 
     def _manual_point_clicked(self, x: float, y: float) -> None:
         try:
@@ -900,11 +959,34 @@ class CropReviewPage(QWidget):
         except Exception as exc:
             self._show_unexpected(exc)
 
+    def _manual_rectangle_changed(self, geometry: object) -> None:
+        if not _is_rectangle_tuple(geometry):
+            self._show_expected_error("Manual rectangle geometry is invalid.")
+            return
+        try:
+            self.controller.set_manual_rectangle(geometry)
+            self.error_label.clear()
+            self.refresh_from_state()
+            self.status_message.emit(
+                "Manual rectangle crop candidate is ready for review; it is not accepted."
+            )
+        except CropReviewValidationError as exc:
+            self._show_expected_error(str(exc))
+            self.refresh_from_state()
+        except Exception as exc:
+            self._show_unexpected(exc)
+
     def _clear_manual_points(self) -> None:
         self.controller.clear_manual_points()
         self.error_label.clear()
         self.refresh_from_state()
         self.status_message.emit("Manual crop points cleared.")
+
+    def _clear_manual_rectangle(self) -> None:
+        self.controller.clear_manual_rectangle()
+        self.error_label.clear()
+        self.refresh_from_state()
+        self.status_message.emit("Manual rectangle cleared.")
 
     def _accept_crop(self) -> None:
         try:
@@ -923,8 +1005,12 @@ class CropReviewPage(QWidget):
                 label.setText("—")
             return
         width, height = plan.prepared_size_wh
+        crop_size = self.controller.crop_content_size_wh()
         roi = plan.pre_crop_roi
         self.diagnostics["size"].setText(f"{width} × {height}")
+        self.diagnostics["crop_size"].setText(
+            "—" if crop_size is None else f"{crop_size[0]} × {crop_size[1]}"
+        )
         self.diagnostics["fit"].setText(
             "n/a (manual)" if plan.fit_score is None else f"{plan.fit_score:.5g}"
         )
@@ -965,7 +1051,9 @@ class CropReviewPage(QWidget):
         self.retry_button.setEnabled(not busy)
         self.automatic_mode.setEnabled(not busy)
         self.manual_mode.setEnabled(not busy)
+        self.manual_rectangle_mode.setEnabled(not busy)
         self.clear_points_button.setEnabled(not busy)
+        self.clear_rectangle_button.setEnabled(not busy)
         self.mask_group.setEnabled(not busy)
         self.accept_button.setEnabled(not busy and self.accept_button.isEnabled())
         self.raw_view.setEnabled(not busy)
@@ -974,7 +1062,9 @@ class CropReviewPage(QWidget):
             and self.controller.state.crop_mode is CropReviewMode.AUTOMATIC
         )
         self.manual_group.setEnabled(
-            not busy and self.controller.state.crop_mode is CropReviewMode.MANUAL
+            not busy
+            and self.controller.state.crop_mode
+            in {CropReviewMode.MANUAL, CropReviewMode.MANUAL_RECTANGLE}
         )
         if not busy:
             self.refresh_from_state()

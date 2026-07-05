@@ -72,6 +72,7 @@ class CropReviewMode(StrEnum):
 
     AUTOMATIC = "automatic"
     MANUAL = "manual"
+    MANUAL_RECTANGLE = "manual_rectangle"
 
 
 @dataclass(slots=True)

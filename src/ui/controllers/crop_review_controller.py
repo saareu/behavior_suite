@@ -30,7 +30,10 @@ from preprocess.exceptions import (
     PreprocessError,
     VideoPreparationError,
 )
-from preprocess.manual_crop import make_manual_crop_plan
+from preprocess.manual_crop import (
+    make_axis_aligned_rectangle_crop_plan,
+    make_manual_crop_plan,
+)
 from preprocess.masking import apply_static_mask_to_frame, validate_static_mask
 from preprocess.models import OperationProgress
 from preprocess.pre_crop import ResolvedPreCrop
@@ -41,6 +44,7 @@ FrameReader = Callable[[Path, int], np.ndarray]
 PreviewBuilder = Callable[..., np.ndarray]
 AutomaticDetector = Callable[..., CageDetectionResult]
 ManualPlanBuilder = Callable[..., CropPlan]
+ManualRectanglePlanBuilder = Callable[..., CropPlan]
 
 _POINT_LABELS = ("top-left", "top-right", "bottom-right", "bottom-left")
 _PREVIEW_MASK_COORDINATE_SHIFT = 8
@@ -185,12 +189,16 @@ class CropReviewController:
         *,
         detector: AutomaticDetector = detect_cage_crop_plan,
         manual_plan_builder: ManualPlanBuilder = make_manual_crop_plan,
+        manual_rectangle_plan_builder: ManualRectanglePlanBuilder = (
+            make_axis_aligned_rectangle_crop_plan
+        ),
         frame_reader: FrameReader = read_video_frame,
         preview_builder: PreviewBuilder = build_crop_preview,
     ) -> None:
         self.state = state
         self._detector = detector
         self._manual_plan_builder = manual_plan_builder
+        self._manual_rectangle_plan_builder = manual_rectangle_plan_builder
         self._frame_reader = frame_reader
         self._preview_builder = preview_builder
         self._representative_frame: np.ndarray | None = None
@@ -199,6 +207,7 @@ class CropReviewController:
         self._prepared_preview_unmasked: np.ndarray | None = None
         self._preview_crop_plan: CropPlan | None = None
         self._manual_points: list[tuple[float, float]] = []
+        self._manual_rectangle_xywh: tuple[int, int, int, int] | None = None
         self._upstream_context = self._context_key()
         self._seen_crop_review_revision = state.crop_review_revision
 
@@ -235,6 +244,12 @@ class CropReviewController:
         return tuple(self._manual_points)
 
     @property
+    def manual_rectangle_xywh(self) -> tuple[int, int, int, int] | None:
+        """Return the current manual raw-frame rectangle selection, if any."""
+
+        return self._manual_rectangle_xywh
+
+    @property
     def next_manual_point_label(self) -> str:
         """Return the next prescribed point label for the page."""
 
@@ -255,6 +270,7 @@ class CropReviewController:
         self._representative_frame = None
         self._representative_frame_index = None
         self._manual_points.clear()
+        self._manual_rectangle_xywh = None
         self._clear_preview()
         self.state.invalidate_crop_review(
             "Upstream crop inputs changed; review and acceptance are required."
@@ -309,6 +325,7 @@ class CropReviewController:
             self.load_representative_frame()
         assert self._representative_frame is not None
         self._manual_points.clear()
+        self._manual_rectangle_xywh = None
         self.state.crop_mode = CropReviewMode.AUTOMATIC
         self._invalidate_candidate("Automatic cage detection is running.")
         frame = np.array(self._representative_frame, copy=True)
@@ -529,6 +546,14 @@ class CropReviewController:
             return accepted.prepared_size_wh
         return None
 
+    def crop_content_size_wh(self) -> tuple[int, int] | None:
+        """Return authoritative current crop-content dimensions, if available."""
+
+        crop_plan = self.state.candidate_crop_plan or self.state.accepted_crop_plan
+        if crop_plan is None:
+            return None
+        return crop_plan.native_size_wh or crop_plan.prepared_size_wh
+
     def set_static_mask_enabled(self, enabled: bool) -> bool:
         """Enable or disable static prepared-pixel mask rendering."""
 
@@ -682,7 +707,7 @@ class CropReviewController:
         )
 
     def set_crop_mode(self, mode: CropReviewMode | str) -> CropReviewMode:
-        """Select automatic or manual review and invalidate prior acceptance."""
+        """Select automatic/manual review and invalidate prior acceptance."""
 
         try:
             selected = CropReviewMode(mode)
@@ -690,6 +715,7 @@ class CropReviewController:
             raise self._new_validation_error(f"Unsupported crop mode: {mode}") from exc
         if selected is not self.state.crop_mode:
             self._manual_points.clear()
+            self._manual_rectangle_xywh = None
             self._invalidate_candidate("Crop mode changed; select and review a new crop.")
         self.state.crop_mode = selected
         return selected
@@ -698,6 +724,7 @@ class CropReviewController:
         """Append one raw-coordinate point and delegate four-point geometry to core."""
 
         self.state.crop_mode = CropReviewMode.MANUAL
+        self._manual_rectangle_xywh = None
         self._invalidate_candidate("Manual points changed; crop acceptance is required.")
         if len(self._manual_points) >= 4:
             raise self._new_validation_error(
@@ -777,6 +804,74 @@ class CropReviewController:
         self._manual_points.clear()
         self.state.crop_mode = CropReviewMode.MANUAL
         self._invalidate_candidate("Manual points cleared; select four points.")
+
+    def set_manual_rectangle(
+        self,
+        rectangle_xywh: tuple[int, int, int, int],
+    ) -> CropPlan:
+        """Set one axis-aligned manual rectangle and build its CropPlan."""
+
+        self.state.crop_mode = CropReviewMode.MANUAL_RECTANGLE
+        self._manual_points.clear()
+        self._invalidate_candidate(
+            "Manual rectangle changed; crop acceptance is required."
+        )
+        _path, config, pre_crop = self._require_context()
+        if self._representative_frame is None:
+            self.load_representative_frame()
+        assert self._representative_frame is not None
+        height, width = self._representative_frame.shape[:2]
+        clamped = self._clamp_manual_rectangle(rectangle_xywh, width, height, pre_crop)
+        self._manual_rectangle_xywh = clamped
+        roi = pre_crop.roi
+
+        try:
+            plan = self._manual_rectangle_plan_builder(
+                raw_frame_shape=(height, width),
+                rectangle_xywh=clamped,
+                pre_crop_roi=(roi.x, roi.y, roi.width, roi.height),
+                canonical_resolution=config.prepare.canonical_resolution,
+            )
+            plan = _copy_plan_with_acceptance(plan, False)
+            if plan.mode is not CropMode.MANUAL:
+                raise CropPlanError(
+                    "Manual rectangle helper did not return a manual CropPlan."
+                )
+        except (CropPlanError, ValidationError, ValueError, cv2.error) as exc:
+            self._clear_preview()
+            self.state.crop_review_status = "manual_rectangle_invalid"
+            raise self._new_validation_error(
+                f"Manual rectangle crop is invalid: {exc}"
+            ) from exc
+        try:
+            preview = self._preview_builder(
+                self._representative_frame,
+                plan,
+                config.prepare.perspective_interpolation,
+            )
+        except (CropReviewValidationError, ValueError, cv2.error) as exc:
+            self._invalidate_candidate("Prepared crop preview generation failed.")
+            self._manual_rectangle_xywh = clamped
+            raise self._new_validation_error(
+                f"Prepared crop preview generation failed: {exc}"
+            ) from exc
+
+        result = CropReviewComputation(
+            crop_plan=plan,
+            prepared_preview=preview,
+            detector_diagnostics=None,
+        )
+        self._apply_candidate(result)
+        self.state.crop_mode = CropReviewMode.MANUAL_RECTANGLE
+        self.state.crop_review_status = "manual_rectangle_candidate_ready"
+        return plan
+
+    def clear_manual_rectangle(self) -> None:
+        """Reset manual rectangle selection and invalidate accepted rectangle crop."""
+
+        self._manual_rectangle_xywh = None
+        self.state.crop_mode = CropReviewMode.MANUAL_RECTANGLE
+        self._invalidate_candidate("Manual rectangle cleared; draw a rectangle.")
 
     def accept_crop(self) -> CropPlan:
         """Create and store a separately validated explicitly accepted CropPlan."""
@@ -921,6 +1016,52 @@ class CropReviewController:
             raise CropReviewValidationError(
                 "Representative frame dimensions do not match the raw-video probe."
             )
+
+    def _clamp_manual_rectangle(
+        self,
+        rectangle_xywh: tuple[int, int, int, int],
+        frame_width: int,
+        frame_height: int,
+        pre_crop: ResolvedPreCrop,
+    ) -> tuple[int, int, int, int]:
+        try:
+            value_count = len(rectangle_xywh)
+        except TypeError as exc:
+            raise self._new_validation_error(
+                "Manual rectangle must contain x, y, width, and height."
+            ) from exc
+        if value_count != 4:
+            raise self._new_validation_error(
+                "Manual rectangle must contain x, y, width, and height."
+            )
+        if any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in rectangle_xywh
+        ):
+            raise self._new_validation_error("Manual rectangle values must be integers.")
+
+        x, y, width, height = rectangle_xywh
+        if width <= 0 or height <= 0:
+            raise self._new_validation_error(
+                "Manual rectangle width and height must be positive."
+            )
+        raw_left = max(0, x)
+        raw_top = max(0, y)
+        raw_right = min(frame_width, x + width)
+        raw_bottom = min(frame_height, y + height)
+        roi = pre_crop.roi
+        left = max(raw_left, roi.x)
+        top = max(raw_top, roi.y)
+        right = min(raw_right, roi.x + roi.width)
+        bottom = min(raw_bottom, roi.y + roi.height)
+        clamped_width = right - left
+        clamped_height = bottom - top
+        if clamped_width <= 0 or clamped_height <= 0:
+            raise self._new_validation_error(
+                "Manual rectangle must overlap the selected pre-crop ROI with "
+                "positive width and height."
+            )
+        return left, top, clamped_width, clamped_height
 
     def _context_key(self) -> tuple[object, ...]:
         pre_crop = self.state.resolved_pre_crop

@@ -59,7 +59,8 @@ The following are implemented:
 - optional external MATLAB timing-vector selection and validation;
 - optional pre-crop before final spatial processing;
 - automatic cage detection with adjustable detector settings;
-- manual four-corner ROI route;
+- manual ROI route with four-corner and axis-aligned rectangle selection;
+- live crop-content width/height display for valid manual geometry;
 - explicit crop/geometry acceptance before final processing;
 - two-stage video preparation with ffmpeg followed by OpenCV final re-encode;
 - prepared-coordinate static exclusion masks filled with black;
@@ -266,9 +267,9 @@ Future diagnostics should help users understand and tune results through views s
 
 ## 8. Manual ROI and geometry decisions
 
-Current manual geometry uses the existing four-corner CropPlan workflow.
+Current manual geometry supports the existing four-corner CropPlan workflow and a manual axis-aligned rectangle route. Both produce accepted `CropPlan` geometry before final preprocessing. The rectangle route preserves source orientation and does not request the historical automatic 90° portrait-to-landscape rotation.
 
-Future geometry distinctions should be documented and implemented carefully:
+Future geometry distinctions should continue to be documented and implemented carefully:
 
 ### Manual axis-aligned rectangle
 
@@ -349,7 +350,7 @@ The following are intentionally deferred, not missing bugs:
 Subsystem 01 is functionally closed and entering maintenance. Recommended future work should remain separately scoped:
 
 1. Review the local untracked issue log later and integrate only durable items.
-2. Treat future feature work as separate scoped roadmap items, including detector robustness and diagnostics, optional reusable detector presets, normalized resolution-aware detector defaults, manual-first ROI workflow, future simple rectangle crop with optional manual rotation, segmented non-consecutive trimming, dynamic/keyframed masks, batch preprocessing, and packaged cross-platform releases.
+2. Treat future feature work as separate scoped roadmap items, including detector robustness and diagnostics, optional reusable detector presets, normalized resolution-aware detector defaults, manual-first ROI workflow, optional manual crop rotation, segmented non-consecutive trimming, dynamic/keyframed masks, batch preprocessing, and packaged cross-platform releases.
 
 ---
 

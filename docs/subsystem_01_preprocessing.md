@@ -146,7 +146,12 @@ raw video
 Current behavior:
 
 - automatic cage detection produces a candidate `CropPlan`;
-- manual ROI currently uses manual four-corner geometry and also produces a `CropPlan`;
+- manual ROI supports manual four-corner geometry and manual axis-aligned
+  rectangle geometry; both produce a `CropPlan`;
+- the axis-aligned rectangle route preserves source orientation and does not
+  request the historical automatic portrait-to-landscape rotation;
+- the GUI displays live crop-content width/height from authoritative
+  `CropPlan.native_size_wh` once valid geometry exists;
 - the user must explicitly accept geometry before final processing;
 - accepted geometry is stored as the authoritative spatial transform in metadata;
 - prepared video remains rectangular;
@@ -154,7 +159,7 @@ Current behavior:
 
 Future geometry modes are designed separately in `docs/design/subsystem_01_geometry_modes.md`. They include identity, axis-aligned pre-crop-only, current perspective CropPlan, and future composed geometry. Those future modes are not implemented unless explicitly stated in a later scoped implementation.
 
-Future simple manual source-aligned rectangle crop with optional manual rotation is deferred. Current documentation must not imply that existing CropPlan behavior has changed.
+Optional manual post-crop rotation remains deferred. Current documentation must not imply that existing four-corner CropPlan behavior has changed.
 
 ---
 
@@ -168,7 +173,7 @@ Visual and numeric pre-crop controls are input methods for the same typed core p
 
 Changing spatial geometry, including effective pre-crop geometry, invalidates accepted geometry review. Changing only the trim interval for an unchanged raw video changes which frames are processed, not how each selected frame is transformed.
 
-Future pre-crop and simple-rectangle crop improvements are maintenance/roadmap items. They must still feed typed core configuration and validation paths rather than duplicating scientific validation in GUI widgets.
+Future pre-crop and manual-rotation improvements are maintenance/roadmap items. They must still feed typed core configuration and validation paths rather than duplicating scientific validation in GUI widgets.
 
 ---
 
@@ -317,7 +322,7 @@ Future maintenance and roadmap items include:
 - optional reusable detector presets;
 - normalized resolution-aware detector defaults;
 - manual-first ROI workflow improvements;
-- future simple rectangle crop with optional manual rotation;
+- optional manual crop rotation;
 - segmented non-consecutive trimming;
 - dynamic/keyframed masks;
 - batch preprocessing;

@@ -1,4 +1,4 @@
-"""Pure geometry for creating manual four-corner crop plans."""
+"""Pure geometry for creating manual crop plans."""
 
 from __future__ import annotations
 
@@ -90,6 +90,51 @@ def _validate_points_within_region(
         raise CropPlanError(
             f"Manual crop points must lie within the {region_name} bounds."
         )
+
+
+def _validate_rectangle_xywh(
+    rectangle_xywh: tuple[int, int, int, int],
+    *,
+    raw_width: int,
+    raw_height: int,
+    pre_crop_roi: PreCropROI,
+) -> tuple[int, int, int, int]:
+    try:
+        value_count = len(rectangle_xywh)
+    except TypeError as exc:
+        raise CropPlanError(
+            "Manual rectangle must contain integer x, y, width, and height values."
+        ) from exc
+    if value_count != 4:
+        raise CropPlanError("Manual rectangle must contain x, y, width, and height.")
+    if any(
+        isinstance(value, bool) or not isinstance(value, int)
+        for value in rectangle_xywh
+    ):
+        raise CropPlanError("Manual rectangle values must be integers.")
+
+    x, y, width, height = rectangle_xywh
+    if x < 0 or y < 0:
+        raise CropPlanError("Manual rectangle x and y must be non-negative.")
+    if width <= 0 or height <= 0:
+        raise CropPlanError("Manual rectangle width and height must be positive.")
+    if width % 2 or height % 2:
+        raise CropPlanError(
+            "Manual rectangle width and height must be even for the current "
+            "CropPlan preparation path."
+        )
+    if x + width > raw_width or y + height > raw_height:
+        raise CropPlanError("Manual rectangle must lie within the raw frame.")
+    if not (
+        pre_crop_roi.x <= x
+        and pre_crop_roi.y <= y
+        and x + width <= pre_crop_roi.x + pre_crop_roi.width
+        and y + height <= pre_crop_roi.y + pre_crop_roi.height
+    ):
+        raise CropPlanError(
+            "Manual rectangle must lie within the selected pre-crop ROI."
+        )
+    return x, y, width, height
 
 
 def _build_rectification_geometry(
@@ -237,3 +282,109 @@ def make_manual_crop_plan(
         )
     except (CropPlanError, ValidationError) as exc:
         raise CropPlanError(f"Manual crop produced an invalid CropPlan: {exc}") from exc
+
+
+def make_axis_aligned_rectangle_crop_plan(
+    raw_frame_shape: tuple[int, int],
+    rectangle_xywh: tuple[int, int, int, int],
+    pre_crop_roi: tuple[int, int, int, int] | None,
+    canonical_resolution: CanonicalResolutionConfig,
+) -> CropPlan:
+    """Create an unaccepted manual CropPlan from one raw-frame rectangle.
+
+    ``raw_frame_shape`` uses NumPy order ``(height, width)``. The rectangle uses
+    raw-frame half-open ``(x, y, width, height)`` coordinates. This helper
+    deliberately does not call the four-corner manual helper, because that path
+    preserves the historical portrait-to-landscape rotation behavior. Rectangle
+    mode preserves source orientation by using an axis-aligned rectangle
+    homography, no rotation transform, and the existing canonical uniform
+    scale/pad stage when enabled.
+
+    The current CropPlan/preparation contract requires even native dimensions;
+    odd rectangle widths or heights are rejected clearly rather than silently
+    changing the selected crop.
+
+    Raises:
+        CropPlanError: If frame, ROI, rectangle, homography, canonical, or
+            CropPlan geometry is invalid.
+    """
+
+    raw_height, raw_width = _validate_raw_frame_shape(raw_frame_shape)
+    roi = _resolve_pre_crop_roi(pre_crop_roi, raw_width, raw_height)
+    x, y, width, height = _validate_rectangle_xywh(
+        rectangle_xywh,
+        raw_width=raw_width,
+        raw_height=raw_height,
+        pre_crop_roi=roi,
+    )
+    points = np.array(
+        [
+            [float(x), float(y)],
+            [float(x + width - 1), float(y)],
+            [float(x + width - 1), float(y + height - 1)],
+            [float(x), float(y + height - 1)],
+        ],
+        dtype=np.float64,
+    )
+    points = validate_quad_tl_tr_br_bl(points)
+
+    homography_raw_to_pre_crop = build_pre_crop_translation_homography(roi)
+    points_in_pre_crop = points - np.array([roi.x, roi.y], dtype=np.float64)
+    destination = np.array(
+        [
+            [0.0, 0.0],
+            [float(width - 1), 0.0],
+            [float(width - 1), float(height - 1)],
+            [0.0, float(height - 1)],
+        ],
+        dtype=np.float64,
+    )
+    homography_rectify = build_perspective_homography(
+        points_in_pre_crop,
+        destination,
+    )
+    canonical_size_wh = (
+        (canonical_resolution.width, canonical_resolution.height)
+        if canonical_resolution.enabled
+        else None
+    )
+    native_size_wh = (width, height)
+    homography_canonical, canonical_geometry, output_size_wh = (
+        build_canonical_transform(native_size_wh, canonical_size_wh)
+    )
+
+    homography_raw_to_prepared = (
+        homography_canonical @ homography_rectify @ homography_raw_to_pre_crop
+    )
+    if not np.all(np.isfinite(homography_raw_to_prepared)):
+        raise CropPlanError("Manual rectangle raw-to-prepared homography is non-finite.")
+    try:
+        homography_prepared_to_raw = np.linalg.inv(homography_raw_to_prepared)
+    except np.linalg.LinAlgError as exc:
+        raise CropPlanError(
+            "Manual rectangle raw-to-prepared homography is singular."
+        ) from exc
+    if not np.all(np.isfinite(homography_prepared_to_raw)):
+        raise CropPlanError(
+            "Manual rectangle prepared-to-raw homography is non-finite."
+        )
+
+    try:
+        return CropPlan(
+            mode=CropMode.MANUAL,
+            pre_crop_roi=roi,
+            quad_raw_tl_tr_br_bl=points,
+            H_raw_to_prepared_3x3=homography_raw_to_prepared,
+            H_prepared_to_raw_3x3=homography_prepared_to_raw,
+            prepared_size_wh=output_size_wh,
+            native_size_wh=native_size_wh,
+            canonical_geometry=canonical_geometry,
+            rotated_90=False,
+            fit_score=None,
+            rim_density=None,
+            accepted_by_user=False,
+        )
+    except (CropPlanError, ValidationError) as exc:
+        raise CropPlanError(
+            f"Manual rectangle crop produced an invalid CropPlan: {exc}"
+        ) from exc

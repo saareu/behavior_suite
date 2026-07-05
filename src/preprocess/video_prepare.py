@@ -213,18 +213,21 @@ def _extract_rectification_geometry(
     native_size_wh = crop_plan.native_size_wh
     if crop_plan.rotated_90:
         pre_rotation_size_wh = (native_size_wh[1], native_size_wh[0])
+        try:
+            rotation, rotated_size_wh, rotated_90 = build_clockwise_rotation_transform(
+                pre_rotation_size_wh
+            )
+        except CropPlanError as exc:
+            raise VideoPreparationError(
+                f"CropPlan native rotation is invalid: {exc}"
+            ) from exc
+        if not rotated_90 or rotated_size_wh != native_size_wh:
+            raise VideoPreparationError(
+                "CropPlan rotation flag and native dimensions are inconsistent."
+            )
     else:
         pre_rotation_size_wh = native_size_wh
-    try:
-        rotation, rotated_size_wh, rotated_90 = build_clockwise_rotation_transform(
-            pre_rotation_size_wh
-        )
-    except CropPlanError as exc:
-        raise VideoPreparationError(f"CropPlan native rotation is invalid: {exc}") from exc
-    if rotated_90 != crop_plan.rotated_90 or rotated_size_wh != native_size_wh:
-        raise VideoPreparationError(
-            "CropPlan rotation flag and native dimensions are inconsistent."
-        )
+        rotation = np.eye(3, dtype=np.float64)
 
     canonical = crop_plan.canonical_geometry
     if not math.isfinite(canonical.uniform_scale) or canonical.uniform_scale <= 0:
