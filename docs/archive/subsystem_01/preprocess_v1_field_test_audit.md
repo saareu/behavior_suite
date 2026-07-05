@@ -1,5 +1,7 @@
 # Preprocess Subsystem v1 Field-Test Audit
 
+> **Archive notice:** This historical document is retained for traceability. It is not the current source of truth. See `docs/subsystem_01_preprocessing.md`, `docs/subsystem_01_status_and_roadmap.md`, and `docs/design/subsystem_01_geometry_modes.md`.
+
 **Audit date:** 2026-06-22  
 **Repository revision inspected:** `62e0014` (`Complete preprocess GUI workflow`)  
 **Audit type:** Documentation-only implementation and first-field-test review

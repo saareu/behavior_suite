@@ -1,11 +1,9 @@
-# V2.6 Design: Visual Pre-Crop and Final Spatial Geometry Modes
+# Subsystem 01 Design: Final Spatial Geometry Modes
 
-**Status:** Design note only; no production behavior is changed by this document.  
-**Relationship:** Extends the V2 plan while preserving the approved V1 artifact,
-frame identity, timing, and validation contracts until a separate implementation
-patch changes them explicitly.
+**Status:** Active future-facing design reference; no production behavior is changed by this document.
+**Relationship:** Complements `docs/subsystem_01_preprocessing.md` while preserving the approved artifact, frame identity, timing, and validation contracts until a separate implementation patch changes them explicitly.
 
-## 1. Purpose and relationship to V1/V2.5
+## 1. Purpose and relationship to the current Subsystem 01 contract
 
 V1 implements one final spatial workflow:
 
@@ -18,9 +16,9 @@ raw video
 → prepared video
 ```
 
-V2.5 adds raw decode-frame navigation and visual trim selection. It does not
-change spatial processing. V2.6 should add visual pre-crop selection and define
-how future prepared-video geometry modes fit into the same scientific contract.
+Raw decode-frame navigation and visual trim selection do not change spatial
+processing. Future visual pre-crop work and future geometry modes must fit into
+the same scientific contract.
 
 The current perspective `CropPlan` workflow remains valid and should remain the
 first fully supported processing mode. The correction in this document is that
@@ -109,7 +107,7 @@ The representation may differ by geometry mode:
   explicit inverse or a provably invertible inverse mapping where applicable.
 
 This contract does not require introducing a new `GeometryPlan` model in the
-first V2.6 implementation. It defines the target rule for future schema work.
+first future geometry implementation. It defines the target rule for future schema work.
 
 ## 5. Coordinate-system definitions
 
@@ -195,7 +193,7 @@ four-corner selection, or rotation is required. The user still must explicitly
 accept the spatial geometry before processing, because pixels outside the ROI
 are permanently excluded from prepared output.
 
-The first V2.6 implementation should not implement this processing mode unless
+The first visual pre-crop or geometry implementation should not implement this processing mode unless
 metadata and service support are explicitly added in a later scoped patch.
 
 ## 8. Perspective CropPlan mode design
@@ -216,7 +214,7 @@ Current authority:
 - acceptance flag and crop mode provenance.
 
 The perspective mode remains valid and should continue to use the existing
-automatic detection and manual four-corner review workflow. V2.6 visual
+automatic detection and manual four-corner review workflow. Future visual
 pre-crop must feed the existing `PreCropConfig` and `resolve_pre_crop()` path,
 then require a new perspective crop review only when the effective pre-crop
 geometry changes.
@@ -254,7 +252,7 @@ the scientific authority.
 
 ## 10. GUI workflow implications
 
-V2.6 visual pre-crop should reuse the V2.5 raw-frame viewer and mapping layer.
+Future visual pre-crop should reuse the raw-frame viewer and mapping layer.
 
 Expected first UI behavior:
 
@@ -343,7 +341,7 @@ Until a schema revision is approved:
 Older metadata without an explicit geometry mode should be treated as the
 current perspective mode when a valid accepted `CropPlan` is present.
 
-## 14. Explicit non-goals for the first V2.6 implementation
+## 14. Explicit non-goals for the first visual pre-crop / geometry implementation
 
 The first implementation should not:
 
@@ -379,7 +377,7 @@ The first implementation should not:
 7. **Future schema proposal.** Separately design metadata for identity,
    pre-crop-only, and composed geometry before implementing those modes.
 
-## 16. Test strategy and real-data acceptance criteria
+## 16. Future test strategy and real-data acceptance criteria
 
 Headless/unit tests:
 

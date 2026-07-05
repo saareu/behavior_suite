@@ -1,5 +1,7 @@
 # Preprocess Subsystem Implementation Plan v2
 
+> **Archive notice:** This historical document is retained for traceability. It is not the current source of truth. See `docs/subsystem_01_preprocessing.md`, `docs/subsystem_01_status_and_roadmap.md`, and `docs/design/subsystem_01_geometry_modes.md`.
+
 **Status:** Proposed implementation plan; requires review before implementation  
 **Planning baseline:** `preprocess-v1-field-tested` (`9074a1d`)  
 **Document date:** 2026-06-23

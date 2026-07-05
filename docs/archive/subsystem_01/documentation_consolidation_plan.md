@@ -1,5 +1,7 @@
 # Documentation Consolidation Plan
 
+> **Archive notice:** This historical document is retained for traceability. It is not the current source of truth. See `docs/subsystem_01_preprocessing.md`, `docs/subsystem_01_status_and_roadmap.md`, and `docs/design/subsystem_01_geometry_modes.md`.
+
 **Status date:** 2026-07-05  
 **Scope:** Audit tracked documentation, classify current sources of truth, and propose a low-risk consolidation plan.  
 **Non-action:** No documents were moved, renamed, archived, or deleted in this milestone.
@@ -198,4 +200,3 @@ Only after that review should selected issue-log content be migrated into active
 ## 9. No moves/deletions in this milestone
 
 This milestone only creates an audit and proposed consolidation plan. No tracked document was moved, renamed, archived, or deleted.
-

@@ -1,5 +1,7 @@
 # Preprocess Subsystem Implementation Plan v1
 
+> **Archive notice:** This historical document is retained for traceability. It is not the current source of truth. See `docs/subsystem_01_preprocessing.md`, `docs/subsystem_01_status_and_roadmap.md`, and `docs/design/subsystem_01_geometry_modes.md`.
+
 ## 1. Purpose
 
 This document defines how to implement the Video Preprocess Subsystem described in `preprocess_subsystem_spec_v1.md`.

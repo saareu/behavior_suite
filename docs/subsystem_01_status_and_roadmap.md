@@ -4,7 +4,13 @@
 **Status date:** 2026-07-05  
 **Purpose:** Compact current-status document for the current Subsystem 01 milestone, maintenance status, and deferred roadmap items.
 
-This document is a status and roadmap companion to the canonical functional specification in `docs/preprocess_subsystem_spec_v1.md`. It does not replace the scientific invariants in that specification.
+This document is a status and roadmap companion to the canonical functional specification in `docs/subsystem_01_preprocessing.md`. It does not replace the scientific invariants in that specification.
+
+Active related documentation:
+
+- `docs/subsystem_01_preprocessing.md`
+- `docs/design/subsystem_01_geometry_modes.md`
+- `docs/development/ai_coding_guide.md`
 
 ---
 
@@ -85,13 +91,13 @@ Additional completed field-tested checks:
 
 ---
 
-## 3. Remaining non-code follow-up items
+## 3. Remaining maintenance and roadmap follow-up items
 
-The current functional implementation milestone is closed. Remaining follow-up work is documentation/review work:
+The current functional implementation milestone is closed. Remaining follow-up work is not a blocker to functional closure:
 
-1. Review and approve `docs/documentation_consolidation_plan.md`.
-2. After approval, perform a separate documentation-only consolidation/archive milestone.
-3. Review the local untracked issue log later and integrate only durable items into active documentation.
+1. Review the local untracked issue log later and integrate only durable items into active documentation.
+2. Future detector robustness, presets, diagnostics, normalized defaults, and manual-first ROI improvements.
+3. Future segmented non-consecutive trimming, dynamic masks, batch preprocessing, and packaged cross-platform releases.
 
 The completed SLEAP handoff check was a prepared-video compatibility/frame-domain check only. Subsystem 01 still does not claim validation of pose quality, model accuracy, tracking quality, instance counts, confidence scores, coordinate exports, SLEAP inference results, or SLEAP output-row structure.
 
@@ -283,7 +289,7 @@ The final prepared video frame remains rectangular.
 
 Irregular excluded regions use prepared-coordinate polygon masks, not a non-rectangular prepared-video format.
 
-The broader final-spatial-geometry design is documented in `docs/preprocess_v2_6_geometry_modes_design.md`.
+The broader final-spatial-geometry design is documented in `docs/design/subsystem_01_geometry_modes.md`.
 
 ---
 
@@ -342,10 +348,8 @@ The following are intentionally deferred, not missing bugs:
 
 Subsystem 01 is functionally closed and entering maintenance. Recommended future work should remain separately scoped:
 
-1. Review and approve `docs/documentation_consolidation_plan.md`.
-2. Perform the separate documentation-only consolidation/archive milestone.
-3. Review the local untracked issue log later and integrate only durable items.
-4. Treat future feature work as separate scoped roadmap items, including detector robustness and diagnostics, optional reusable detector presets, normalized resolution-aware detector defaults, manual-first ROI workflow, future simple rectangle crop with optional manual rotation, segmented non-consecutive trimming, dynamic/keyframed masks, batch preprocessing, and packaged cross-platform releases.
+1. Review the local untracked issue log later and integrate only durable items.
+2. Treat future feature work as separate scoped roadmap items, including detector robustness and diagnostics, optional reusable detector presets, normalized resolution-aware detector defaults, manual-first ROI workflow, future simple rectangle crop with optional manual rotation, segmented non-consecutive trimming, dynamic/keyframed masks, batch preprocessing, and packaged cross-platform releases.
 
 ---
 

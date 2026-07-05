@@ -1,5 +1,7 @@
 # Preprocess Subsystem v2 Requirements Draft
 
+> **Archive notice:** This historical document is retained for traceability. It is not the current source of truth. See `docs/subsystem_01_preprocessing.md`, `docs/subsystem_01_status_and_roadmap.md`, and `docs/design/subsystem_01_geometry_modes.md`.
+
 **Status:** Draft for review; not approved  
 **Document type:** Requirements only; not an implementation plan  
 **Evidence source:** v1 implementation audit and first real-video GUI field test
