@@ -1,19 +1,18 @@
 # behavior_suite Documentation
 
-## Active subsystem documentation
+## Subsystem 01 — Video Preprocessing
 
-- [Subsystem 01 — Video Preprocessing](subsystem_01/preprocessing.md)
-- [Subsystem 01 — Status and Roadmap](subsystem_01/status_and_roadmap.md)
-- [Subsystem 01 — Geometry Modes](subsystem_01/design/geometry_modes.md)
+- [Functional Specification](subsystem_01/preprocessing.md)
+- [Status and Roadmap](subsystem_01/status_and_roadmap.md)
+- [Geometry Modes](subsystem_01/design/geometry_modes.md)
+- [Issue Logs](subsystem_01/issue_logs/)
+- [Historical Archive](subsystem_01/archive/)
 
 ## Subsystem 02 — SLEAP-NN Inference
 
-Subsystem 02 documentation will be added here as the inference subsystem is implemented.
+- [Inference Specification](subsystem_02/sleap_inference_specification.md)
+- [Acceptance-Test Specification](subsystem_02/acceptance_test_specification.md)
 
-## Development
+## General
 
-- [AI-Assisted Development Guide](development/ai_coding_guide.md)
-
-## Historical material
-
-Superseded plans, audits, and release snapshots should be retained under `archive/` when applicable. They are not the active implementation source of truth.
+- [AI-Assisted Development Guide](general/development/ai_coding_guide.md)

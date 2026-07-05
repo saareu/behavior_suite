@@ -62,9 +62,11 @@ Current active documentation:
 - `docs/subsystem_01/preprocessing.md` — canonical Subsystem 01 functional specification
 - `docs/subsystem_01/status_and_roadmap.md` — current status, field-tested evidence, and future roadmap items
 - `docs/subsystem_01/design/geometry_modes.md` — active future-facing spatial geometry design reference
-- `docs/development/ai_coding_guide.md` — repository-wide AI-assisted development guidance
+- `docs/subsystem_02/sleap_inference_specification.md` — Subsystem 02 inference specification
+- `docs/subsystem_02/acceptance_test_specification.md` — Subsystem 02 acceptance-test specification
+- `docs/general/development/ai_coding_guide.md` — repository-wide AI-assisted development guidance
 
-Historical plans, audits, release snapshots, and superseded design drafts are preserved under `docs/archive/`. They are retained for traceability but are not the current source of truth.
+Historical plans, audits, release snapshots, and superseded design drafts are preserved under `docs/subsystem_01/archive/`. They are retained for traceability but are not the current source of truth.
 
 ---
 
@@ -78,12 +80,11 @@ Future subsystems may cover SLEAP inference and tracking, pose quality control, 
 
 ## Development
 
-Before making repository changes, read:
+Before making repository changes, read the applicable documentation:
 
-```text
-docs/subsystem_01/preprocessing.md
-docs/subsystem_01/status_and_roadmap.md
-docs/development/ai_coding_guide.md
-```
+- `docs/subsystem_01/preprocessing.md`
+- `docs/subsystem_01/status_and_roadmap.md`
+- `docs/subsystem_02/sleap_inference_specification.md` — required when changing or implementing Subsystem 02
+- `docs/general/development/ai_coding_guide.md`
 
 Keep changes scoped, preserve scientific invariants, and update tests for any implementation behavior change.
