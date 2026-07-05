@@ -2,7 +2,7 @@
 
 **Subsystem:** Video preprocessing  
 **Status date:** 2026-07-05  
-**Purpose:** Compact current-status document for closing the current Subsystem 01 milestone and separating implemented behavior, closure checks, and deferred roadmap items.
+**Purpose:** Compact current-status document for the current Subsystem 01 milestone, maintenance status, and deferred roadmap items.
 
 This document is a status and roadmap companion to the canonical functional specification in `docs/preprocess_subsystem_spec_v1.md`. It does not replace the scientific invariants in that specification.
 
@@ -21,6 +21,14 @@ The scope remains narrow:
 - hand off a prepared video that SLEAP can read frame-for-frame.
 
 This subsystem does not evaluate SLEAP pose quality, tracking quality, pose confidence, downstream pose rows, behavior features, or behavioral classifications.
+
+Current functional status:
+
+```text
+Functionally closed and entering maintenance.
+```
+
+This does not forbid future feature work. It means the current Subsystem 01 functional implementation milestone has passed its required compatibility checks, and future work should be treated as separate scoped roadmap items.
 
 ---
 
@@ -65,37 +73,52 @@ Additional completed field-tested checks:
 - External timing has already been successfully used in a real prepared project. Timing-variable auto-selection remains outside Subsystem 01 scope.
 - Static prepared-coordinate exclusion masks have been tested through the real GUI and preprocessing workflow. Rectangle and polygon masks were verified in prepared output, and prepared-video/background behavior was checked.
 - The supported Windows runtime, installer, and launcher have been tested on two different Windows machines. A mixed pip/Conda PySide6 environment was repaired successfully, FFmpeg 7.1.1 doctor/preflight passed, the GUI launched successfully, and a real preprocessing run produced a prepared video on the second machine.
+- The SLEAP read-only handoff check passed without running model inference. Prepared-video metadata recorded expected/readable/reported frame counts of 5716 with prepared size 928 × 528. SLEAP reported video shape `(5716, 528, 928, 3)`, reported 5716 frames, and successfully read frame 0, frame 2858, and frame 5715. Therefore:
+
+  ```text
+  prepared-video readable-frame count
+  =
+  SLEAP-readable frame count
+  =
+  5716
+  ```
 
 ---
 
-## 3. Remaining closure items
+## 3. Remaining non-code follow-up items
 
-Before formally closing the current Subsystem 01 milestone, the remaining items are narrow:
+The current functional implementation milestone is closed. Remaining follow-up work is documentation/review work:
 
-1. Complete one SLEAP handoff acceptance check:
+1. Review and approve `docs/documentation_consolidation_plan.md`.
+2. After approval, perform a separate documentation-only consolidation/archive milestone.
+3. Review the local untracked issue log later and integrate only durable items into active documentation.
 
-   ```text
-   prepared-video readable-frame count
-   =
-   frame count SLEAP reads from the prepared video
-   ```
-
-2. Review and approve `docs/documentation_consolidation_plan.md`.
-3. After approval, perform a separate documentation-only consolidation/archive milestone.
-4. Review the local untracked issue log later and integrate only durable items into active documentation.
-
-These closure items must not broaden Subsystem 01 into SLEAP result validation. Subsystem 01 still does not claim validation of pose quality, tracking quality, confidence values, or SLEAP output-row structure.
+The completed SLEAP handoff check was a prepared-video compatibility/frame-domain check only. Subsystem 01 still does not claim validation of pose quality, model accuracy, tracking quality, instance counts, confidence scores, coordinate exports, SLEAP inference results, or SLEAP output-row structure.
 
 ---
 
-## 4. Narrow SLEAP handoff/frame-count closure requirement
+## 4. Completed narrow SLEAP handoff/frame-count closure requirement
 
-Subsystem 01 closure requires one end-to-end SLEAP handoff check:
+Subsystem 01 required one read-only SLEAP handoff check:
 
 ```text
 prepared-video readable-frame count
 =
 frame count SLEAP reads from that prepared video
+```
+
+This check has passed:
+
+```text
+expected_frame_count = 5716
+opencv_readable_frame_count = 5716
+opencv_reported_frame_count = 5716
+prepared size = 928 x 528
+SLEAP video shape = (5716, 528, 928, 3)
+SLEAP-reported frame count = 5716
+frame 0 read successfully
+frame 2858 read successfully
+frame 5715 read successfully
 ```
 
 This is intentionally narrow. It does not include validating:
@@ -315,16 +338,14 @@ The following are intentionally deferred, not missing bugs:
 
 ---
 
-## 12. Recommended implementation order after closure
+## 12. Recommended implementation order after functional closure
 
-After the remaining Subsystem 01 closure items are complete:
+Subsystem 01 is functionally closed and entering maintenance. Recommended future work should remain separately scoped:
 
-1. Consolidate documentation using `docs/documentation_consolidation_plan.md`.
-2. Keep Subsystem 01 in maintenance mode while starting the narrow SLEAP subsystem handoff.
-3. Add detector diagnostics and optional detector-preset design only after closure.
-4. Implement future geometry modes only after the authoritative-transform contract is accepted.
-5. Consider segmented trimming only with explicit segment manifests and raw-frame mapping.
-6. Defer batch processing and packaged desktop releases until the single-project workflow is stable.
+1. Review and approve `docs/documentation_consolidation_plan.md`.
+2. Perform the separate documentation-only consolidation/archive milestone.
+3. Review the local untracked issue log later and integrate only durable items.
+4. Treat future feature work as separate scoped roadmap items, including detector robustness and diagnostics, optional reusable detector presets, normalized resolution-aware detector defaults, manual-first ROI workflow, future simple rectangle crop with optional manual rotation, segmented non-consecutive trimming, dynamic/keyframed masks, batch preprocessing, and packaged cross-platform releases.
 
 ---
 
@@ -336,7 +357,7 @@ After the remaining Subsystem 01 closure items are complete:
 | Manual ROI + no external timing | Completed/field-tested | Representative full video | Six official artifacts, strict prepared-video validation, fallback FPS source recorded | Does not validate tracking |
 | Static mask | Completed/field-tested | Real GUI and preprocessing workflow with rectangle and polygon masks | Masked pixels verified in prepared output; prepared video and background behavior checked | Does not implement dynamic masks |
 | Windows runtime | Completed/field-tested | Two Windows machines, including a previously mixed pip/Conda PySide6 environment | Mixed environment repaired, FFmpeg 7.1.1 doctor/preflight passed, GUI launched, and a real preprocessing run produced a prepared video on the second machine | Does not create packaged release |
-| SLEAP handoff | Remaining closure check | Prepared video from accepted workflow | SLEAP-read frame count equals prepared-video readable-frame count | Does not evaluate pose quality, tracking, confidence values, or output-row structure |
+| SLEAP handoff | Completed/field-tested | Prepared video from accepted workflow | Expected/readable/SLEAP frame count = 5716; prepared size = 928 × 528; SLEAP read frame 0, frame 2858, and frame 5715 | Does not evaluate pose quality, model accuracy, tracking, instance counts, confidence values, coordinate exports, inference results, or output-row structure |
 | Regression tests | Ongoing development practice | Small known inputs, generated frames, mocked FFmpeg output, or small fixtures | Expected outputs/errors/behavior retained permanently | Does not require large real lab videos |
 
 Regression tests mean:
