@@ -6,6 +6,7 @@ from preprocess.crop_plan import CropMode, CropPlan, compute_canonical_geometry
 from preprocess.exceptions import CropPlanError
 from preprocess.manual_crop import (
     make_axis_aligned_rectangle_crop_plan,
+    make_full_frame_crop_plan,
     make_manual_crop_plan,
 )
 
@@ -75,6 +76,17 @@ def _make_rectangle_plan(
     )
 
 
+def _make_full_frame_plan(
+    *,
+    raw_frame_shape: tuple[int, int] = RAW_FRAME_SHAPE,
+    canonical_resolution: CanonicalResolutionConfig | None = None,
+) -> CropPlan:
+    return make_full_frame_crop_plan(
+        raw_frame_shape=raw_frame_shape,
+        canonical_resolution=canonical_resolution or _canonical_config(),
+    )
+
+
 def test_valid_manual_crop_returns_unaccepted_manual_crop_plan() -> None:
     plan = _make_plan()
 
@@ -120,6 +132,58 @@ def test_axis_aligned_rectangle_can_be_portrait_without_rotation() -> None:
     assert plan.rotated_90 is False
     assert plan.native_size_wh == (60, 100)
     assert plan.prepared_size_wh == (60, 100)
+
+
+def test_full_frame_plan_maps_raw_corners_and_preserves_native_size() -> None:
+    plan = _make_full_frame_plan(canonical_resolution=_canonical_config(enabled=False))
+    raw_corners = np.array(
+        [[0.0, 0.0], [639.0, 0.0], [639.0, 479.0], [0.0, 479.0]],
+        dtype=np.float64,
+    )
+
+    assert plan.mode is CropMode.FULL_FRAME
+    assert plan.accepted_by_user is False
+    assert plan.rotated_90 is False
+    assert plan.native_size_wh == (640, 480)
+    assert plan.prepared_size_wh == (640, 480)
+    np.testing.assert_array_equal(plan.quad_raw_tl_tr_br_bl, raw_corners)
+    np.testing.assert_allclose(
+        _transform_points(plan.H_raw_to_prepared_3x3, raw_corners),
+        raw_corners,
+        atol=1e-8,
+    )
+
+
+def test_full_frame_plan_preserves_portrait_orientation_without_canonical() -> None:
+    plan = _make_full_frame_plan(
+        raw_frame_shape=(640, 480),
+        canonical_resolution=_canonical_config(enabled=False),
+    )
+
+    assert plan.rotated_90 is False
+    assert plan.native_size_wh == (480, 640)
+    assert plan.prepared_size_wh == (480, 640)
+
+
+def test_full_frame_plan_records_existing_canonical_scale_pad() -> None:
+    plan = _make_full_frame_plan(
+        raw_frame_shape=(480, 640),
+        canonical_resolution=_canonical_config(enabled=True, size_wh=(320, 240)),
+    )
+    canonical = plan.canonical_geometry
+
+    assert canonical is not None
+    assert plan.native_size_wh == (640, 480)
+    assert plan.prepared_size_wh == (320, 240)
+    assert canonical.native_size_wh == (640, 480)
+    assert canonical.canonical_size_wh == (320, 240)
+    assert canonical.uniform_scale == pytest.approx(0.5)
+    assert canonical.scaled_size_wh == (320, 240)
+
+
+def test_full_frame_plan_rejects_odd_raw_dimensions() -> None:
+    with pytest.raises(CropPlanError, match="even"):
+        _make_full_frame_plan(raw_frame_shape=(481, 640))
 
 
 def test_axis_aligned_rectangle_inside_pre_crop_keeps_raw_coordinates() -> None:

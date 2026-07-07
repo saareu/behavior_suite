@@ -21,6 +21,7 @@ from preprocess.config import PreprocessConfig
 from preprocess.crop_plan import (
     PERSPECTIVE_REPROJECTION_ATOL_PX,
     CanonicalGeometry,
+    CropMode,
     CropPlan,
     build_clockwise_rotation_transform,
 )
@@ -428,6 +429,104 @@ def _validate_canonical_contract(
     return canonical
 
 
+def _full_frame_quad(raw_width: int, raw_height: int) -> np.ndarray:
+    return np.array(
+        [
+            [0.0, 0.0],
+            [float(raw_width - 1), 0.0],
+            [float(raw_width - 1), float(raw_height - 1)],
+            [0.0, float(raw_height - 1)],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _validate_full_frame_contract(
+    crop_plan: CropPlan,
+    config: PreprocessConfig,
+) -> CanonicalGeometry:
+    if config.pre_crop.enabled or config.pre_crop.mode != "none":
+        raise VideoPreparationError(
+            "Full-frame mode requires pre-crop to be disabled."
+        )
+    if crop_plan.pre_crop_roi.x != 0 or crop_plan.pre_crop_roi.y != 0:
+        raise VideoPreparationError("Full-frame CropPlan pre_crop_roi must start at (0, 0).")
+    raw_width = crop_plan.pre_crop_roi.width
+    raw_height = crop_plan.pre_crop_roi.height
+    if raw_width % 2 or raw_height % 2:
+        raise VideoPreparationError(
+            "Full-frame raw width and height must be even for the current "
+            "preparation path."
+        )
+    if crop_plan.rotated_90:
+        raise VideoPreparationError("Full-frame CropPlan must not request rotation.")
+    if crop_plan.native_size_wh != (raw_width, raw_height):
+        raise VideoPreparationError("Full-frame native size must equal the raw frame size.")
+    if not np.allclose(
+        crop_plan.quad_raw_tl_tr_br_bl,
+        _full_frame_quad(raw_width, raw_height),
+        rtol=0.0,
+        atol=PERSPECTIVE_REPROJECTION_ATOL_PX,
+    ):
+        raise VideoPreparationError("Full-frame CropPlan quadrilateral must cover the raw frame.")
+    return _validate_canonical_contract(crop_plan, config)
+
+
+def _build_full_frame_filtergraph(
+    crop_plan: CropPlan,
+    config: PreprocessConfig,
+    *,
+    start_frame: int,
+    end_frame_exclusive: int | None,
+) -> tuple[str, FiltergraphMetadata]:
+    canonical = _validate_full_frame_contract(crop_plan, config)
+    filters: list[str] = []
+    stages: list[str] = []
+    if end_frame_exclusive is None:
+        filters.append(f"select=gte(n\\,{start_frame})")
+    else:
+        filters.append(
+            f"select=between(n\\,{start_frame}\\,{end_frame_exclusive - 1})"
+        )
+    stages.append("frame_index_select")
+    filters.append("setpts=PTS-STARTPTS")
+    stages.append("timestamp_origin_reset")
+    stages.append("full_frame_identity")
+
+    canonical_config = config.prepare.canonical_resolution
+    if canonical_config.enabled:
+        scale_flag = _SCALE_FLAG_MAP[canonical_config.flags]
+        scaled_width, scaled_height = canonical.scaled_size_wh
+        filters.append(f"scale={scaled_width}:{scaled_height}:flags={scale_flag}")
+        stages.append("canonical_uniform_scale")
+        filters.append(
+            f"pad={crop_plan.prepared_size_wh[0]}:{crop_plan.prepared_size_wh[1]}:"
+            f"{canonical.padding_left}:{canonical.padding_top}:color=black"
+        )
+        stages.append("canonical_padding")
+    filters.append("setsar=1")
+    stages.append("square_sample_aspect_ratio")
+
+    roi = crop_plan.pre_crop_roi
+    metadata = FiltergraphMetadata(
+        stages=tuple(stages),
+        start_frame=start_frame,
+        end_frame_exclusive=end_frame_exclusive,
+        pre_crop_roi_xywh=(roi.x, roi.y, roi.width, roi.height),
+        quad_pre_crop_tl_tr_br_bl=_quad_as_tuple(crop_plan.quad_raw_tl_tr_br_bl),
+        rectified_content_size_wh=(roi.width, roi.height),
+        rectification_padding_lrtb=(0, 0, 0, 0),
+        pre_rotation_size_wh=(roi.width, roi.height),
+        native_size_wh=crop_plan.native_size_wh,
+        rotated_90=False,
+        canonical_enabled=canonical_config.enabled,
+        canonical_geometry=canonical,
+        expected_output_size_wh=crop_plan.prepared_size_wh,
+        perspective_interpolation=config.prepare.perspective_interpolation,
+    )
+    return ",".join(filters), metadata
+
+
 def build_prepare_filtergraph(
     crop_plan: CropPlan,
     config: PreprocessConfig,
@@ -447,6 +546,13 @@ def build_prepare_filtergraph(
     """
 
     _validate_trim(start_frame, end_frame_exclusive)
+    if crop_plan.mode is CropMode.FULL_FRAME:
+        return _build_full_frame_filtergraph(
+            crop_plan,
+            config,
+            start_frame=start_frame,
+            end_frame_exclusive=end_frame_exclusive,
+        )
     canonical = _validate_canonical_contract(crop_plan, config)
     (
         pre_rotation_size_wh,

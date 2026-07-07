@@ -19,6 +19,7 @@ from preprocess.crop_plan import CropMode, CropPlan
 from preprocess.exceptions import CageDetectionError, CropPlanError, VideoProbeError
 from preprocess.manual_crop import (
     make_axis_aligned_rectangle_crop_plan,
+    make_full_frame_crop_plan,
     make_manual_crop_plan,
 )
 from preprocess.masking import apply_static_mask_to_frame
@@ -202,6 +203,7 @@ def _controller(
     detector=_detector,
     manual_plan_builder=make_manual_crop_plan,
     manual_rectangle_plan_builder=make_axis_aligned_rectangle_crop_plan,
+    full_frame_plan_builder=make_full_frame_crop_plan,
     preview_builder=build_crop_preview,
 ) -> CropReviewController:
     return CropReviewController(
@@ -210,6 +212,7 @@ def _controller(
         frame_reader=frame_reader or (lambda _path, _index: FRAME.copy()),
         manual_plan_builder=manual_plan_builder,
         manual_rectangle_plan_builder=manual_rectangle_plan_builder,
+        full_frame_plan_builder=full_frame_plan_builder,
         preview_builder=preview_builder,
     )
 
@@ -478,6 +481,28 @@ def test_manual_rectangle_page_shows_live_rectangle_and_crop_size(
     assert "Height: 30 px" in page.rectangle_geometry_label.text()
     assert "Width: 40 px" in page.crop_size_label.text()
     assert "Height: 30 px" in page.crop_size_label.text()
+
+
+def test_full_frame_page_shows_content_and_prepared_sizes(
+    tmp_path: Path,
+    qt_application: object,
+) -> None:
+    del qt_application
+    from ui.pages.crop_review_page import CropReviewPage
+
+    setup_controller = PreprocessSetupController(state=_state(tmp_path))
+    page = CropReviewPage(setup_controller)
+    page.controller._frame_reader = lambda _path, _index: FRAME.copy()
+
+    page.controller.select_full_frame()
+    page.refresh_from_state()
+
+    assert "Full-frame content size" in page.full_frame_summary.text()
+    assert "Width: 100 px" in page.full_frame_summary.text()
+    assert "Height: 80 px" in page.full_frame_summary.text()
+    assert "Prepared output size" in page.full_frame_summary.text()
+    assert "Width: 100 px" in page.full_frame_summary.text()
+    assert "Height: 80 px" in page.full_frame_summary.text()
 
 
 def test_reset_detector_settings_at_defaults_is_no_op(tmp_path: Path) -> None:
@@ -844,6 +869,76 @@ def test_axis_aligned_rectangle_does_not_run_or_mutate_detector(
     assert detector_calls == 0
     assert plan.mode is CropMode.MANUAL
     assert controller.state.detector_diagnostics is None
+
+
+def test_full_frame_mode_does_not_run_or_mutate_detector(tmp_path: Path) -> None:
+    detector_calls = 0
+
+    def detector(_path, _config, _pre_crop):
+        nonlocal detector_calls
+        detector_calls += 1
+        return _detector(_path, _config, _pre_crop)
+
+    controller = _controller(tmp_path, detector=detector)
+
+    plan = controller.select_full_frame()
+
+    assert detector_calls == 0
+    assert controller.state.crop_mode is CropReviewMode.FULL_FRAME
+    assert plan.mode is CropMode.FULL_FRAME
+    assert plan.accepted_by_user is False
+    assert plan.rotated_90 is False
+    assert plan.native_size_wh == (100, 80)
+    assert controller.crop_content_size_wh() == (100, 80)
+    assert controller.state.detector_diagnostics is None
+    assert controller.can_advance() is False
+
+
+def test_full_frame_mode_rejects_odd_raw_dimensions_without_adjustment(
+    tmp_path: Path,
+) -> None:
+    odd_frame = np.full((81, 100, 3), 120, dtype=np.uint8)
+    state = _state(tmp_path)
+    assert state.raw_probe is not None
+    assert state.preprocess_config is not None
+    state.raw_probe = state.raw_probe.model_copy(update={"height": 81})
+    state.resolved_pre_crop = resolve_pre_crop(state.preprocess_config.pre_crop, (100, 81))
+    controller = CropReviewController(
+        state,
+        frame_reader=lambda _path, _index: odd_frame.copy(),
+    )
+
+    with pytest.raises(CropReviewValidationError, match="even"):
+        controller.select_full_frame()
+
+    assert controller.state.candidate_crop_plan is None
+    assert controller.state.accepted_crop_plan is None
+    assert controller.prepared_preview is None
+    assert controller.state.crop_review_status == "full_frame_invalid"
+
+
+def test_full_frame_mode_rejects_enabled_pre_crop_clearly(tmp_path: Path) -> None:
+    config = PreprocessConfig(
+        pre_crop={
+            "enabled": True,
+            "mode": PreCropMode.MANUAL_RECTANGLE,
+            "manual_rectangle": (0, 0, 100, 80),
+        },
+        prepare=_config().prepare,
+    )
+    state = _state(tmp_path, config=config)
+    controller = CropReviewController(
+        state,
+        detector=_detector,
+        frame_reader=lambda _path, _index: FRAME.copy(),
+    )
+
+    with pytest.raises(CropReviewValidationError, match="pre-crop to be disabled"):
+        controller.select_full_frame()
+
+    assert state.candidate_crop_plan is None
+    assert state.accepted_crop_plan is None
+    assert controller.prepared_preview is None
 
 
 def test_axis_aligned_rectangle_delegates_plan_construction_to_core_helper(

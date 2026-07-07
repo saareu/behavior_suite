@@ -19,6 +19,7 @@ from preprocess.exceptions import (
 )
 from preprocess.manual_crop import (
     make_axis_aligned_rectangle_crop_plan,
+    make_full_frame_crop_plan,
     make_manual_crop_plan,
 )
 from preprocess.video_prepare import (
@@ -196,6 +197,47 @@ def test_axis_aligned_rectangle_filtergraph_preserves_portrait_orientation() -> 
     assert metadata.pre_rotation_size_wh == (60, 100)
     assert metadata.native_size_wh == (60, 100)
     assert metadata.expected_output_size_wh == (60, 100)
+
+
+def test_full_frame_filtergraph_has_no_crop_perspective_or_rotation() -> None:
+    config = _config(canonical_enabled=False, canonical_size_wh=(400, 400))
+    plan = make_full_frame_crop_plan(
+        raw_frame_shape=(320, 240),
+        canonical_resolution=config.prepare.canonical_resolution,
+    )
+
+    filtergraph, metadata = build_prepare_filtergraph(plan, config)
+
+    assert "crop=" not in filtergraph
+    assert "perspective=" not in filtergraph
+    assert "transpose=" not in filtergraph
+    assert "scale=" not in filtergraph
+    assert "pad=" not in filtergraph
+    assert "full_frame_identity" in metadata.stages
+    assert "even_dimension_guard" not in metadata.stages
+    assert metadata.rectified_content_size_wh == (240, 320)
+    assert metadata.expected_output_size_wh == (240, 320)
+    assert metadata.rotated_90 is False
+
+
+def test_full_frame_filtergraph_rejects_enabled_pre_crop() -> None:
+    config = PreprocessConfig.model_validate(
+        {
+            **_config(canonical_enabled=False).model_dump(mode="python"),
+            "pre_crop": {
+                "enabled": True,
+                "mode": "manual_rectangle",
+                "manual_rectangle": (0, 0, 240, 320),
+            },
+        }
+    )
+    plan = make_full_frame_crop_plan(
+        raw_frame_shape=(320, 240),
+        canonical_resolution=config.prepare.canonical_resolution,
+    )
+
+    with pytest.raises(VideoPreparationError, match="pre-crop"):
+        build_prepare_filtergraph(plan, config)
 
 
 def test_filtergraph_applies_pre_crop_and_preserves_local_quad_metadata() -> None:

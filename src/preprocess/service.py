@@ -23,6 +23,7 @@ from preprocess.background import (
 )
 from preprocess.cage_detection import detect_cage_crop_plan
 from preprocess.config import PreprocessConfig
+from preprocess.crop_plan import CropMode, CropPlan
 from preprocess.exceptions import (
     PreprocessCancelledError,
     PreprocessError,
@@ -253,6 +254,25 @@ def _validate_selection_provenance(selection: ExternalTimeSelection, raw_count: 
             "External timing vector length must equal the raw readable frame count."
         )
     return unit
+
+
+def _validate_full_frame_plan_matches_probe(
+    crop_plan: CropPlan,
+    raw_probe: VideoProbeResult,
+) -> None:
+    if crop_plan.mode is not CropMode.FULL_FRAME:
+        return
+    expected_size = (raw_probe.width, raw_probe.height)
+    roi = crop_plan.pre_crop_roi
+    if (
+        roi.x != 0
+        or roi.y != 0
+        or (roi.width, roi.height) != expected_size
+        or crop_plan.native_size_wh != expected_size
+    ):
+        raise PreprocessServiceError(
+            "Full-frame CropPlan must match the probed raw video dimensions."
+        )
 
 
 def _resolve_external_timing(
@@ -620,6 +640,7 @@ class PreprocessService:
                 )
             if not request.crop_accepted_by_user:
                 raise PreprocessServiceError("The request must explicitly confirm crop acceptance.")
+            _validate_full_frame_plan_matches_probe(crop_plan, raw_probe)
 
             assert staged_outputs is not None
             raise_if_cancelled()

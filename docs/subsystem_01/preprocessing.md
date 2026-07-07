@@ -148,8 +148,13 @@ Current behavior:
 - automatic cage detection produces a candidate `CropPlan`;
 - manual ROI supports manual four-corner geometry and manual axis-aligned
   rectangle geometry; both produce a `CropPlan`;
+- Full frame — no crop produces a candidate `CropPlan` for the whole raw frame
+  without detector invocation, manual geometry, pre-crop, perspective crop, or
+  automatic rotation;
 - the axis-aligned rectangle route preserves source orientation and does not
   request the historical automatic portrait-to-landscape rotation;
+- the full-frame route preserves source orientation and records
+  `rotated_90: false`;
 - the GUI displays live crop-content width/height from authoritative
   `CropPlan.native_size_wh` once valid geometry exists;
 - the user must explicitly accept geometry before final processing;
@@ -157,7 +162,13 @@ Current behavior:
 - prepared video remains rectangular;
 - canonical output sizing preserves aspect ratio through uniform scaling and padding.
 
-Future geometry modes are designed separately in `docs/subsystem_01/design/geometry_modes.md`. They include identity, axis-aligned pre-crop-only, current perspective CropPlan, and future composed geometry. Those future modes are not implemented unless explicitly stated in a later scoped implementation.
+Full frame — no crop means whole raw frame, no pre-crop, no perspective crop,
+and no automatic rotation. Static masks remain a separate optional
+prepared-coordinate operation. Canonical scale/pad may still affect the final
+prepared output size if enabled, so full-frame content size and prepared output
+size may differ. Canonical scale/pad is not cropping.
+
+Future geometry modes are designed separately in `docs/subsystem_01/design/geometry_modes.md`. They include identity/full-frame, axis-aligned pre-crop-only, current perspective CropPlan, and future composed geometry. Modes not listed above as implemented are not available unless explicitly stated in a later scoped implementation.
 
 Optional manual post-crop rotation remains deferred. Current documentation must not imply that existing four-corner CropPlan behavior has changed.
 

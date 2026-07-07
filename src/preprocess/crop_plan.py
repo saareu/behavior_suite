@@ -31,6 +31,7 @@ class CropMode(StrEnum):
 
     AUTOMATIC = "automatic"
     MANUAL = "manual"
+    FULL_FRAME = "full_frame"
 
 
 def _cross_z(point_a: np.ndarray, point_b: np.ndarray, point_c: np.ndarray) -> float:

@@ -45,7 +45,7 @@ The current implementation supports the ordinary preprocessing workflow:
 ```text
 Choose video
 → inspect / trim / optionally pre-crop
-→ choose Detect cage automatically or Manual ROI
+→ choose Detect cage automatically, Manual ROI, or Full frame — no crop
 → review accepted geometry
 → optionally add static exclusion masks
 → prepare video
@@ -60,6 +60,9 @@ The following are implemented:
 - optional pre-crop before final spatial processing;
 - automatic cage detection with adjustable detector settings;
 - manual ROI route with four-corner and axis-aligned rectangle selection;
+- Full frame — no crop route for preparing the whole raw frame without
+  automatic detection, manual geometry, pre-crop, perspective crop, or
+  automatic rotation;
 - live crop-content width/height display for valid manual geometry;
 - explicit crop/geometry acceptance before final processing;
 - two-stage video preparation with ffmpeg followed by OpenCV final re-encode;
@@ -173,7 +176,7 @@ The normal GUI workflow should remain simple and user-facing:
 ```text
 Choose video
 → inspect / trim / optionally pre-crop
-→ choose Detect cage automatically or Manual ROI
+→ choose Detect cage automatically, Manual ROI, or Full frame — no crop
 → review accepted geometry
 → optionally add static exclusion masks
 → prepare video
@@ -285,6 +288,18 @@ Future geometry distinctions should continue to be documented and implemented ca
 ### Final prepared frame
 
 The final prepared video frame remains rectangular.
+
+### Full frame — no crop
+
+Full frame — no crop is implemented as an explicit geometry-review route. It
+uses the whole raw frame, requires pre-crop to be disabled, performs no
+automatic detector invocation, uses no manual geometry, applies no perspective
+crop, and records `rotated_90: false`.
+
+Static masks remain a separate optional prepared-coordinate operation.
+Canonical scale/pad remains available and may make the prepared output size
+different from the full-frame content size; canonical scale/pad is not
+cropping.
 
 ### Irregular exclusions
 

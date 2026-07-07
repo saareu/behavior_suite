@@ -323,6 +323,7 @@ def build_prepare_metadata(
     validation_status = "passed" if prepared_validation.is_valid else "failed"
     geometry = _geometry_metadata(crop_plan, preprocess_config)
     is_automatic = crop_plan.mode is CropMode.AUTOMATIC
+    is_manual = crop_plan.mode is CropMode.MANUAL
     ffmpeg_config = preprocess_config.encoding.ffmpeg
     opencv_config = preprocess_config.encoding.opencv
     metadata: dict[str, object] = {
@@ -376,7 +377,7 @@ def build_prepare_metadata(
                 detector_diagnostics if is_automatic and detector_diagnostics else {}
             ),
         },
-        "manual_crop": {"used": not is_automatic},
+        "manual_crop": {"used": is_manual},
         "geometry": geometry,
         "encoding": {
             "ffmpeg": {
@@ -605,6 +606,11 @@ def validate_prepare_metadata(metadata: dict[str, object]) -> None:
         if manual_used is not True or cage_used is not False:
             raise MetadataArtifactError(
                 "Manual geometry requires manual_crop used and cage_detection unused."
+            )
+    elif mode == CropMode.FULL_FRAME.value:
+        if manual_used is not False or cage_used is not False:
+            raise MetadataArtifactError(
+                "Full-frame geometry requires cage_detection and manual_crop unused."
             )
     else:
         raise MetadataArtifactError(f"Unsupported geometry mode: {mode}")

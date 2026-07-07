@@ -89,15 +89,18 @@ class CropReviewPage(QWidget):
         self.automatic_mode = QRadioButton("Automatic detection / retry")
         self.manual_mode = QRadioButton("Manual four-corner crop")
         self.manual_rectangle_mode = QRadioButton("Axis-aligned rectangle")
+        self.full_frame_mode = QRadioButton("Full frame — no crop")
         self.automatic_mode.toggled.connect(self._mode_changed)
         self.manual_mode.toggled.connect(self._mode_changed)
         self.manual_rectangle_mode.toggled.connect(self._mode_changed)
+        self.full_frame_mode.toggled.connect(self._mode_changed)
         self.load_frame_button = QPushButton("Load Representative Frame")
         self.load_frame_button.clicked.connect(self._load_frame)
         mode_row = QHBoxLayout()
         mode_row.addWidget(self.automatic_mode)
         mode_row.addWidget(self.manual_mode)
         mode_row.addWidget(self.manual_rectangle_mode)
+        mode_row.addWidget(self.full_frame_mode)
         mode_row.addStretch(1)
         mode_row.addWidget(self.load_frame_button)
 
@@ -129,6 +132,7 @@ class CropReviewPage(QWidget):
         controls_layout = QVBoxLayout(controls)
         controls_layout.addWidget(self._build_automatic_group())
         controls_layout.addWidget(self._build_manual_group())
+        controls_layout.addWidget(self._build_full_frame_group())
         controls_layout.addWidget(self._build_diagnostics_group())
         controls_layout.addWidget(self._build_mask_group())
         self.busy_indicator = QProgressBar()
@@ -297,6 +301,14 @@ class CropReviewPage(QWidget):
         layout.addWidget(self.clear_rectangle_button)
         return self.manual_group
 
+    def _build_full_frame_group(self) -> QGroupBox:
+        self.full_frame_group = QGroupBox("Full frame — no crop")
+        self.full_frame_summary = QLabel("Full-frame candidate is not available.")
+        self.full_frame_summary.setWordWrap(True)
+        layout = QVBoxLayout(self.full_frame_group)
+        layout.addWidget(self.full_frame_summary)
+        return self.full_frame_group
+
     def _build_diagnostics_group(self) -> QGroupBox:
         group = QGroupBox("Candidate diagnostics")
         self.diagnostics = {
@@ -406,6 +418,7 @@ class CropReviewPage(QWidget):
         self.manual_rectangle_mode.setChecked(
             state.crop_mode is CropReviewMode.MANUAL_RECTANGLE
         )
+        self.full_frame_mode.setChecked(state.crop_mode is CropReviewMode.FULL_FRAME)
         config = state.preprocess_config
         if config is not None:
             detector = config.cage_detect
@@ -445,6 +458,10 @@ class CropReviewPage(QWidget):
             in {CropReviewMode.MANUAL, CropReviewMode.MANUAL_RECTANGLE}
             and not self._busy
         )
+        self.full_frame_group.setVisible(state.crop_mode is CropReviewMode.FULL_FRAME)
+        self.full_frame_group.setEnabled(
+            state.crop_mode is CropReviewMode.FULL_FRAME and not self._busy
+        )
         rectangle_mode = state.crop_mode is CropReviewMode.MANUAL_RECTANGLE
         self.manual_instructions.setText(
             "Drag one source-image-axis-aligned rectangle on the raw frame. "
@@ -479,6 +496,7 @@ class CropReviewPage(QWidget):
             if crop_size is None
             else f"Crop size\nWidth: {crop_size[0]} px\nHeight: {crop_size[1]} px"
         )
+        self._refresh_full_frame_summary()
         self.raw_view.set_frame(self.controller.representative_frame)
         prepared_preview = self.controller.prepared_preview
         self.preview_view.set_frame(prepared_preview)
@@ -924,14 +942,19 @@ class CropReviewPage(QWidget):
             return
         if self.manual_rectangle_mode.isChecked():
             mode = CropReviewMode.MANUAL_RECTANGLE
+        elif self.full_frame_mode.isChecked():
+            mode = CropReviewMode.FULL_FRAME
         elif self.manual_mode.isChecked():
             mode = CropReviewMode.MANUAL
         else:
             mode = CropReviewMode.AUTOMATIC
         try:
             self.controller.set_crop_mode(mode)
+            if mode is CropReviewMode.FULL_FRAME:
+                self.controller.select_full_frame()
         except CropReviewValidationError as exc:
             self._show_expected_error(str(exc))
+            self.refresh_from_state()
             return
         self.error_label.clear()
         self.refresh_from_state()
@@ -939,6 +962,10 @@ class CropReviewPage(QWidget):
             self.status_message.emit("Select four manual points in the prescribed order.")
         elif mode is CropReviewMode.MANUAL_RECTANGLE:
             self.status_message.emit("Draw an axis-aligned rectangle on the raw frame.")
+        elif mode is CropReviewMode.FULL_FRAME:
+            self.status_message.emit(
+                "Full-frame crop candidate is ready for review; it is not accepted."
+            )
 
     def _manual_point_clicked(self, x: float, y: float) -> None:
         try:
@@ -1024,6 +1051,47 @@ class CropReviewPage(QWidget):
             f"({roi.x}, {roi.y}, {roi.width}, {roi.height})"
         )
 
+    def _refresh_full_frame_summary(self) -> None:
+        if self.controller.state.crop_mode is not CropReviewMode.FULL_FRAME:
+            return
+        state = self.controller.state
+        pre_crop = state.resolved_pre_crop
+        config = state.preprocess_config
+        if (
+            config is not None
+            and pre_crop is not None
+            and (config.pre_crop.enabled or pre_crop.mode.value != "none")
+        ):
+            self.full_frame_summary.setText(
+                "Unavailable: Full frame — no crop requires pre-crop to be "
+                "disabled on the Trim and Pre-Crop page."
+            )
+            return
+        content_size = self.controller.crop_content_size_wh()
+        prepared_size = self.controller.prepared_preview_size_wh()
+        raw_probe = state.raw_probe
+        if content_size is None and raw_probe is not None:
+            content_size = (raw_probe.width, raw_probe.height)
+        content_text = (
+            "Full-frame content size: not available"
+            if content_size is None
+            else (
+                "Full-frame content size\n"
+                f"Width: {content_size[0]} px\n"
+                f"Height: {content_size[1]} px"
+            )
+        )
+        prepared_text = (
+            "Prepared output size: not available"
+            if prepared_size is None
+            else (
+                "Prepared output size\n"
+                f"Width: {prepared_size[0]} px\n"
+                f"Height: {prepared_size[1]} px"
+            )
+        )
+        self.full_frame_summary.setText(f"{content_text}\n\n{prepared_text}")
+
     def _refresh_detector_defaults_status(self) -> None:
         modified = self.controller.detector_settings_modified_fields()
         if not modified:
@@ -1052,6 +1120,7 @@ class CropReviewPage(QWidget):
         self.automatic_mode.setEnabled(not busy)
         self.manual_mode.setEnabled(not busy)
         self.manual_rectangle_mode.setEnabled(not busy)
+        self.full_frame_mode.setEnabled(not busy)
         self.clear_points_button.setEnabled(not busy)
         self.clear_rectangle_button.setEnabled(not busy)
         self.mask_group.setEnabled(not busy)
@@ -1065,6 +1134,9 @@ class CropReviewPage(QWidget):
             not busy
             and self.controller.state.crop_mode
             in {CropReviewMode.MANUAL, CropReviewMode.MANUAL_RECTANGLE}
+        )
+        self.full_frame_group.setEnabled(
+            not busy and self.controller.state.crop_mode is CropReviewMode.FULL_FRAME
         )
         if not busy:
             self.refresh_from_state()

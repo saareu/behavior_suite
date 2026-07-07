@@ -1,4 +1,4 @@
-"""Pure geometry for creating manual crop plans."""
+"""Pure geometry for creating reviewed crop plans."""
 
 from __future__ import annotations
 
@@ -135,6 +135,14 @@ def _validate_rectangle_xywh(
             "Manual rectangle must lie within the selected pre-crop ROI."
         )
     return x, y, width, height
+
+
+def _validate_full_frame_size(raw_width: int, raw_height: int) -> None:
+    if raw_width % 2 or raw_height % 2:
+        raise CropPlanError(
+            "Full-frame raw width and height must be even for the current "
+            "preparation path."
+        )
 
 
 def _build_rectification_geometry(
@@ -387,4 +395,72 @@ def make_axis_aligned_rectangle_crop_plan(
     except (CropPlanError, ValidationError) as exc:
         raise CropPlanError(
             f"Manual rectangle crop produced an invalid CropPlan: {exc}"
+        ) from exc
+
+
+def make_full_frame_crop_plan(
+    raw_frame_shape: tuple[int, int],
+    canonical_resolution: CanonicalResolutionConfig,
+) -> CropPlan:
+    """Create an unaccepted full-frame CropPlan from raw frame dimensions.
+
+    ``raw_frame_shape`` uses NumPy order ``(height, width)``. The selected
+    source region is the whole raw frame. No pre-crop, perspective crop, or
+    automatic rotation is applied. Existing canonical uniform scale/pad
+    geometry is composed through the shared canonical transform helper.
+
+    Raises:
+        CropPlanError: If frame dimensions, canonical geometry, or CropPlan
+            validation fails.
+    """
+
+    raw_height, raw_width = _validate_raw_frame_shape(raw_frame_shape)
+    _validate_full_frame_size(raw_width, raw_height)
+    roi = PreCropROI(x=0, y=0, width=raw_width, height=raw_height)
+    points = validate_quad_tl_tr_br_bl(
+        np.array(
+            [
+                [0.0, 0.0],
+                [float(raw_width - 1), 0.0],
+                [float(raw_width - 1), float(raw_height - 1)],
+                [0.0, float(raw_height - 1)],
+            ],
+            dtype=np.float64,
+        )
+    )
+    native_size_wh = (raw_width, raw_height)
+    canonical_size_wh = (
+        (canonical_resolution.width, canonical_resolution.height)
+        if canonical_resolution.enabled
+        else None
+    )
+    homography_canonical, canonical_geometry, output_size_wh = (
+        build_canonical_transform(native_size_wh, canonical_size_wh)
+    )
+
+    try:
+        homography_prepared_to_raw = np.linalg.inv(homography_canonical)
+    except np.linalg.LinAlgError as exc:
+        raise CropPlanError("Full-frame canonical transform is singular.") from exc
+    if not np.all(np.isfinite(homography_prepared_to_raw)):
+        raise CropPlanError("Full-frame prepared-to-raw homography is non-finite.")
+
+    try:
+        return CropPlan(
+            mode=CropMode.FULL_FRAME,
+            pre_crop_roi=roi,
+            quad_raw_tl_tr_br_bl=points,
+            H_raw_to_prepared_3x3=homography_canonical,
+            H_prepared_to_raw_3x3=homography_prepared_to_raw,
+            prepared_size_wh=output_size_wh,
+            native_size_wh=native_size_wh,
+            canonical_geometry=canonical_geometry,
+            rotated_90=False,
+            fit_score=None,
+            rim_density=None,
+            accepted_by_user=False,
+        )
+    except (CropPlanError, ValidationError) as exc:
+        raise CropPlanError(
+            f"Full-frame crop produced an invalid CropPlan: {exc}"
         ) from exc

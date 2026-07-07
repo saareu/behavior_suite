@@ -1,6 +1,7 @@
 # Subsystem 01 Design: Final Spatial Geometry Modes
 
-**Status:** Active future-facing design reference; no production behavior is changed by this document.
+**Status:** Active design reference. Full-frame identity is implemented through
+the current `CropPlan` contract; broader composed geometry remains future work.
 **Relationship:** Complements `docs/subsystem_01/preprocessing.md` while preserving the approved artifact, frame identity, timing, and validation contracts until a separate implementation patch changes them explicitly.
 
 ## 1. Purpose and relationship to the current Subsystem 01 contract
@@ -10,7 +11,7 @@ V1 implements one final spatial workflow:
 ```text
 raw video
 → optional pre-crop
-→ automatic cage detection or manual four corners
+→ automatic cage detection, manual geometry, or Full frame — no crop
 → perspective CropPlan
 → rectification / rotation / canonical scale-pad
 → prepared video
@@ -37,6 +38,9 @@ Current core behavior:
   translation homography.
 - Automatic detection and manual four-corner selection produce a validated
   `CropPlan`.
+- Full frame — no crop produces a validated `CropPlan` with the whole raw frame
+  as the selected source region, no enabled pre-crop, no perspective crop, no
+  automatic rotation, and `rotated_90: false`.
 - Stage A ffmpeg preparation requires an explicitly accepted `CropPlan`.
 - Stage A decomposes the `CropPlan` into trim, pre-crop, perspective
   rectification, optional rotation, even-dimension guard, and optional canonical
@@ -61,10 +65,19 @@ frame trim and timing.
 
 ### `identity`
 
-The selected raw frames pass through spatially unchanged. No crop, homography,
-rotation, scale, or padding is applied. If existing output constraints require
-even dimensions or a supported encoder size, identity mode must either validate
-that the raw dimensions already satisfy those constraints or fail explicitly.
+The implemented Full frame — no crop route is the current identity-family mode.
+The selected raw frames use the whole raw frame as content. Pre-crop is not
+allowed, no detector or manual geometry is required, no perspective crop is
+applied, and `rotated_90` remains false.
+
+When canonical sizing is disabled, prepared spatial dimensions match the raw
+frame dimensions exactly. If existing output constraints require even
+dimensions or a supported encoder size, full-frame mode validates that the raw
+dimensions already satisfy those constraints and fails explicitly otherwise.
+
+When canonical sizing is enabled, the existing uniform scale/pad stage may
+change the final prepared output size. This scale/pad is part of the recorded
+canonical geometry and is not cropping.
 
 ### `axis_aligned_pre_crop_only`
 
@@ -352,7 +365,6 @@ The first implementation should not:
 - change `prepared_sync.npz`;
 - change frame mapping;
 - implement pre-crop-only processing;
-- implement identity processing;
 - implement composed-geometry processing;
 - add rotation adjustment, playback, or timeline rendering;
 - change codec, container, or encoding behavior;

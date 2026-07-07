@@ -32,11 +32,12 @@ from preprocess.exceptions import (
 )
 from preprocess.manual_crop import (
     make_axis_aligned_rectangle_crop_plan,
+    make_full_frame_crop_plan,
     make_manual_crop_plan,
 )
 from preprocess.masking import apply_static_mask_to_frame, validate_static_mask
 from preprocess.models import OperationProgress
-from preprocess.pre_crop import ResolvedPreCrop
+from preprocess.pre_crop import PreCropMode, ResolvedPreCrop
 from preprocess.video_probe import read_raw_frame_at_index
 from ui.state import CropReviewMode, PreprocessSetupState
 
@@ -45,6 +46,7 @@ PreviewBuilder = Callable[..., np.ndarray]
 AutomaticDetector = Callable[..., CageDetectionResult]
 ManualPlanBuilder = Callable[..., CropPlan]
 ManualRectanglePlanBuilder = Callable[..., CropPlan]
+FullFramePlanBuilder = Callable[..., CropPlan]
 
 _POINT_LABELS = ("top-left", "top-right", "bottom-right", "bottom-left")
 _PREVIEW_MASK_COORDINATE_SHIFT = 8
@@ -192,6 +194,7 @@ class CropReviewController:
         manual_rectangle_plan_builder: ManualRectanglePlanBuilder = (
             make_axis_aligned_rectangle_crop_plan
         ),
+        full_frame_plan_builder: FullFramePlanBuilder = make_full_frame_crop_plan,
         frame_reader: FrameReader = read_video_frame,
         preview_builder: PreviewBuilder = build_crop_preview,
     ) -> None:
@@ -199,6 +202,7 @@ class CropReviewController:
         self._detector = detector
         self._manual_plan_builder = manual_plan_builder
         self._manual_rectangle_plan_builder = manual_rectangle_plan_builder
+        self._full_frame_plan_builder = full_frame_plan_builder
         self._frame_reader = frame_reader
         self._preview_builder = preview_builder
         self._representative_frame: np.ndarray | None = None
@@ -864,6 +868,67 @@ class CropReviewController:
         self._apply_candidate(result)
         self.state.crop_mode = CropReviewMode.MANUAL_RECTANGLE
         self.state.crop_review_status = "manual_rectangle_candidate_ready"
+        return plan
+
+    def select_full_frame(self) -> CropPlan:
+        """Build one unaccepted full-frame candidate without detector/manual input."""
+
+        self.state.crop_mode = CropReviewMode.FULL_FRAME
+        self._manual_points.clear()
+        self._manual_rectangle_xywh = None
+        _path, config, pre_crop = self._require_context()
+        if config.pre_crop.enabled or pre_crop.mode is not PreCropMode.NONE:
+            self._invalidate_candidate(
+                "Full frame requires pre-crop to be disabled."
+            )
+            raise self._new_validation_error(
+                "Full frame — no crop requires pre-crop to be disabled on the "
+                "Trim and Pre-Crop page."
+            )
+        self._invalidate_candidate(
+            "Full-frame candidate changed; crop acceptance is required."
+        )
+        if self._representative_frame is None:
+            self.load_representative_frame()
+        assert self._representative_frame is not None
+        height, width = self._representative_frame.shape[:2]
+
+        try:
+            plan = self._full_frame_plan_builder(
+                raw_frame_shape=(height, width),
+                canonical_resolution=config.prepare.canonical_resolution,
+            )
+            plan = _copy_plan_with_acceptance(plan, False)
+            if plan.mode is not CropMode.FULL_FRAME:
+                raise CropPlanError(
+                    "Full-frame helper did not return a full-frame CropPlan."
+                )
+        except (CropPlanError, ValidationError, ValueError, cv2.error) as exc:
+            self._clear_preview()
+            self.state.crop_review_status = "full_frame_invalid"
+            raise self._new_validation_error(
+                f"Full-frame crop is invalid: {exc}"
+            ) from exc
+        try:
+            preview = self._preview_builder(
+                self._representative_frame,
+                plan,
+                config.prepare.perspective_interpolation,
+            )
+        except (CropReviewValidationError, ValueError, cv2.error) as exc:
+            self._invalidate_candidate("Prepared crop preview generation failed.")
+            raise self._new_validation_error(
+                f"Prepared crop preview generation failed: {exc}"
+            ) from exc
+
+        result = CropReviewComputation(
+            crop_plan=plan,
+            prepared_preview=preview,
+            detector_diagnostics=None,
+        )
+        self._apply_candidate(result)
+        self.state.crop_mode = CropReviewMode.FULL_FRAME
+        self.state.crop_review_status = "full_frame_candidate_ready"
         return plan
 
     def clear_manual_rectangle(self) -> None:

@@ -15,7 +15,7 @@ from preprocess.config import (
 )
 from preprocess.crop_plan import CropMode
 from preprocess.exceptions import MetadataArtifactError
-from preprocess.manual_crop import make_manual_crop_plan
+from preprocess.manual_crop import make_full_frame_crop_plan, make_manual_crop_plan
 from preprocess.metadata import (
     PREPARE_METADATA_SCHEMA_VERSION,
     PREPARE_METADATA_TOP_LEVEL_SECTIONS,
@@ -53,21 +53,27 @@ def _build_metadata_fixture(
             )
         )
     )
-    crop_plan = make_manual_crop_plan(
-        raw_frame_shape=(48, 64),
-        points_tl_tr_br_bl=np.array(
-            [[0.0, 0.0], [63.0, 0.0], [63.0, 47.0], [0.0, 47.0]]
-        ),
-        pre_crop_roi=None,
-        canonical_resolution=config.prepare.canonical_resolution,
-    ).model_copy(
-        update={
-            "mode": mode,
-            "fit_score": 0.95 if mode is CropMode.AUTOMATIC else None,
-            "rim_density": 0.12 if mode is CropMode.AUTOMATIC else None,
-            "accepted_by_user": True,
-        }
-    )
+    if mode is CropMode.FULL_FRAME:
+        crop_plan = make_full_frame_crop_plan(
+            raw_frame_shape=(48, 64),
+            canonical_resolution=config.prepare.canonical_resolution,
+        ).model_copy(update={"accepted_by_user": True})
+    else:
+        crop_plan = make_manual_crop_plan(
+            raw_frame_shape=(48, 64),
+            points_tl_tr_br_bl=np.array(
+                [[0.0, 0.0], [63.0, 0.0], [63.0, 47.0], [0.0, 47.0]]
+            ),
+            pre_crop_roi=None,
+            canonical_resolution=config.prepare.canonical_resolution,
+        ).model_copy(
+            update={
+                "mode": mode,
+                "fit_score": 0.95 if mode is CropMode.AUTOMATIC else None,
+                "rim_density": 0.12 if mode is CropMode.AUTOMATIC else None,
+                "accepted_by_user": True,
+            }
+        )
     raw_probe = VideoProbeResult(
         source_path=tmp_path / "raw.avi",
         width=64,
@@ -188,6 +194,20 @@ def test_manual_crop_populates_manual_crop_only(tmp_path: Path) -> None:
     assert _section(metadata, "manual_crop") == {"used": True}
     assert _section(metadata, "cage_detection")["used"] is False
     assert _section(metadata, "geometry")["mode"] == "manual"
+
+
+def test_full_frame_crop_populates_neither_detector_nor_manual_crop(
+    tmp_path: Path,
+) -> None:
+    metadata, _config = _build_metadata_fixture(
+        tmp_path,
+        mode=CropMode.FULL_FRAME,
+    )
+
+    assert _section(metadata, "manual_crop") == {"used": False}
+    assert _section(metadata, "cage_detection")["used"] is False
+    assert _section(metadata, "geometry")["mode"] == "full_frame"
+    assert _section(metadata, "geometry")["rotated_90"] is False
 
 
 def test_no_ttl_metadata_is_explicitly_not_provided(tmp_path: Path) -> None:

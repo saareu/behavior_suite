@@ -22,7 +22,7 @@ from preprocess.exceptions import (
     PreprocessServiceError,
     VideoPreparationError,
 )
-from preprocess.manual_crop import make_manual_crop_plan
+from preprocess.manual_crop import make_full_frame_crop_plan, make_manual_crop_plan
 from preprocess.models import (
     ExternalTimeSelection,
     PreprocessExecutionContext,
@@ -289,6 +289,32 @@ def test_service_rejects_unaccepted_crop_before_stage_a(
     assert result.success is False
     assert called is False
     assert not (project_dir / "preprocess" / "prepare_meta.json").exists()
+
+
+def test_service_rejects_stale_full_frame_plan_before_stage_a(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = _project(tmp_path)
+    raw_path = tmp_path / "raw.avi"
+    raw_path.write_bytes(b"raw")
+    _install_probe(monkeypatch, _probe(raw_path))
+    called = False
+    plan = make_full_frame_crop_plan(
+        raw_frame_shape=(48, 66),
+        canonical_resolution=_config().prepare.canonical_resolution,
+    ).model_copy(update={"accepted_by_user": True})
+
+    def unexpected_stage_a(**_kwargs: Any) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(service_module, "run_ffmpeg_prepare", unexpected_stage_a)
+    result = PreprocessService().run(_request(project_dir, raw_path, plan=plan))
+
+    assert result.success is False
+    assert "Full-frame CropPlan must match the probed raw video dimensions" in result.message
+    assert called is False
 
 
 def test_automatic_detection_is_never_auto_accepted(
