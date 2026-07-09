@@ -17,6 +17,7 @@ from pose_inference import (
 )
 from pose_inference.__main__ import app
 from pose_inference.parquet_export import ParquetExportError, ParquetExportSummary
+from pose_inference.pose_qc import PoseQcError, PoseQcSummary
 
 DEFAULT_PROFILE = Path("configs/subsystem_02/sleapnn_default_profile.yaml")
 FORBIDDEN_ARTIFACT_NAMES = (
@@ -213,6 +214,7 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
     _write_s1_handoff(tmp_path)
     model_path = _model_path(tmp_path)
     export_calls: list[dict[str, Path]] = []
+    qc_calls: list[dict[str, Path]] = []
 
     def fake_subprocess(args, **kwargs):
         run_dir = Path(kwargs["cwd"])
@@ -230,6 +232,18 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
             timestamp_sources=("prepared_sync:time_sec",),
         )
 
+    def fake_pose_qc(**kwargs):
+        qc_calls.append(dict(kwargs))
+        return PoseQcSummary(
+            status="computed",
+            payload={
+                "status": "computed",
+                "schema_version": "pose_qc_v1",
+                "duplicate_candidate_risk": {"frames_flagged": 0},
+                "implausible_geometry": {"frames_flagged": 0},
+            },
+        )
+
     result = run_pose_inference(
         PoseInferenceRequest(
             session_root=tmp_path,
@@ -240,6 +254,7 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
         ),
         subprocess_runner=fake_subprocess,
         parquet_exporter=fake_exporter,
+        pose_qc_computer=fake_pose_qc,
     )
 
     assert result.success is True
@@ -253,6 +268,7 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
             "output_path": result.run_dir / "pose.parquet",
         }
     ]
+    assert qc_calls == [{"pose_parquet_path": result.run_dir / "pose.parquet"}]
     pose_meta = json.loads(result.pose_meta_path.read_text(encoding="utf-8"))
     manifest = yaml.safe_load(result.job_manifest_path.read_text(encoding="utf-8"))
     log_text = result.processing_log_path.read_text(encoding="utf-8")
@@ -260,8 +276,11 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
     assert pose_meta["artifact_status"]["pose_parquet"] == "generated"
     assert pose_meta["parquet"]["rows"] == 12
     assert pose_meta["parquet"]["timestamp_sources"] == ["prepared_sync:time_sec"]
+    assert pose_meta["pose_qc"]["status"] == "computed"
     assert manifest["artifact_status"]["pose_parquet"] == "generated"
+    assert manifest["qc_status"] == "computed"
     assert "parquet_status: generated" in log_text
+    assert "pose_qc: computed" in log_text
 
 
 def test_runner_marks_export_failed_when_parquet_export_fails(tmp_path: Path) -> None:
@@ -302,6 +321,57 @@ def test_runner_marks_export_failed_when_parquet_export_fails(tmp_path: Path) ->
     assert manifest["artifact_status"]["pose_parquet"] == "failed"
     assert "parquet_status: failed" in log_text
     assert "parquet_error: forced export failure" in log_text
+
+
+def test_runner_marks_qc_failed_when_pose_qc_fails(tmp_path: Path) -> None:
+    _write_s1_handoff(tmp_path)
+    model_path = _model_path(tmp_path)
+
+    def fake_subprocess(args, **kwargs):
+        run_dir = Path(kwargs["cwd"])
+        (run_dir / "pose.slp").write_bytes(b"slp")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok", stderr="")
+
+    def fake_exporter(**kwargs):
+        output_path = Path(kwargs["output_path"])
+        output_path.write_bytes(b"parquet")
+        return ParquetExportSummary(
+            status="generated",
+            path=output_path,
+            rows=4,
+            timestamp_sources=("prepared_sync:time_sec",),
+        )
+
+    def failing_pose_qc(**_kwargs):
+        raise PoseQcError("forced QC failure")
+
+    result = run_pose_inference(
+        PoseInferenceRequest(
+            session_root=tmp_path,
+            model_path=model_path,
+            profile_path=DEFAULT_PROFILE,
+            dry_run=False,
+            timestamp="20260709T060708",
+        ),
+        subprocess_runner=fake_subprocess,
+        parquet_exporter=fake_exporter,
+        pose_qc_computer=failing_pose_qc,
+    )
+
+    assert result.success is False
+    assert result.status == "qc_failed"
+    assert result.pose_slp_path.is_file()
+    assert (result.run_dir / "pose.parquet").is_file()
+    pose_meta = json.loads(result.pose_meta_path.read_text(encoding="utf-8"))
+    manifest = yaml.safe_load(result.job_manifest_path.read_text(encoding="utf-8"))
+    log_text = result.processing_log_path.read_text(encoding="utf-8")
+    assert pose_meta["artifact_status"]["pose_parquet"] == "generated"
+    assert pose_meta["parquet"]["status"] == "generated"
+    assert pose_meta["pose_qc"]["status"] == "failed"
+    assert "forced QC failure" in pose_meta["pose_qc"]["error"]
+    assert manifest["qc_status"] == "failed"
+    assert "pose_qc: failed" in log_text
+    assert "pose_qc_error: forced QC failure" in log_text
 
 
 def test_cli_dry_run_entrypoint(tmp_path: Path) -> None:

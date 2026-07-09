@@ -24,6 +24,12 @@ from pose_inference.parquet_export import (
     ParquetExportSummary,
     export_pose_parquet,
 )
+from pose_inference.pose_qc import (
+    POSE_QC_SCHEMA_VERSION,
+    PoseQcError,
+    PoseQcSummary,
+    compute_pose_qc_from_parquet,
+)
 
 REQUIRED_S1_FILES = (
     "prepared_video.mp4",
@@ -104,6 +110,7 @@ class PoseInferenceResult:
 
 SubprocessRunner = Callable[..., subprocess.CompletedProcess[str]]
 ParquetExporter = Callable[..., ParquetExportSummary]
+PoseQcComputer = Callable[..., PoseQcSummary]
 
 
 def _now_timestamp() -> str:
@@ -361,6 +368,29 @@ def _failed_parquet_summary(path: Path, error: BaseException) -> ParquetExportSu
     )
 
 
+def _not_computed_pose_qc_summary(reason: str) -> PoseQcSummary:
+    return PoseQcSummary(
+        status="not_computed",
+        payload={
+            "status": "not_computed",
+            "schema_version": POSE_QC_SCHEMA_VERSION,
+            "reason": reason,
+        },
+    )
+
+
+def _failed_pose_qc_summary(error: BaseException) -> PoseQcSummary:
+    return PoseQcSummary(
+        status="failed",
+        payload={
+            "status": "failed",
+            "schema_version": POSE_QC_SCHEMA_VERSION,
+            "error": str(error),
+        },
+        error=str(error),
+    )
+
+
 def _settings_payload(
     *,
     profile_path: Path,
@@ -414,6 +444,7 @@ def _pose_meta_payload(
     command: Sequence[str],
     returncode: int | None,
     parquet_summary: ParquetExportSummary,
+    pose_qc_summary: PoseQcSummary,
 ) -> dict[str, Any]:
     tracking = profile.get("tracking") if isinstance(profile.get("tracking"), Mapping) else {}
     return {
@@ -448,10 +479,7 @@ def _pose_meta_payload(
         },
         "command": list(command),
         "returncode": returncode,
-        "pose_qc": {
-            "status": "not_computed",
-            "reason": "pose-quality QC is not implemented yet",
-        },
+        "pose_qc": pose_qc_summary.to_metadata(),
         "parquet": parquet_summary.to_metadata(),
         "artifact_status": _artifact_status(
             dry_run=dry_run,
@@ -477,6 +505,7 @@ def _manifest_payload(
     status: str,
     returncode: int | None,
     parquet_summary: ParquetExportSummary,
+    pose_qc_summary: PoseQcSummary,
 ) -> dict[str, Any]:
     return {
         "schema_version": JOB_MANIFEST_SCHEMA_VERSION,
@@ -501,6 +530,7 @@ def _manifest_payload(
         "profile_path": _path_text(profile_path),
         "command": list(command),
         "returncode": returncode,
+        "qc_status": pose_qc_summary.status,
         "artifact_status": _artifact_status(
             dry_run=dry_run,
             pose_slp_exists=paths.pose_slp.is_file(),
@@ -521,9 +551,11 @@ def _write_processing_log(
     status: str,
     returncode: int | None,
     parquet_summary: ParquetExportSummary,
+    pose_qc_summary: PoseQcSummary,
     stdout: str | None,
     stderr: str | None,
 ) -> None:
+    pose_qc_metadata = pose_qc_summary.to_metadata()
     lines = [
         f"start_time: {created_at}",
         f"completed_time: {completed_at}",
@@ -539,9 +571,25 @@ def _write_processing_log(
         "  " + " ".join(command),
         f"parquet_status: {parquet_summary.status}",
         f"pose_parquet: {parquet_summary.path.resolve()}",
+        f"pose_qc: {pose_qc_summary.status}",
     ]
     if parquet_summary.error:
         lines.append(f"parquet_error: {parquet_summary.error}")
+    if pose_qc_summary.status == "computed":
+        duplicate_risk = pose_qc_metadata.get("duplicate_candidate_risk", {})
+        geometry = pose_qc_metadata.get("implausible_geometry", {})
+        if isinstance(duplicate_risk, Mapping):
+            lines.append(
+                "pose_qc_duplicate_frames_flagged: "
+                f"{duplicate_risk.get('frames_flagged', 0)}"
+            )
+        if isinstance(geometry, Mapping):
+            lines.append(
+                "pose_qc_implausible_geometry_frames_flagged: "
+                f"{geometry.get('frames_flagged', 0)}"
+            )
+    if pose_qc_summary.error:
+        lines.append(f"pose_qc_error: {pose_qc_summary.error}")
     if returncode is not None:
         lines.append(f"subprocess_returncode: {returncode}")
     if stdout:
@@ -565,6 +613,7 @@ def run_pose_inference(
     *,
     subprocess_runner: SubprocessRunner = subprocess.run,
     parquet_exporter: ParquetExporter = export_pose_parquet,
+    pose_qc_computer: PoseQcComputer = compute_pose_qc_from_parquet,
 ) -> PoseInferenceResult:
     """Run or dry-run one Subsystem 02 SLEAP-NN inference request."""
 
@@ -599,6 +648,7 @@ def run_pose_inference(
     stderr = None
     returncode = None
     parquet_summary = _not_generated_parquet_summary(paths.pose_parquet)
+    pose_qc_summary = _not_computed_pose_qc_summary("dry_run or parquet not generated")
     if request.dry_run:
         status = "dry_run_complete"
         success = True
@@ -625,11 +675,19 @@ def run_pose_inference(
                 )
             except ParquetExportError as exc:
                 parquet_summary = _failed_parquet_summary(paths.pose_parquet, exc)
+                pose_qc_summary = _not_computed_pose_qc_summary("parquet export failed")
                 status = "export_failed"
                 success = False
             else:
-                status = "success"
-                success = True
+                try:
+                    pose_qc_summary = pose_qc_computer(pose_parquet_path=paths.pose_parquet)
+                except PoseQcError as exc:
+                    pose_qc_summary = _failed_pose_qc_summary(exc)
+                    status = "qc_failed"
+                    success = False
+                else:
+                    status = "success"
+                    success = True
         else:
             status = "validation_failed"
             success = False
@@ -662,6 +720,7 @@ def run_pose_inference(
             command=command,
             returncode=returncode,
             parquet_summary=parquet_summary,
+            pose_qc_summary=pose_qc_summary,
         ),
     )
     _write_yaml(
@@ -681,6 +740,7 @@ def run_pose_inference(
             status=status,
             returncode=returncode,
             parquet_summary=parquet_summary,
+            pose_qc_summary=pose_qc_summary,
         ),
     )
     _write_processing_log(
@@ -694,6 +754,7 @@ def run_pose_inference(
         status=status,
         returncode=returncode,
         parquet_summary=parquet_summary,
+        pose_qc_summary=pose_qc_summary,
         stdout=stdout,
         stderr=stderr,
     )
