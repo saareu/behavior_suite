@@ -16,6 +16,7 @@ from pose_inference import (
     validate_s1_handoff,
 )
 from pose_inference.__main__ import app
+from pose_inference.overlay import OverlayGenerationError, OverlaySummary
 from pose_inference.parquet_export import ParquetExportError, ParquetExportSummary
 from pose_inference.pose_qc import PoseQcError, PoseQcSummary
 
@@ -160,8 +161,10 @@ def test_dry_run_creates_minimal_records_without_external_sleap(
     assert pose_meta["artifact_status"]["pose_slp"] == "dry_run_not_generated"
     assert pose_meta["artifact_status"]["pose_parquet"] == "not_generated"
     assert pose_meta["artifact_status"]["overlay_mp4"] == "not_generated"
+    assert pose_meta["overlay"]["status"] == "not_generated"
     assert pose_meta["pose_qc"]["status"] == "not_computed"
     assert manifest["dry_run"] is True
+    assert manifest["overlay_status"] == "not_generated"
     assert manifest["outputs"]["pose_slp"].endswith("pose.slp")
     assert settings["tracking_enabled"] is True
     assert "--output_path" in settings["command"]
@@ -215,6 +218,7 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
     model_path = _model_path(tmp_path)
     export_calls: list[dict[str, Path]] = []
     qc_calls: list[dict[str, Path]] = []
+    overlay_calls: list[dict[str, Path]] = []
 
     def fake_subprocess(args, **kwargs):
         run_dir = Path(kwargs["cwd"])
@@ -244,6 +248,19 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
             },
         )
 
+    def fake_overlay(**kwargs):
+        overlay_calls.append(dict(kwargs))
+        output_path = Path(kwargs["output_path"])
+        output_path.write_bytes(b"overlay")
+        return OverlaySummary(
+            status="generated",
+            path=output_path,
+            frames_written=3,
+            fps=20.0,
+            width=64,
+            height=64,
+        )
+
     result = run_pose_inference(
         PoseInferenceRequest(
             session_root=tmp_path,
@@ -255,12 +272,14 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
         subprocess_runner=fake_subprocess,
         parquet_exporter=fake_exporter,
         pose_qc_computer=fake_pose_qc,
+        overlay_generator=fake_overlay,
     )
 
     assert result.success is True
     assert result.status == "success"
     assert result.pose_slp_path.is_file()
     assert (result.run_dir / "pose.parquet").is_file()
+    assert (result.run_dir / "overlay.mp4").is_file()
     assert export_calls == [
         {
             "pose_slp_path": result.pose_slp_path,
@@ -269,18 +288,32 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
         }
     ]
     assert qc_calls == [{"pose_parquet_path": result.run_dir / "pose.parquet"}]
+    assert overlay_calls == [
+        {
+            "prepared_video_path": tmp_path / "preprocess" / "prepared_video.mp4",
+            "pose_parquet_path": result.run_dir / "pose.parquet",
+            "output_path": result.run_dir / "overlay.mp4",
+        }
+    ]
     pose_meta = json.loads(result.pose_meta_path.read_text(encoding="utf-8"))
     manifest = yaml.safe_load(result.job_manifest_path.read_text(encoding="utf-8"))
     log_text = result.processing_log_path.read_text(encoding="utf-8")
     assert pose_meta["artifact_status"]["pose_slp"] == "generated"
     assert pose_meta["artifact_status"]["pose_parquet"] == "generated"
+    assert pose_meta["artifact_status"]["overlay_mp4"] == "generated"
     assert pose_meta["parquet"]["rows"] == 12
     assert pose_meta["parquet"]["timestamp_sources"] == ["prepared_sync:time_sec"]
     assert pose_meta["pose_qc"]["status"] == "computed"
+    assert pose_meta["overlay"]["status"] == "generated"
+    assert pose_meta["overlay"]["frames_written"] == 3
     assert manifest["artifact_status"]["pose_parquet"] == "generated"
+    assert manifest["artifact_status"]["overlay_mp4"] == "generated"
     assert manifest["qc_status"] == "computed"
+    assert manifest["overlay_status"] == "generated"
     assert "parquet_status: generated" in log_text
     assert "pose_qc: computed" in log_text
+    assert "overlay: generated" in log_text
+    assert "overlay_frames_written: 3" in log_text
 
 
 def test_runner_marks_export_failed_when_parquet_export_fails(tmp_path: Path) -> None:
@@ -316,9 +349,11 @@ def test_runner_marks_export_failed_when_parquet_export_fails(tmp_path: Path) ->
     log_text = result.processing_log_path.read_text(encoding="utf-8")
     assert pose_meta["artifact_status"]["pose_slp"] == "generated"
     assert pose_meta["artifact_status"]["pose_parquet"] == "failed"
+    assert pose_meta["artifact_status"]["overlay_mp4"] == "not_generated"
     assert pose_meta["parquet"]["status"] == "failed"
     assert "forced export failure" in pose_meta["parquet"]["error"]
     assert manifest["artifact_status"]["pose_parquet"] == "failed"
+    assert manifest["overlay_status"] == "not_generated"
     assert "parquet_status: failed" in log_text
     assert "parquet_error: forced export failure" in log_text
 
@@ -366,12 +401,80 @@ def test_runner_marks_qc_failed_when_pose_qc_fails(tmp_path: Path) -> None:
     manifest = yaml.safe_load(result.job_manifest_path.read_text(encoding="utf-8"))
     log_text = result.processing_log_path.read_text(encoding="utf-8")
     assert pose_meta["artifact_status"]["pose_parquet"] == "generated"
+    assert pose_meta["artifact_status"]["overlay_mp4"] == "not_generated"
     assert pose_meta["parquet"]["status"] == "generated"
     assert pose_meta["pose_qc"]["status"] == "failed"
     assert "forced QC failure" in pose_meta["pose_qc"]["error"]
     assert manifest["qc_status"] == "failed"
+    assert manifest["overlay_status"] == "not_generated"
     assert "pose_qc: failed" in log_text
     assert "pose_qc_error: forced QC failure" in log_text
+
+
+def test_runner_marks_overlay_failed_when_overlay_generation_fails(tmp_path: Path) -> None:
+    _write_s1_handoff(tmp_path)
+    model_path = _model_path(tmp_path)
+
+    def fake_subprocess(args, **kwargs):
+        run_dir = Path(kwargs["cwd"])
+        (run_dir / "pose.slp").write_bytes(b"slp")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok", stderr="")
+
+    def fake_exporter(**kwargs):
+        output_path = Path(kwargs["output_path"])
+        output_path.write_bytes(b"parquet")
+        return ParquetExportSummary(
+            status="generated",
+            path=output_path,
+            rows=4,
+            timestamp_sources=("prepared_sync:time_sec",),
+        )
+
+    def fake_pose_qc(**_kwargs):
+        return PoseQcSummary(
+            status="computed",
+            payload={
+                "status": "computed",
+                "schema_version": "pose_qc_v1",
+                "duplicate_candidate_risk": {"frames_flagged": 0},
+                "implausible_geometry": {"frames_flagged": 0},
+            },
+        )
+
+    def failing_overlay(**_kwargs):
+        raise OverlayGenerationError("forced overlay failure")
+
+    result = run_pose_inference(
+        PoseInferenceRequest(
+            session_root=tmp_path,
+            model_path=model_path,
+            profile_path=DEFAULT_PROFILE,
+            dry_run=False,
+            timestamp="20260709T070809",
+        ),
+        subprocess_runner=fake_subprocess,
+        parquet_exporter=fake_exporter,
+        pose_qc_computer=fake_pose_qc,
+        overlay_generator=failing_overlay,
+    )
+
+    assert result.success is False
+    assert result.status == "overlay_failed"
+    assert result.pose_slp_path.is_file()
+    assert (result.run_dir / "pose.parquet").is_file()
+    assert not (result.run_dir / "overlay.mp4").exists()
+    pose_meta = json.loads(result.pose_meta_path.read_text(encoding="utf-8"))
+    manifest = yaml.safe_load(result.job_manifest_path.read_text(encoding="utf-8"))
+    log_text = result.processing_log_path.read_text(encoding="utf-8")
+    assert pose_meta["artifact_status"]["pose_parquet"] == "generated"
+    assert pose_meta["artifact_status"]["overlay_mp4"] == "failed"
+    assert pose_meta["pose_qc"]["status"] == "computed"
+    assert pose_meta["overlay"]["status"] == "failed"
+    assert "forced overlay failure" in pose_meta["overlay"]["error"]
+    assert manifest["qc_status"] == "computed"
+    assert manifest["overlay_status"] == "failed"
+    assert "overlay: failed" in log_text
+    assert "overlay_error: forced overlay failure" in log_text
 
 
 def test_cli_dry_run_entrypoint(tmp_path: Path) -> None:

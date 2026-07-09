@@ -18,6 +18,12 @@ from typing import Any
 
 import yaml
 
+from pose_inference.overlay import (
+    DEFAULT_CODEC,
+    OverlayGenerationError,
+    OverlaySummary,
+    generate_overlay_video,
+)
 from pose_inference.parquet_export import (
     POSE_PARQUET_SCHEMA_VERSION,
     ParquetExportError,
@@ -111,6 +117,7 @@ class PoseInferenceResult:
 SubprocessRunner = Callable[..., subprocess.CompletedProcess[str]]
 ParquetExporter = Callable[..., ParquetExportSummary]
 PoseQcComputer = Callable[..., PoseQcSummary]
+OverlayGenerator = Callable[..., OverlaySummary]
 
 
 def _now_timestamp() -> str:
@@ -333,6 +340,7 @@ def _artifact_status(
     dry_run: bool,
     pose_slp_exists: bool,
     pose_parquet_status: str = "not_generated",
+    overlay_status: str = "not_generated",
 ) -> dict[str, str]:
     if dry_run:
         pose_status = "dry_run_not_generated"
@@ -343,7 +351,7 @@ def _artifact_status(
     return {
         "pose_slp": pose_status,
         "pose_parquet": pose_parquet_status,
-        "overlay_mp4": "not_generated",
+        "overlay_mp4": overlay_status,
     }
 
 
@@ -387,6 +395,26 @@ def _failed_pose_qc_summary(error: BaseException) -> PoseQcSummary:
             "schema_version": POSE_QC_SCHEMA_VERSION,
             "error": str(error),
         },
+        error=str(error),
+    )
+
+
+def _not_generated_overlay_summary(path: Path, reason: str) -> OverlaySummary:
+    return OverlaySummary(
+        status="not_generated",
+        path=path,
+        source="pose.parquet",
+        codec=DEFAULT_CODEC,
+        reason=reason,
+    )
+
+
+def _failed_overlay_summary(path: Path, error: BaseException) -> OverlaySummary:
+    return OverlaySummary(
+        status="failed",
+        path=path,
+        source="pose.parquet",
+        codec=DEFAULT_CODEC,
         error=str(error),
     )
 
@@ -445,6 +473,7 @@ def _pose_meta_payload(
     returncode: int | None,
     parquet_summary: ParquetExportSummary,
     pose_qc_summary: PoseQcSummary,
+    overlay_summary: OverlaySummary,
 ) -> dict[str, Any]:
     tracking = profile.get("tracking") if isinstance(profile.get("tracking"), Mapping) else {}
     return {
@@ -480,11 +509,13 @@ def _pose_meta_payload(
         "command": list(command),
         "returncode": returncode,
         "pose_qc": pose_qc_summary.to_metadata(),
+        "overlay": overlay_summary.to_metadata(),
         "parquet": parquet_summary.to_metadata(),
         "artifact_status": _artifact_status(
             dry_run=dry_run,
             pose_slp_exists=paths.pose_slp.is_file(),
             pose_parquet_status=parquet_summary.status,
+            overlay_status=overlay_summary.status,
         ),
     }
 
@@ -506,6 +537,7 @@ def _manifest_payload(
     returncode: int | None,
     parquet_summary: ParquetExportSummary,
     pose_qc_summary: PoseQcSummary,
+    overlay_summary: OverlaySummary,
 ) -> dict[str, Any]:
     return {
         "schema_version": JOB_MANIFEST_SCHEMA_VERSION,
@@ -531,10 +563,12 @@ def _manifest_payload(
         "command": list(command),
         "returncode": returncode,
         "qc_status": pose_qc_summary.status,
+        "overlay_status": overlay_summary.status,
         "artifact_status": _artifact_status(
             dry_run=dry_run,
             pose_slp_exists=paths.pose_slp.is_file(),
             pose_parquet_status=parquet_summary.status,
+            overlay_status=overlay_summary.status,
         ),
     }
 
@@ -552,6 +586,7 @@ def _write_processing_log(
     returncode: int | None,
     parquet_summary: ParquetExportSummary,
     pose_qc_summary: PoseQcSummary,
+    overlay_summary: OverlaySummary,
     stdout: str | None,
     stderr: str | None,
 ) -> None:
@@ -572,6 +607,7 @@ def _write_processing_log(
         f"parquet_status: {parquet_summary.status}",
         f"pose_parquet: {parquet_summary.path.resolve()}",
         f"pose_qc: {pose_qc_summary.status}",
+        f"overlay: {overlay_summary.status}",
     ]
     if parquet_summary.error:
         lines.append(f"parquet_error: {parquet_summary.error}")
@@ -590,6 +626,10 @@ def _write_processing_log(
             )
     if pose_qc_summary.error:
         lines.append(f"pose_qc_error: {pose_qc_summary.error}")
+    if overlay_summary.frames_written:
+        lines.append(f"overlay_frames_written: {overlay_summary.frames_written}")
+    if overlay_summary.error:
+        lines.append(f"overlay_error: {overlay_summary.error}")
     if returncode is not None:
         lines.append(f"subprocess_returncode: {returncode}")
     if stdout:
@@ -614,6 +654,7 @@ def run_pose_inference(
     subprocess_runner: SubprocessRunner = subprocess.run,
     parquet_exporter: ParquetExporter = export_pose_parquet,
     pose_qc_computer: PoseQcComputer = compute_pose_qc_from_parquet,
+    overlay_generator: OverlayGenerator = generate_overlay_video,
 ) -> PoseInferenceResult:
     """Run or dry-run one Subsystem 02 SLEAP-NN inference request."""
 
@@ -649,6 +690,7 @@ def run_pose_inference(
     returncode = None
     parquet_summary = _not_generated_parquet_summary(paths.pose_parquet)
     pose_qc_summary = _not_computed_pose_qc_summary("dry_run or parquet not generated")
+    overlay_summary = _not_generated_overlay_summary(paths.overlay_mp4, "dry_run or parquet not generated")
     if request.dry_run:
         status = "dry_run_complete"
         success = True
@@ -676,6 +718,7 @@ def run_pose_inference(
             except ParquetExportError as exc:
                 parquet_summary = _failed_parquet_summary(paths.pose_parquet, exc)
                 pose_qc_summary = _not_computed_pose_qc_summary("parquet export failed")
+                overlay_summary = _not_generated_overlay_summary(paths.overlay_mp4, "parquet export failed")
                 status = "export_failed"
                 success = False
             else:
@@ -683,11 +726,23 @@ def run_pose_inference(
                     pose_qc_summary = pose_qc_computer(pose_parquet_path=paths.pose_parquet)
                 except PoseQcError as exc:
                     pose_qc_summary = _failed_pose_qc_summary(exc)
+                    overlay_summary = _not_generated_overlay_summary(paths.overlay_mp4, "pose-quality QC failed")
                     status = "qc_failed"
                     success = False
                 else:
-                    status = "success"
-                    success = True
+                    try:
+                        overlay_summary = overlay_generator(
+                            prepared_video_path=handoff.prepared_video,
+                            pose_parquet_path=paths.pose_parquet,
+                            output_path=paths.overlay_mp4,
+                        )
+                    except OverlayGenerationError as exc:
+                        overlay_summary = _failed_overlay_summary(paths.overlay_mp4, exc)
+                        status = "overlay_failed"
+                        success = False
+                    else:
+                        status = "success"
+                        success = True
         else:
             status = "validation_failed"
             success = False
@@ -721,6 +776,7 @@ def run_pose_inference(
             returncode=returncode,
             parquet_summary=parquet_summary,
             pose_qc_summary=pose_qc_summary,
+            overlay_summary=overlay_summary,
         ),
     )
     _write_yaml(
@@ -741,6 +797,7 @@ def run_pose_inference(
             returncode=returncode,
             parquet_summary=parquet_summary,
             pose_qc_summary=pose_qc_summary,
+            overlay_summary=overlay_summary,
         ),
     )
     _write_processing_log(
@@ -755,6 +812,7 @@ def run_pose_inference(
         returncode=returncode,
         parquet_summary=parquet_summary,
         pose_qc_summary=pose_qc_summary,
+        overlay_summary=overlay_summary,
         stdout=stdout,
         stderr=stderr,
     )
