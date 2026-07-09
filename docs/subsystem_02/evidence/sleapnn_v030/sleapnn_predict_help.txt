@@ -1,0 +1,298 @@
+                                                                                                                       
+ Usage: sleap-nn predict [OPTIONS]                                                                                     
+                                                                                                                       
+ Run inference on videos or labels files.                                                                              
+ Single unified inference entry point.                                                                                 
+                                                                                                                       
++- Options -----------------------------------------------------------------------------------------------------------+
+| *  --data_path                              -i  TEXT                      Path to data to predict on. A local       |
+|                                                                           Labels (.slp) file or video, or a remote  |
+|                                                                           URL (http(s)://, s3://, gs://, gcs://,    |
+|                                                                           az://, abfs://) to a .slp or video that   |
+|                                                                           sleap-io can load.                        |
+|                                                                           [required]                                |
+|    --headers                                    TEXT                      JSON object of HTTP headers for a remote  |
+|                                                                           --data_path URL, e.g. '{"Authorization":  |
+|                                                                           "Bearer "}'. Forwarded to the remote      |
+|                                                                           loader; ignored for local inputs.         |
+|    --stream-mode,--stream_mode                  TEXT                      Remote read strategy for a --data_path    |
+|                                                                           URL (forwarded to sleap-io's loader, e.g. |
+|                                                                           'auto'/'stream'/'download'). Ignored for  |
+|                                                                           local inputs.                             |
+|    --model_paths                            -m  TEXT                      Path to a trained model directory, or to  |
+|                                                                           its best.ckpt or                          |
+|                                                                           training_config.yaml/.json file (all      |
+|                                                                           resolve to the model directory). Multiple |
+|                                                                           models may be passed (each preceded by    |
+|                                                                           --model_paths).                           |
+|    --output_path                            -o  TEXT                      Output filename. Defaults to              |
+|                                                                           '[data_path].slp'.                        |
+|    --output_format                              [slp|analysis_h5]         Output format(s); repeat the flag to      |
+|                                                                           write several. 'slp' (SLEAP labels file,  |
+|                                                                           the default) and/or 'analysis_h5' (SLEAP  |
+|                                                                           Analysis HDF5, one '.analysis.h5' per     |
+|                                                                           video). E.g. '--output_format slp         |
+|                                                                           --output_format analysis_h5'.             |
+|    --embed                                      [auto|true|false]         Image-embedding policy for a .slp output: |
+|                                                                           'false' (default; never embed,            |
+|                                                                           backreference source media), 'true'       |
+|                                                                           (embed images into a self-contained       |
+|                                                                           .pkg.slp-style file), or 'auto' (embed    |
+|                                                                           iff the input was itself an embedded      |
+|                                                                           .pkg.slp). Only applies to .slp output.   |
+|    --restore_source_videos/--no-restore_so                                On a non-embedding .slp save, restore     |
+|    urce_videos                                                            references to the original source video   |
+|                                                                           files (default). Use                      |
+|                                                                           --no-restore_source_videos to keep        |
+|                                                                           references to the input .pkg.slp file(s)  |
+|                                                                           instead. Ignored when embedding.          |
+|    --device                                 -d  TEXT                      Device on which to allocate tensors. One  |
+|                                                                           of (cpu, cuda, mps, auto).                |
+|    --batch_size                             -b  INTEGER                   Number of frames to predict at a time.    |
+|    --runtime                                    [auto|onnx|tensorrt]      Runtime for an exported ONNX/TensorRT     |
+|                                                                           model directory passed to --model_paths.  |
+|                                                                           'auto' prefers TensorRT, falls back to    |
+|                                                                           ONNX. Ignored for trained checkpoints.    |
+|    --tracking                               -t                            Run tracking on predicted instances.      |
+|    --centroid_only,--centroid-only                                        Force centroid-only output. Required only |
+|                                                                           when both a centroid and a                |
+|                                                                           centered-instance model are configured    |
+|                                                                           but you want centroid-only predictions;   |
+|                                                                           if model_paths contains a single centroid |
+|                                                                           model, this mode is auto-detected. For a  |
+|                                                                           model trained on a multi-node skeleton,   |
+|                                                                           output collapses to a single-node         |
+|                                                                           'centroid' skeleton; use                  |
+|                                                                           --centroid-output to choose the           |
+|                                                                           representation.                           |
+|    --centroid-output,--centroid_output          [instance|centroid|both]  Centroid-only output representation:      |
+|                                                                           'instance' (single-node                   |
+|                                                                           PredictedInstance, loadable by the        |
+|                                                                           current frontend), 'centroid'             |
+|                                                                           (sio.PredictedCentroid in                 |
+|                                                                           LabeledFrame.centroids), or 'both'. Only  |
+|                                                                           meaningful for centroid-only models.      |
+|                                                                           [default: instance]                       |
+|    --max_instances                          -n  INTEGER                   Cap on instances per frame for            |
+|                                                                           multi-instance models.                    |
+|    --backbone_ckpt_path                         TEXT                      Override path to the backbone .ckpt.      |
+|    --head_ckpt_path                             TEXT                      Override path to the head .ckpt.          |
+|    --max_height                                 INTEGER                                                             |
+|    --max_width                                  INTEGER                                                             |
+|    --input_scale                                FLOAT                                                               |
+|    --ensure_rgb/--no-ensure_rgb                                           Force RGB conversion of input frames.     |
+|    --ensure_grayscale/--no-ensure_grayscal                                Force grayscale conversion of input       |
+|    e                                                                      frames.                                   |
+|    --anchor_part                                TEXT                                                                |
+|    --only_labeled_frames                                                                                            |
+|    --only_suggested_frames                                                                                          |
+|    --exclude_user_labeled                                                                                           |
+|    --only_predicted_frames                                                                                          |
+|    --no_empty_frames                                                                                                |
+|    --video_index                                INTEGER                                                             |
+|    --video_dataset                              TEXT                                                                |
+|    --video_input_format                         TEXT                                                                |
+|    --frames                                     TEXT                      Frame list as comma-separated or hyphen   |
+|                                                                           range (e.g., 1,2,3 or 1-3).               |
+|    --integral_patch_size                        INTEGER                                                             |
+|    --max_edge_length_ratio                      FLOAT                                                               |
+|    --dist_penalty_weight                        FLOAT                                                               |
+|    --n_points                                   INTEGER                                                             |
+|    --min_instance_peaks                         FLOAT                                                               |
+|    --min_line_scores                            FLOAT                                                               |
+|    --fg_threshold,--fg-threshold                FLOAT                     Foreground probability threshold for      |
+|                                                                           binarizing the segmentation map           |
+|                                                                           (bottom-up segmentation models only).     |
+|    --min_mask_area,--min-mask-area              INTEGER                   Drop predicted masks smaller than this    |
+|                                                                           many original-image pixels to suppress    |
+|                                                                           over-segmentation (bottom-up segmentation |
+|                                                                           models only). 0 disables. Measured at     |
+|                                                                           output-stride resolution and converted    |
+|                                                                           from original-pixel units.                |
+|    --center_nms_kernel,--center-nms-kernel      INTEGER                   Odd window size for instance-center peak  |
+|                                                                           NMS; larger values merge nearby duplicate |
+|                                                                           centers (bottom-up segmentation models    |
+|                                                                           only).                                    |
+|    --mask_cleanup,--mask-cleanup/--no-mask                                Keep only each predicted mask's largest   |
+|    _cleanup,--no-mask-cleanup                                             connected component and fill interior     |
+|                                                                           holes (bottom-up segmentation models      |
+|                                                                           only).                                    |
+|    --mask_cleanup_radius,--mask-cleanup-ra      INTEGER                   When --mask_cleanup is set, also apply a  |
+|    dius                                                                   morphological open->close with an         |
+|                                                                           elliptical kernel of this radius          |
+|                                                                           (output-stride pixels) before             |
+|                                                                           keep-largest-CC/fill-holes; despeckles    |
+|                                                                           and closes pinholes. 0 keeps the          |
+|                                                                           keep-largest+fill behavior (bottom-up     |
+|                                                                           segmentation models only).                |
+|    --distance_gate_alpha,--distance-gate-a      FLOAT                     Adaptive distance-gate strength: drop     |
+|    lpha                                                                   foreground pixels whose offset-predicted  |
+|                                                                           center exceeds alpha*sqrt(area/pi) from   |
+|                                                                           their assigned center (a scale-free       |
+|                                                                           stray-pixel/phantom filter). Unset        |
+|                                                                           (default) keeps the byte-for-byte argmin  |
+|                                                                           grouping. Recommended dense-mice value    |
+|                                                                           ~0.5; opt-in, validate before relying on  |
+|                                                                           it (bottom-up segmentation models only).  |
+|    --merge_fragments,--merge-fragments/--n                                Re-fuse over-segmented animal halves via  |
+|    o-merge_fragments,--no-merge-fragments                                 a region-adjacency graph (center-valley + |
+|                                                                           offset-agreement affinity) before         |
+|                                                                           --min_mask_area, while keeping            |
+|                                                                           genuinely-touching distinct animals       |
+|                                                                           apart. Default off (byte-for-byte today). |
+|                                                                           Pairs well with --distance_gate_alpha and |
+|                                                                           --min_mask_area (bottom-up segmentation   |
+|                                                                           models only).                             |
+|    --merge_method,--merge-method                [greedy|multicut]         Fragment-merge agglomeration: 'greedy'    |
+|                                                                           (default, recommended                     |
+|                                                                           decreasing-threshold) or 'multicut'       |
+|                                                                           (greedy correlation clustering). Inert    |
+|                                                                           unless --merge_fragments (bottom-up       |
+|                                                                           segmentation models only).                |
+|    --merge_thresholds,--merge-thresholds        COMMA_FLOATS              Comma-separated decreasing affinity       |
+|                                                                           thresholds for the greedy fragment-merge  |
+|                                                                           phases (default '0.85,0.6,0.4'). Keep the |
+|                                                                           floor >=0.4 to avoid bridging distinct    |
+|                                                                           animals. Inert unless --merge_fragments   |
+|                                                                           (bottom-up segmentation models only).     |
+|    --merge_w_valley,--merge-w-valley            FLOAT                     Weight on the center-valley ridge term of |
+|                                                                           the fragment-merge affinity               |
+|                                                                           (load-bearing: protects touching          |
+|                                                                           animals). Default 1.0. Inert unless       |
+|                                                                           --merge_fragments (bottom-up segmentation |
+|                                                                           models only).                             |
+|    --merge_w_offset,--merge-w-offset            FLOAT                     Weight on the offset-agreement term of    |
+|                                                                           the fragment-merge affinity. Default      |
+|                                                                           0.25. Inert unless --merge_fragments      |
+|                                                                           (bottom-up segmentation models only).     |
+|    --merge_dilate,--merge-dilate                INTEGER                   Dilation iterations for the               |
+|                                                                           fragment-merge contact test               |
+|                                                                           (output-stride pixels). Default 1;        |
+|                                                                           clamped to a minimum of 1 (the grouped    |
+|                                                                           masks are mutually exclusive, so a        |
+|                                                                           zero-dilation contact test would disable  |
+|                                                                           the merge). Inert unless                  |
+|                                                                           --merge_fragments (bottom-up segmentation |
+|                                                                           models only).                             |
+|    --full_res_masks,--full-res-masks/--no-                                Encode predicted segmentation masks at    |
+|    full_res_masks,--no-full-res-masks                                     full ORIGINAL resolution instead of the   |
+|                                                                           model output-stride grid. Default off:    |
+|                                                                           output-stride encoding is ~stride^2       |
+|                                                                           smaller and lossless at model resolution, |
+|                                                                           carrying the image mapping via sio        |
+|                                                                           scale/offset. Enable only for legacy      |
+|                                                                           consumers that read mask.data assuming    |
+|                                                                           original resolution (bottom-up            |
+|                                                                           segmentation models only).                |
+|    --mask_output,--mask-output                  [mask|polygon|both]       Predicted-mask output representation:     |
+|                                                                           'mask' (RLE SegmentationMask in           |
+|                                                                           LabeledFrame.masks, default), 'polygon'   |
+|                                                                           (Douglas-Peucker-simplified               |
+|                                                                           sio.PredictedROI into LabeledFrame.rois   |
+|                                                                           only), or 'both' (exact mask + simplified |
+|                                                                           ROI for interop). polygon/both are        |
+|                                                                           CPU-heavy on noisy masks (cost scales     |
+|                                                                           with RLE-run count) ù pair with           |
+|                                                                           --mask_cleanup. Bottom-up segmentation    |
+|                                                                           models only.                              |
+|    --polygon_epsilon,--polygon-epsilon          FLOAT                     Douglas-Peucker simplification tolerance  |
+|                                                                           for --mask_output polygon/both, as a      |
+|                                                                           fraction of each contour's perimeter.     |
+|                                                                           Larger = coarser polygons. 0 disables     |
+|                                                                           simplification (bottom-up segmentation    |
+|                                                                           models only).                             |
+|    --mask_backend,--mask-backend                [sam|sam3]                Produce instance masks from the poses in  |
+|                                                                           the input .slp using a SAM backend: 'sam' |
+|                                                                           (SAM1, needs --sam_checkpoint) or 'sam3'  |
+|                                                                           (needs --sam3_model_id). No trained       |
+|                                                                           segmentation model is used, so do not     |
+|                                                                           pass --model_paths. Off by default.       |
+|    --sam_checkpoint,--sam-checkpoint            TEXT                      Path to the SAM1 checkpoint (required for |
+|                                                                           --mask_backend sam).                      |
+|    --sam_model_type,--sam-model-type            TEXT                      SAM1 model registry key (e.g. 'vit_h',    |
+|                                                                           'vit_l', 'vit_b').                        |
+|    --sam_prompt_mode,--sam-prompt-mode          [pose|centroid|box]       How poses are turned into SAM prompts:    |
+|                                                                           'pose' (all keypoints as point prompts),  |
+|                                                                           'centroid' (single anchor point), or      |
+|                                                                           'box' (instance bounding box).            |
+|    --sam_anchor_ind,--sam-anchor-ind            INTEGER                   Centroid anchor node index for            |
+|                                                                           --sam_prompt_mode centroid.               |
+|    --sam_disjointify_masks,--sam-disjointi                                Make per-frame masks disjoint when a      |
+|    fy-masks                                                               frame has >=2 instances.                  |
+|    --sam3_model_id,--sam3-model-id              TEXT                      Hugging Face model id for the gated SAM3  |
+|                                                                           backend (--mask_backend sam3).            |
+|    --overlay_path,--overlay-path                TEXT                      Optional review-overlay PNG path written  |
+|                                                                           by the SAM mask path (--mask_backend).    |
+|    --crop_size                                  INTEGER                                                             |
+|    --peak_threshold,--peak-conf-threshold       FLOAT                     Min confmap value for a valid peak.       |
+|                                                                           --peak-conf-threshold is an alias.        |
+|    --centroid_peak_threshold                    FLOAT                     Override peak threshold for the centroid  |
+|                                                                           stage only (top-down). Defaults to        |
+|                                                                           --peak_threshold when not set.            |
+|    --filter_overlapping                                                                                             |
+|    --filter_overlapping_method                  [iou|oks]                                                           |
+|    --filter_overlapping_threshold               FLOAT                                                               |
+|    --filter_min_visible_nodes                   INTEGER                                                             |
+|    --filter_min_visible_node_fraction           FLOAT                                                               |
+|    --filter_min_mean_node_score                 FLOAT                                                               |
+|    --filter_min_instance_score                  FLOAT                                                               |
+|    --filter_min_centroid_distance               FLOAT                     Centroid-only de-duplication radius in    |
+|                                                                           pixels: greedy NMS drops any predicted    |
+|                                                                           centroid within this distance of a        |
+|                                                                           higher-scored kept centroid. 0 disables.  |
+|                                                                           Use this (not --filter_overlapping) for   |
+|                                                                           centroid-only output, since bbox-IoU/OKS  |
+|                                                                           are degenerate for single points.         |
+|    --integral_refinement                        TEXT                                                                |
+|    --tracking_window_size                       INTEGER                                                             |
+|    --min_new_track_points                       INTEGER                                                             |
+|    --candidates_method                          TEXT                                                                |
+|    --min_match_points                           INTEGER                                                             |
+|    --features                                   TEXT                      Feature for track association: one of     |
+|                                                                           keypoints, centroids, bboxes, masks. Left |
+|                                                                           unset, single-node/centroid models        |
+|                                                                           resolve to 'centroids' and bottom-up      |
+|                                                                           segmentation (mask) models to 'masks'.    |
+|    --scoring_method                             TEXT                      Track association scoring method: one of  |
+|                                                                           oks, cosine_sim, iou, mask_iou,           |
+|                                                                           euclidean_dist. Left unset,               |
+|                                                                           single-node/centroid models resolve to    |
+|                                                                           'euclidean_dist' and segmentation (mask)  |
+|                                                                           models to 'mask_iou'.                     |
+|    --scoring_reduction                          TEXT                                                                |
+|    --robust_best_instance                       FLOAT                                                               |
+|    --track_matching_method                      TEXT                                                                |
+|    --max_tracks                                 INTEGER                                                             |
+|    --use_flow                                                                                                       |
+|    --of_img_scale                               FLOAT                                                               |
+|    --of_window_size                             INTEGER                                                             |
+|    --of_max_levels                              INTEGER                                                             |
+|    --use_kalman                                                                                                     |
+|    --kf_track_features                          [centroid|keypoints]                                                |
+|    --oks_stddev                                 FLOAT                                                               |
+|    --kf_init_frame_count                        INTEGER                                                             |
+|    --kf_node_indices                            TEXT                                                                |
+|    --kf_reset_gap_size                          INTEGER                                                             |
+|    --post_connect_single_breaks                                                                                     |
+|    --tracking_target_instance_count             INTEGER                                                             |
+|    --tracking_pre_cull_to_target                INTEGER                                                             |
+|    --tracking_pre_cull_iou_threshold            FLOAT                                                               |
+|    --tracking_clean_instance_count              INTEGER                                                             |
+|    --tracking_clean_iou_threshold               FLOAT                                                               |
+|    --gui                                                                                                            |
+|    --paf-workers                                INTEGER                   Number of CPU worker processes for the    |
+|                                                                           bottom-up PAF grouping stage. 0 (default) |
+|                                                                           keeps grouping in-process. Replaces       |
+|                                                                           --cpu-workers (kept as an alias for one   |
+|                                                                           cycle).                                   |
+|    --cpu-workers                                INTEGER                   [DEPRECATED] Use --paf-workers.           |
+|    --stream-to-file                             TEXT                      Write predictions to this .slp path via   |
+|                                                                           the new Predictor.predict_to_file flow.   |
+|                                                                           Heavy intermediate tensors                |
+|                                                                           (confmaps/PAFs) are dropped per batch;    |
+|                                                                           the .slp is written once at the end.      |
+|    --write-interval                             INTEGER                   How often (in frames) to slim+convert     |
+|                                                                           buffered outputs to LabeledFrames when    |
+|                                                                           --stream-to-file is set. Default: 500.    |
+|    --help                                   -h                            Show this message and exit.               |
++---------------------------------------------------------------------------------------------------------------------+

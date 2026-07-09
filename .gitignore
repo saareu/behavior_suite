@@ -9,3 +9,12 @@ htmlcov/
 *.tmp
 *.partial
 **/preprocess/.internal/
+Thumbs.db
+test_cases/**/preprocess/
+test_runs/
+acceptance_tests/
+bsuite_runs/
+*.slp
+*.mp4
+*.avi
+*.npz

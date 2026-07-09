@@ -1,0 +1,12 @@
+﻿Python: 3.13.13 | packaged by Anaconda, Inc. | (main, Apr 14 2026, 06:12:50) [MSC v.1942 64 bit (AMD64)]
+Platform: Windows-11-10.0.26200-SP0
+sleap-nn: 0.3.0
+sleap-io: 0.8.0
+PyTorch: 2.12.1+cu130
+CUDA available: True
+CUDA version: 13.0
+GPU: NVIDIA GeForce RTX 5060 Ti
+GPU total memory GiB: 15.93
+sleap-nn package: C:\Users\engelhardblab\AppData\Roaming\uv\tools\sleap-nn\Lib\site-packages\sleap_nn\__init__.py
+sleap-io package: C:\Users\engelhardblab\AppData\Roaming\uv\tools\sleap-nn\Lib\site-packages\sleap_io\__init__.py
+cli source: C:\Users\engelhardblab\AppData\Roaming\uv\tools\sleap-nn\Lib\site-packages\sleap_nn\cli.py

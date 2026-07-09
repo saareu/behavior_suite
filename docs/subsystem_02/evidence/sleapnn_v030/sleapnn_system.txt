@@ -1,0 +1,30 @@
+W0706 14:27:43.426000 3252 Lib\site-packages\torch\utils\flop_counter.py:29] triton not found; flop counting will not work for triton kernels
+                          System Information                           
++---------------------------------------------------------------------+
+| Python         | 3.13.13                                            |
+| Platform       | Windows-11-10.0.26200-SP0                          |
+| PyTorch        | 2.12.1+cu130                                       |
+| Accelerator    | CUDA                                               |
+| CUDA version   | 13.0                                               |
+| cuDNN version  | 92000                                              |
+| Driver version | 596.21                                             |
+| GPU count      | 1                                                  |
+| GPU 0          | NVIDIA GeForce RTX 5060 Ti (15.9 GB, compute 12.0) |
++---------------------------------------------------------------------+
+
+                               Package Versions                                
++-----------------------------------------------------------------------------+
+| Package           | Version       | Source | Location                       |
+|-------------------+---------------+--------+--------------------------------|
+| sleap-nn          | 0.3.0         | pip    | ...g\uv\tools\sleap-nn\Lib\sià |
+| sleap-io          | 0.8.0         | pip    | ...g\uv\tools\sleap-nn\Lib\sià |
+| torch             | 2.12.1+cu130  | pip    | ...g\uv\tools\sleap-nn\Lib\sià |
+| pytorch-lightning | 2.6.5         | pip    | ...g\uv\tools\sleap-nn\Lib\sià |
+| kornia            | not installed |        |                                |
+| wandb             | 0.28.0        | pip    | ...g\uv\tools\sleap-nn\Lib\sià |
+| numpy             | 2.5.1         | pip    | ...g\uv\tools\sleap-nn\Lib\sià |
+| h5py              | 3.16.0        | pip    | ...g\uv\tools\sleap-nn\Lib\sià |
++-----------------------------------------------------------------------------+
+
+OK Driver is compatible: 596.21 >= 580.00 (required for CUDA 13.0)
+OK PyTorch can use GPU
