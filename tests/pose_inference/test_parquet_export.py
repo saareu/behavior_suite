@@ -1,4 +1,5 @@
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -11,6 +12,8 @@ from pose_inference.parquet_export import (
     PoseFrameRecord,
     PoseInstanceRecord,
     PoseNodeRecord,
+    TimingLookup,
+    _instance_nodes,
     export_pose_parquet,
     load_timing_lookup,
     pose_frames_to_rows,
@@ -126,6 +129,60 @@ def test_pose_rows_are_long_tidy_and_preserve_tracks_and_missing_nodes(
     assert missing["score"] is None
     assert missing["n_instances_in_frame"] == 2
     assert missing["n_valid_keypoints_in_instance"] == 1
+
+
+def test_structured_predicted_points_array_exports_real_xy_score_and_names() -> None:
+    point_dtype = [
+        ("xy", "<f8", (2,)),
+        ("score", "<f8"),
+        ("visible", "?"),
+        ("complete", "?"),
+        ("name", "O"),
+    ]
+    points = np.array(
+        [
+            ([792.0, 75.6], 0.85, True, False, "nose"),
+            ([758.0, 77.6], 0.83, True, False, "neck"),
+            ([math.nan, math.nan], math.nan, False, False, "headstage"),
+        ],
+        dtype=point_dtype,
+    )
+    instance = type("PredictedInstance", (), {"points": points})()
+
+    nodes = _instance_nodes(instance)
+    rows = pose_frames_to_rows(
+        [
+            PoseFrameRecord(
+                frame_idx=0,
+                instances=(
+                    PoseInstanceRecord(
+                        instance_index=0,
+                        nodes=nodes,
+                        instance_score=0.91,
+                    ),
+                ),
+            )
+        ],
+        TimingLookup(source="unavailable"),
+    )
+
+    assert [(node.node, node.x, node.y, node.score) for node in nodes[:2]] == [
+        ("nose", 792.0, 75.6, 0.85),
+        ("neck", 758.0, 77.6, 0.83),
+    ]
+    assert nodes[2].node == "headstage"
+    assert nodes[2].x is not None and math.isnan(nodes[2].x)
+    assert nodes[2].y is not None and math.isnan(nodes[2].y)
+    assert nodes[2].score is not None and math.isnan(nodes[2].score)
+    assert rows[0]["n_valid_keypoints_in_instance"] == 2
+    assert rows[1]["n_valid_keypoints_in_instance"] == 2
+    assert rows[2]["n_valid_keypoints_in_instance"] == 2
+    assert rows[0]["x"] == pytest.approx(792.0)
+    assert rows[0]["y"] == pytest.approx(75.6)
+    assert rows[0]["score"] == pytest.approx(0.85)
+    assert rows[0]["node"] == "nose"
+    assert rows[2]["x"] is not None and math.isnan(rows[2]["x"])
+    assert rows[2]["y"] is not None and math.isnan(rows[2]["y"])
 
 
 def test_export_pose_parquet_uses_writer_without_real_sleap_or_parquet_engine(

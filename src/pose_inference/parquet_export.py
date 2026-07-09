@@ -337,6 +337,57 @@ def _node_names(instance: object, point_count: int) -> list[str]:
     return [f"node_{index}" for index in range(point_count)]
 
 
+def _numeric_or_nan(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if math.isnan(numeric):
+        return math.nan
+    return numeric if math.isfinite(numeric) else None
+
+
+def _node_name(value: object, fallback: str) -> str:
+    if value is None:
+        return fallback
+    if isinstance(value, bytes):
+        try:
+            text = value.decode("utf-8")
+        except UnicodeDecodeError:
+            return fallback
+    else:
+        text = str(value)
+    return text if text else fallback
+
+
+def _structured_instance_nodes(instance: object, points: object) -> tuple[PoseNodeRecord, ...] | None:
+    try:
+        point_array = np.asarray(points)
+    except (TypeError, ValueError):
+        return None
+    field_names = point_array.dtype.names
+    if not field_names or "xy" not in field_names:
+        return None
+
+    flat_points = point_array.reshape(-1)
+    fallback_names = _node_names(instance, len(flat_points))
+    records = []
+    for index, point in enumerate(flat_points):
+        xy = point["xy"]
+        x = _numeric_or_nan(xy[0]) if len(xy) > 0 else None
+        y = _numeric_or_nan(xy[1]) if len(xy) > 1 else None
+        score = _numeric_or_nan(point["score"]) if "score" in field_names else None
+        node = (
+            _node_name(point["name"], fallback_names[index])
+            if "name" in field_names
+            else fallback_names[index]
+        )
+        records.append(PoseNodeRecord(node=node, x=x, y=y, score=score))
+    return tuple(records)
+
+
 def _point_xy_score(point: object, score: object = None) -> tuple[float | None, float | None, float | None]:
     if isinstance(point, Mapping):
         return (
@@ -373,6 +424,9 @@ def _instance_nodes(instance: object) -> tuple[PoseNodeRecord, ...]:
             x, y, score = _point_xy_score(point)
             records.append(PoseNodeRecord(node=str(name), x=x, y=y, score=score))
         return tuple(records)
+    structured_nodes = _structured_instance_nodes(instance, points)
+    if structured_nodes is not None:
+        return structured_nodes
 
     point_sequence = list(np.asarray(points, dtype=object))
     score_sequence = [] if scores is None else list(np.asarray(scores, dtype=object))
