@@ -74,6 +74,7 @@ where = ["src"]
 include = [
 "project*",
 "preprocess*",
+"pose_inference*",
 "cli*",
 "ui*",
 ]
@@ -111,6 +112,7 @@ branch = true
 source = [
 "project",
 "preprocess",
+"pose_inference",
 "cli",
 ]
 
@@ -151,6 +153,7 @@ ignore = [
 known-first-party = [
 "project",
 "preprocess",
+"pose_inference",
 "cli",
 "ui",
 ]
@@ -161,6 +164,7 @@ mypy_path = "src"
 packages = [
 "project",
 "preprocess",
+"pose_inference",
 "cli",
 ]
 check_untyped_defs = true

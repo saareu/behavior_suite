@@ -1,0 +1,27 @@
+schema_version: sleapnn_inference_profile_v1
+profile_id: sleapnn_default_profile_v1
+profile_name: SLEAP-NN default inference profile
+output_format: slp
+device: cuda
+batch_size: 4
+max_instances: 4
+peak_threshold: 0.05
+integral_refinement: integral
+integral_patch_size: 5
+max_edge_length_ratio: 0.25
+dist_penalty_weight: 1.0
+n_points: 10
+min_line_scores: 0.25
+min_instance_peaks:
+tracking:
+  enabled: true
+  candidates_method: local_queues
+  max_tracks: 2
+  tracking_window_size: 240
+  min_new_track_points: 1
+  min_match_points: 1
+  track_matching_method: hungarian
+  features: keypoints
+  scoring_method: oks
+  scoring_reduction: robust_quantile
+  robust_best_instance: 0.95
