@@ -18,6 +18,13 @@ from typing import Any
 
 import yaml
 
+from pose_inference.parquet_export import (
+    POSE_PARQUET_SCHEMA_VERSION,
+    ParquetExportError,
+    ParquetExportSummary,
+    export_pose_parquet,
+)
+
 REQUIRED_S1_FILES = (
     "prepared_video.mp4",
     "prepare_meta.json",
@@ -96,6 +103,7 @@ class PoseInferenceResult:
 
 
 SubprocessRunner = Callable[..., subprocess.CompletedProcess[str]]
+ParquetExporter = Callable[..., ParquetExportSummary]
 
 
 def _now_timestamp() -> str:
@@ -313,7 +321,12 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
         stream.write("\n")
 
 
-def _artifact_status(*, dry_run: bool, pose_slp_exists: bool) -> dict[str, str]:
+def _artifact_status(
+    *,
+    dry_run: bool,
+    pose_slp_exists: bool,
+    pose_parquet_status: str = "not_generated",
+) -> dict[str, str]:
     if dry_run:
         pose_status = "dry_run_not_generated"
     elif pose_slp_exists:
@@ -322,9 +335,30 @@ def _artifact_status(*, dry_run: bool, pose_slp_exists: bool) -> dict[str, str]:
         pose_status = "pending"
     return {
         "pose_slp": pose_status,
-        "pose_parquet": "not_generated",
+        "pose_parquet": pose_parquet_status,
         "overlay_mp4": "not_generated",
     }
+
+
+def _not_generated_parquet_summary(path: Path) -> ParquetExportSummary:
+    return ParquetExportSummary(
+        status="not_generated",
+        path=path,
+        schema_version=POSE_PARQUET_SCHEMA_VERSION,
+        rows=0,
+        timestamp_sources=("unavailable",),
+    )
+
+
+def _failed_parquet_summary(path: Path, error: BaseException) -> ParquetExportSummary:
+    return ParquetExportSummary(
+        status="failed",
+        path=path,
+        schema_version=POSE_PARQUET_SCHEMA_VERSION,
+        rows=0,
+        timestamp_sources=("unavailable",),
+        error=str(error),
+    )
 
 
 def _settings_payload(
@@ -379,6 +413,7 @@ def _pose_meta_payload(
     status: str,
     command: Sequence[str],
     returncode: int | None,
+    parquet_summary: ParquetExportSummary,
 ) -> dict[str, Any]:
     tracking = profile.get("tracking") if isinstance(profile.get("tracking"), Mapping) else {}
     return {
@@ -415,11 +450,13 @@ def _pose_meta_payload(
         "returncode": returncode,
         "pose_qc": {
             "status": "not_computed",
-            "reason": "first implementation; parquet export and pose QC are not implemented yet",
+            "reason": "pose-quality QC is not implemented yet",
         },
+        "parquet": parquet_summary.to_metadata(),
         "artifact_status": _artifact_status(
             dry_run=dry_run,
             pose_slp_exists=paths.pose_slp.is_file(),
+            pose_parquet_status=parquet_summary.status,
         ),
     }
 
@@ -439,6 +476,7 @@ def _manifest_payload(
     dry_run: bool,
     status: str,
     returncode: int | None,
+    parquet_summary: ParquetExportSummary,
 ) -> dict[str, Any]:
     return {
         "schema_version": JOB_MANIFEST_SCHEMA_VERSION,
@@ -466,6 +504,7 @@ def _manifest_payload(
         "artifact_status": _artifact_status(
             dry_run=dry_run,
             pose_slp_exists=paths.pose_slp.is_file(),
+            pose_parquet_status=parquet_summary.status,
         ),
     }
 
@@ -481,6 +520,7 @@ def _write_processing_log(
     dry_run: bool,
     status: str,
     returncode: int | None,
+    parquet_summary: ParquetExportSummary,
     stdout: str | None,
     stderr: str | None,
 ) -> None:
@@ -497,7 +537,11 @@ def _write_processing_log(
         f"pose_slp: {_path_text(paths.pose_slp)}",
         "command:",
         "  " + " ".join(command),
+        f"parquet_status: {parquet_summary.status}",
+        f"pose_parquet: {parquet_summary.path.resolve()}",
     ]
+    if parquet_summary.error:
+        lines.append(f"parquet_error: {parquet_summary.error}")
     if returncode is not None:
         lines.append(f"subprocess_returncode: {returncode}")
     if stdout:
@@ -520,6 +564,7 @@ def run_pose_inference(
     request: PoseInferenceRequest,
     *,
     subprocess_runner: SubprocessRunner = subprocess.run,
+    parquet_exporter: ParquetExporter = export_pose_parquet,
 ) -> PoseInferenceResult:
     """Run or dry-run one Subsystem 02 SLEAP-NN inference request."""
 
@@ -553,6 +598,7 @@ def run_pose_inference(
     stdout = None
     stderr = None
     returncode = None
+    parquet_summary = _not_generated_parquet_summary(paths.pose_parquet)
     if request.dry_run:
         status = "dry_run_complete"
         success = True
@@ -571,8 +617,19 @@ def run_pose_inference(
             status = "inference_failed"
             success = False
         elif paths.pose_slp.is_file():
-            status = "success"
-            success = True
+            try:
+                parquet_summary = parquet_exporter(
+                    pose_slp_path=paths.pose_slp,
+                    preprocess_dir=handoff.preprocess_dir,
+                    output_path=paths.pose_parquet,
+                )
+            except ParquetExportError as exc:
+                parquet_summary = _failed_parquet_summary(paths.pose_parquet, exc)
+                status = "export_failed"
+                success = False
+            else:
+                status = "success"
+                success = True
         else:
             status = "validation_failed"
             success = False
@@ -604,6 +661,7 @@ def run_pose_inference(
             status=status,
             command=command,
             returncode=returncode,
+            parquet_summary=parquet_summary,
         ),
     )
     _write_yaml(
@@ -622,6 +680,7 @@ def run_pose_inference(
             dry_run=request.dry_run,
             status=status,
             returncode=returncode,
+            parquet_summary=parquet_summary,
         ),
     )
     _write_processing_log(
@@ -634,6 +693,7 @@ def run_pose_inference(
         dry_run=request.dry_run,
         status=status,
         returncode=returncode,
+        parquet_summary=parquet_summary,
         stdout=stdout,
         stderr=stderr,
     )

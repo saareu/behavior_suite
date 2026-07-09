@@ -16,6 +16,7 @@ from pose_inference import (
     validate_s1_handoff,
 )
 from pose_inference.__main__ import app
+from pose_inference.parquet_export import ParquetExportError, ParquetExportSummary
 
 DEFAULT_PROFILE = Path("configs/subsystem_02/sleapnn_default_profile.yaml")
 FORBIDDEN_ARTIFACT_NAMES = (
@@ -206,6 +207,101 @@ def test_no_separate_tracking_artifacts_are_generated(tmp_path: Path) -> None:
         "job_manifest.yaml",
         "processing_log.txt",
     }.issubset(generated_names)
+
+
+def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> None:
+    _write_s1_handoff(tmp_path)
+    model_path = _model_path(tmp_path)
+    export_calls: list[dict[str, Path]] = []
+
+    def fake_subprocess(args, **kwargs):
+        run_dir = Path(kwargs["cwd"])
+        (run_dir / "pose.slp").write_bytes(b"slp")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok", stderr="")
+
+    def fake_exporter(**kwargs):
+        export_calls.append(dict(kwargs))
+        output_path = Path(kwargs["output_path"])
+        output_path.write_bytes(b"parquet")
+        return ParquetExportSummary(
+            status="generated",
+            path=output_path,
+            rows=12,
+            timestamp_sources=("prepared_sync:time_sec",),
+        )
+
+    result = run_pose_inference(
+        PoseInferenceRequest(
+            session_root=tmp_path,
+            model_path=model_path,
+            profile_path=DEFAULT_PROFILE,
+            dry_run=False,
+            timestamp="20260709T040506",
+        ),
+        subprocess_runner=fake_subprocess,
+        parquet_exporter=fake_exporter,
+    )
+
+    assert result.success is True
+    assert result.status == "success"
+    assert result.pose_slp_path.is_file()
+    assert (result.run_dir / "pose.parquet").is_file()
+    assert export_calls == [
+        {
+            "pose_slp_path": result.pose_slp_path,
+            "preprocess_dir": tmp_path / "preprocess",
+            "output_path": result.run_dir / "pose.parquet",
+        }
+    ]
+    pose_meta = json.loads(result.pose_meta_path.read_text(encoding="utf-8"))
+    manifest = yaml.safe_load(result.job_manifest_path.read_text(encoding="utf-8"))
+    log_text = result.processing_log_path.read_text(encoding="utf-8")
+    assert pose_meta["artifact_status"]["pose_slp"] == "generated"
+    assert pose_meta["artifact_status"]["pose_parquet"] == "generated"
+    assert pose_meta["parquet"]["rows"] == 12
+    assert pose_meta["parquet"]["timestamp_sources"] == ["prepared_sync:time_sec"]
+    assert manifest["artifact_status"]["pose_parquet"] == "generated"
+    assert "parquet_status: generated" in log_text
+
+
+def test_runner_marks_export_failed_when_parquet_export_fails(tmp_path: Path) -> None:
+    _write_s1_handoff(tmp_path)
+    model_path = _model_path(tmp_path)
+
+    def fake_subprocess(args, **kwargs):
+        run_dir = Path(kwargs["cwd"])
+        (run_dir / "pose.slp").write_bytes(b"slp")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok", stderr="")
+
+    def failing_exporter(**_kwargs):
+        raise ParquetExportError("forced export failure")
+
+    result = run_pose_inference(
+        PoseInferenceRequest(
+            session_root=tmp_path,
+            model_path=model_path,
+            profile_path=DEFAULT_PROFILE,
+            dry_run=False,
+            timestamp="20260709T050607",
+        ),
+        subprocess_runner=fake_subprocess,
+        parquet_exporter=failing_exporter,
+    )
+
+    assert result.success is False
+    assert result.status == "export_failed"
+    assert result.pose_slp_path.is_file()
+    assert not (result.run_dir / "pose.parquet").exists()
+    pose_meta = json.loads(result.pose_meta_path.read_text(encoding="utf-8"))
+    manifest = yaml.safe_load(result.job_manifest_path.read_text(encoding="utf-8"))
+    log_text = result.processing_log_path.read_text(encoding="utf-8")
+    assert pose_meta["artifact_status"]["pose_slp"] == "generated"
+    assert pose_meta["artifact_status"]["pose_parquet"] == "failed"
+    assert pose_meta["parquet"]["status"] == "failed"
+    assert "forced export failure" in pose_meta["parquet"]["error"]
+    assert manifest["artifact_status"]["pose_parquet"] == "failed"
+    assert "parquet_status: failed" in log_text
+    assert "parquet_error: forced export failure" in log_text
 
 
 def test_cli_dry_run_entrypoint(tmp_path: Path) -> None:
