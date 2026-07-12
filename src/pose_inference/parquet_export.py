@@ -41,6 +41,16 @@ PARQUET_COLUMNS = (
     "frame_idx",
     "time_sec",
     "timestamp_source",
+    "prepared_frame_idx",
+    "raw_decode_frame_idx",
+    "prepared_time_sec",
+    "raw_pts_time_sec",
+    "external_time_sec",
+    "raw_pts_status",
+    "external_time_status",
+    "external_time_source",
+    "external_time_variable_name",
+    "external_time_units",
     "instance_index",
     "track",
     "node",
@@ -50,9 +60,11 @@ PARQUET_COLUMNS = (
     "instance_score",
     "frame_valid",
     "original_frame_idx",
-    "prepared_frame_idx",
     "source_video_frame_idx",
     "video_fps",
+    "fps_header",
+    "raw_fps_effective",
+    "sync_frame_count_used_for_sleap",
     "n_instances_in_frame",
     "n_valid_keypoints_in_instance",
 )
@@ -64,20 +76,122 @@ class ParquetExportError(RuntimeError):
 
 @dataclass(frozen=True)
 class TimingLookup:
-    """Resolved frame-time source for pose.parquet export."""
+    """Resolved Subsystem 01 timing and frame mapping for pose.parquet export."""
 
     source: str
+    status: str = "unavailable"
     times_sec: tuple[float, ...] | None = None
     fps: float | None = None
+    sync_schema_version: str | None = None
+    prepared_frame_idx: tuple[int, ...] | None = None
+    raw_decode_frame_idx: tuple[int, ...] | None = None
+    prepared_time_sec: tuple[float, ...] | None = None
+    raw_pts_time_sec: tuple[float, ...] | None = None
+    external_time_sec: tuple[float, ...] | None = None
+    raw_pts_status: str | None = None
+    external_time_status: str | None = None
+    external_time_source: str | None = None
+    external_time_variable_name: str | None = None
+    external_time_units: str | None = None
+    fps_header: float | None = None
+    raw_fps_effective: float | None = None
+    start_frame: int | None = None
+    end_frame_exclusive: int | None = None
+    raw_frame_count_opencv_readable: int | None = None
+    prepared_frame_count_opencv_reported: int | None = None
+    prepared_frame_count_opencv_readable: int | None = None
+    frame_count_used_for_sleap: int | None = None
+
+    def _float_at(self, values: tuple[float, ...] | None, frame_idx: int) -> float | None:
+        if values is None or frame_idx < 0 or frame_idx >= len(values):
+            return None
+        value = values[frame_idx]
+        return value if math.isfinite(value) else None
+
+    def _int_at(self, values: tuple[int, ...] | None, frame_idx: int) -> int | None:
+        if values is None or frame_idx < 0 or frame_idx >= len(values):
+            return None
+        return int(values[frame_idx])
+
+    def timestamp_for_frame(self, frame_idx: int) -> tuple[float | None, str]:
+        external_time = self._float_at(self.external_time_sec, frame_idx)
+        if self.external_time_status == "valid" and external_time is not None:
+            return external_time, "prepared_sync:external_time_sec"
+
+        raw_pts_time = self._float_at(self.raw_pts_time_sec, frame_idx)
+        if raw_pts_time is not None:
+            return raw_pts_time, "prepared_sync:raw_pts_time_sec"
+
+        prepared_time = self._float_at(self.prepared_time_sec, frame_idx)
+        if prepared_time is not None:
+            return prepared_time, "prepared_sync:prepared_time_sec"
+
+        generic_time = self._float_at(self.times_sec, frame_idx)
+        if generic_time is not None:
+            return generic_time, self.source
+
+        if self.fps is not None and self.fps > 0:
+            return frame_idx / self.fps, "prepare_meta_fps_fallback"
+        return None, "unavailable"
 
     def time_for_frame(self, frame_idx: int) -> float | None:
-        if self.times_sec is not None:
-            if frame_idx < 0 or frame_idx >= len(self.times_sec):
-                return None
-            return self.times_sec[frame_idx]
-        if self.fps is not None and self.fps > 0:
-            return frame_idx / self.fps
-        return None
+        return self.timestamp_for_frame(frame_idx)[0]
+
+    def fields_for_frame(self, frame_idx: int) -> dict[str, object]:
+        time_sec, timestamp_source = self.timestamp_for_frame(frame_idx)
+        return {
+            "time_sec": time_sec,
+            "timestamp_source": timestamp_source,
+            "prepared_frame_idx": self._int_at(self.prepared_frame_idx, frame_idx),
+            "raw_decode_frame_idx": self._int_at(self.raw_decode_frame_idx, frame_idx),
+            "prepared_time_sec": self._float_at(self.prepared_time_sec, frame_idx),
+            "raw_pts_time_sec": self._float_at(self.raw_pts_time_sec, frame_idx),
+            "external_time_sec": self._float_at(self.external_time_sec, frame_idx),
+            "raw_pts_status": self.raw_pts_status,
+            "external_time_status": self.external_time_status,
+            "external_time_source": self.external_time_source,
+            "external_time_variable_name": self.external_time_variable_name,
+            "external_time_units": self.external_time_units,
+            "fps_header": self.fps_header,
+            "raw_fps_effective": self.raw_fps_effective,
+            "sync_frame_count_used_for_sleap": self.frame_count_used_for_sleap,
+        }
+
+    def to_metadata(self, frame_indices: Sequence[int] = ()) -> dict[str, object]:
+        if frame_indices:
+            timestamp_sources = sorted(
+                {self.timestamp_for_frame(frame_idx)[1] for frame_idx in frame_indices}
+            )
+            frames_with_time = sum(
+                1 for frame_idx in frame_indices if self.timestamp_for_frame(frame_idx)[0] is not None
+            )
+            represented_frames = len(set(frame_indices))
+        else:
+            timestamp_sources = [self.source]
+            frames_with_time = 0
+            represented_frames = 0
+        return {
+            "status": self.status,
+            "source": self.source,
+            "timestamp_sources": timestamp_sources,
+            "represented_frames": represented_frames,
+            "frames_with_time": frames_with_time,
+            "sync_schema_version": self.sync_schema_version,
+            "raw_pts_status": self.raw_pts_status,
+            "external_time_status": self.external_time_status,
+            "external_time_source": self.external_time_source,
+            "external_time_variable_name": self.external_time_variable_name,
+            "external_time_units": self.external_time_units,
+            "fps_header": self.fps_header,
+            "raw_fps_effective": self.raw_fps_effective,
+            "start_frame": self.start_frame,
+            "end_frame_exclusive": self.end_frame_exclusive,
+            "raw_frame_count_opencv_readable": self.raw_frame_count_opencv_readable,
+            "prepared_frame_count_opencv_reported": self.prepared_frame_count_opencv_reported,
+            "prepared_frame_count_opencv_readable": self.prepared_frame_count_opencv_readable,
+            "frame_count_used_for_sleap": self.frame_count_used_for_sleap,
+            "fallback_is_authoritative": self.status == "prepared_sync",
+        }
 
 
 @dataclass(frozen=True)
@@ -125,6 +239,7 @@ class ParquetExportSummary:
     rows: int = 0
     columns: tuple[str, ...] = PARQUET_COLUMNS
     timestamp_sources: tuple[str, ...] = ("unavailable",)
+    timing: dict[str, object] | None = None
     error: str | None = None
 
     def to_metadata(self) -> dict[str, object]:
@@ -135,6 +250,7 @@ class ParquetExportSummary:
             "rows": self.rows,
             "columns": list(self.columns),
             "timestamp_sources": list(self.timestamp_sources),
+            "timing": self.timing or {"status": "unavailable"},
             "error": self.error,
         }
 
@@ -194,9 +310,70 @@ def _numeric_vector(value: object, *, frame_count: int | None) -> tuple[float, .
     return tuple(float(item) for item in array)
 
 
+def _int_vector(value: object, *, frame_count: int | None) -> tuple[int, ...] | None:
+    try:
+        array = np.asarray(value)
+    except (TypeError, ValueError):
+        return None
+    if array.ndim != 1 or array.size == 0:
+        return None
+    if frame_count is not None and array.size != frame_count:
+        return None
+    if not np.issubdtype(array.dtype, np.integer):
+        return None
+    return tuple(int(item) for item in array)
+
+
+def _sync_vector(value: object) -> tuple[float, ...]:
+    return tuple(float(item) for item in np.asarray(value, dtype=np.float64))
+
+
+def _optional_text(value: object) -> str | None:
+    return None if value is None else str(value)
+
+
+def _load_s1_sync_timing(prepared_sync_path: Path) -> TimingLookup | None:
+    if not prepared_sync_path.is_file():
+        return None
+    try:
+        from preprocess.sync_writer import load_prepared_sync_npz
+
+        sync = load_prepared_sync_npz(prepared_sync_path)
+    except Exception:
+        return None
+    return TimingLookup(
+        source="prepared_sync",
+        status="prepared_sync",
+        sync_schema_version=sync.sync_schema_version,
+        prepared_frame_idx=tuple(int(item) for item in sync.prepared_frame_idx),
+        raw_decode_frame_idx=tuple(int(item) for item in sync.raw_decode_frame_idx),
+        prepared_time_sec=_sync_vector(sync.prepared_time_sec),
+        raw_pts_time_sec=_sync_vector(sync.raw_pts_time_sec),
+        external_time_sec=_sync_vector(sync.external_time_sec),
+        raw_pts_status=sync.raw_pts_status,
+        external_time_status=sync.external_time_status,
+        external_time_source=_optional_text(sync.external_time_source),
+        external_time_variable_name=_optional_text(sync.external_time_variable_name),
+        external_time_units=sync.external_time_units,
+        fps_header=float(sync.fps_header),
+        raw_fps_effective=(
+            float(sync.raw_fps_effective) if sync.raw_fps_effective is not None else None
+        ),
+        start_frame=sync.start_frame,
+        end_frame_exclusive=sync.end_frame_exclusive,
+        raw_frame_count_opencv_readable=sync.raw_frame_count_opencv_readable,
+        prepared_frame_count_opencv_reported=sync.prepared_frame_count_opencv_reported,
+        prepared_frame_count_opencv_readable=sync.prepared_frame_count_opencv_readable,
+        frame_count_used_for_sleap=sync.frame_count_used_for_sleap,
+    )
+
+
 def _load_sync_timing(prepared_sync_path: Path, *, frame_count: int | None) -> TimingLookup | None:
     if not prepared_sync_path.is_file():
         return None
+    s1_timing = _load_s1_sync_timing(prepared_sync_path)
+    if s1_timing is not None:
+        return s1_timing
     try:
         with np.load(prepared_sync_path, allow_pickle=False) as sync:
             for key in TIMING_VECTOR_KEYS:
@@ -204,11 +381,31 @@ def _load_sync_timing(prepared_sync_path: Path, *, frame_count: int | None) -> T
                     continue
                 vector = _numeric_vector(sync[key], frame_count=frame_count)
                 if vector is not None:
-                    return TimingLookup(source=f"prepared_sync:{key}", times_sec=vector)
+                    prepared_idx = (
+                        _int_vector(sync["prepared_frame_idx"], frame_count=frame_count)
+                        if "prepared_frame_idx" in sync
+                        else None
+                    )
+                    raw_idx = (
+                        _int_vector(sync["raw_decode_frame_idx"], frame_count=frame_count)
+                        if "raw_decode_frame_idx" in sync
+                        else None
+                    )
+                    return TimingLookup(
+                        source=f"prepared_sync:{key}",
+                        status="prepared_sync_generic",
+                        times_sec=vector,
+                        prepared_frame_idx=prepared_idx,
+                        raw_decode_frame_idx=raw_idx,
+                    )
             for key in sync.files:
                 vector = _numeric_vector(sync[key], frame_count=frame_count)
                 if vector is not None:
-                    return TimingLookup(source=f"prepared_sync:{key}", times_sec=vector)
+                    return TimingLookup(
+                        source=f"prepared_sync:{key}",
+                        status="prepared_sync_generic",
+                        times_sec=vector,
+                    )
     except (OSError, ValueError, EOFError):
         return None
     return None
@@ -233,8 +430,8 @@ def load_timing_lookup(preprocess_dir: Path, *, frame_count: int | None) -> Timi
         return sync_timing
     fps = _load_meta_fps(preprocess / "prepare_meta.json")
     if fps is not None:
-        return TimingLookup(source="prepare_meta_fps", fps=fps)
-    return TimingLookup(source="unavailable")
+        return TimingLookup(source="prepare_meta_fps_fallback", status="fallback_fps", fps=fps)
+    return TimingLookup(source="unavailable", status="unavailable")
 
 
 def _is_valid_coordinate(value: float | None) -> bool:
@@ -250,10 +447,24 @@ def pose_frames_to_rows(
     rows: list[dict[str, object]] = []
     for frame in frames:
         n_instances = len(frame.instances)
-        prepared_frame_idx = (
-            frame.prepared_frame_idx if frame.prepared_frame_idx is not None else frame.frame_idx
+        timing_fields = timing.fields_for_frame(frame.frame_idx)
+        prepared_frame_idx = timing_fields["prepared_frame_idx"]
+        if prepared_frame_idx is None:
+            prepared_frame_idx = (
+                frame.prepared_frame_idx if frame.prepared_frame_idx is not None else frame.frame_idx
+            )
+        raw_decode_frame_idx = timing_fields["raw_decode_frame_idx"]
+        original_frame_idx = (
+            raw_decode_frame_idx
+            if raw_decode_frame_idx is not None
+            else frame.original_frame_idx
         )
-        time_sec = timing.time_for_frame(frame.frame_idx)
+        source_video_frame_idx = (
+            raw_decode_frame_idx
+            if raw_decode_frame_idx is not None
+            else frame.source_video_frame_idx
+        )
+        video_fps = frame.video_fps if frame.video_fps is not None else timing.fps_header
         for instance in frame.instances:
             valid_keypoints = sum(
                 1
@@ -267,8 +478,9 @@ def pose_frames_to_rows(
                         "video_index": frame.video_index,
                         "video_path": frame.video_path,
                         "frame_idx": frame.frame_idx,
-                        "time_sec": time_sec,
-                        "timestamp_source": timing.source,
+                        **timing_fields,
+                        "prepared_frame_idx": prepared_frame_idx,
+                        "raw_decode_frame_idx": raw_decode_frame_idx,
                         "instance_index": instance.instance_index,
                         "track": instance.track,
                         "node": node.node,
@@ -277,10 +489,9 @@ def pose_frames_to_rows(
                         "score": node.score,
                         "instance_score": instance.instance_score,
                         "frame_valid": frame.frame_valid,
-                        "original_frame_idx": frame.original_frame_idx,
-                        "prepared_frame_idx": prepared_frame_idx,
-                        "source_video_frame_idx": frame.source_video_frame_idx,
-                        "video_fps": frame.video_fps,
+                        "original_frame_idx": original_frame_idx,
+                        "source_video_frame_idx": source_video_frame_idx,
+                        "video_fps": video_fps,
                         "n_instances_in_frame": n_instances,
                         "n_valid_keypoints_in_instance": valid_keypoints,
                     }
@@ -561,6 +772,7 @@ def export_pose_parquet(
 
     writer = parquet_writer or _write_rows_with_pandas
     writer(rows, output, PARQUET_COLUMNS)
+    frame_indices = [frame.frame_idx for frame in frames]
     return ParquetExportSummary(
         status="generated",
         path=output,
@@ -569,4 +781,5 @@ def export_pose_parquet(
         timestamp_sources=tuple(sorted({str(row["timestamp_source"]) for row in rows}))
         if rows
         else (timing.source,),
+        timing=timing.to_metadata(frame_indices),
     )

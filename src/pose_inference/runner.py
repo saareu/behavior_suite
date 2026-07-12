@@ -723,6 +723,7 @@ def _manifest_payload(
     sleap_provenance: SleapProvenanceSummary,
 ) -> dict[str, Any]:
     provenance_metadata = sleap_provenance.to_metadata()
+    parquet_metadata = parquet_summary.to_metadata()
     return {
         "schema_version": JOB_MANIFEST_SCHEMA_VERSION,
         "run_id": run_id,
@@ -754,6 +755,7 @@ def _manifest_payload(
         "effective_sleap_tracking_config": provenance_metadata.get("tracking_config"),
         "effective_sleap_provenance_source": SLEAP_PROVENANCE_SOURCE,
         "sleap_provenance_note": SLEAP_PROVENANCE_NOTE,
+        "parquet_timing": parquet_metadata.get("timing"),
         "artifact_status": _artifact_status(
             dry_run=dry_run,
             pose_slp_exists=paths.pose_slp.is_file(),

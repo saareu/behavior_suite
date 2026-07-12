@@ -240,6 +240,13 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
             path=output_path,
             rows=12,
             timestamp_sources=("prepared_sync:time_sec",),
+            timing={
+                "status": "prepared_sync",
+                "source": "prepared_sync",
+                "timestamp_sources": ["prepared_sync:external_time_sec"],
+                "represented_frames": 3,
+                "frames_with_time": 3,
+            },
         )
 
     def fake_pose_qc(**kwargs):
@@ -327,6 +334,8 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
     assert pose_meta["artifact_status"]["overlay_mp4"] == "generated"
     assert pose_meta["parquet"]["rows"] == 12
     assert pose_meta["parquet"]["timestamp_sources"] == ["prepared_sync:time_sec"]
+    assert pose_meta["parquet"]["timing"]["status"] == "prepared_sync"
+    assert pose_meta["parquet"]["timing"]["frames_with_time"] == 3
     assert pose_meta["pose_qc"]["status"] == "computed"
     assert pose_meta["overlay"]["status"] == "generated"
     assert pose_meta["overlay"]["frames_written"] == 3
@@ -358,6 +367,8 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
     }
     assert manifest["effective_sleap_provenance_source"] == "pose.slp labels.provenance"
     assert manifest["sleap_provenance_note"] == SLEAP_PROVENANCE_NOTE
+    assert manifest["parquet_timing"]["status"] == "prepared_sync"
+    assert manifest["parquet_timing"]["timestamp_sources"] == ["prepared_sync:external_time_sec"]
     assert "parquet_status: generated" in log_text
     assert "pose_qc: computed" in log_text
     assert "overlay: generated" in log_text
