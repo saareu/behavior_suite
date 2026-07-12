@@ -62,7 +62,7 @@ The backend contract is defined in
 required output directory remains:
 
 ```text
-pose_inference/<model-id>__<timestamp>/
+pose_inference/{model-id}__{timestamp}/
 ├── pose.slp
 ├── pose.parquet
 ├── overlay.mp4

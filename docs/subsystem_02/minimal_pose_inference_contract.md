@@ -18,7 +18,7 @@ geometry, prepared-video metadata, and preprocessing provenance.
 Each Subsystem 02 run writes:
 
 ```text
-pose_inference/<model-id>__<timestamp>/
+pose_inference/{model-id}__{timestamp}/
 ├── pose.slp
 ├── pose.parquet
 ├── overlay.mp4
@@ -50,4 +50,3 @@ pose_inference/<model-id>__<timestamp>/
 - Tracking reports, tracking QC CSVs, or identity maps as standard outputs.
 - Parameter optimization and guided profile tuning.
 - Any change to Subsystem 01 preprocessing behavior.
-

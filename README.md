@@ -1,8 +1,12 @@
 # behavior_suite
 
-Scientific behavioral-video processing suite for preparing mouse behavior videos for SLEAP pose estimation and future downstream behavioral analysis.
+Scientific behavioral-video processing suite for preparing mouse behavior
+videos for SLEAP pose estimation and future downstream behavioral analysis.
 
-The current completed subsystem is **Subsystem 01 — Video Preprocessing**. It prepares raw videos into validated, SLEAP-compatible prepared videos while preserving raw decode-order frame identity, timing traceability, accepted spatial geometry, and processing provenance.
+The current completed subsystem is **Subsystem 01 — Video Preprocessing**. It
+prepares raw videos into validated, SLEAP-compatible prepared videos while
+preserving raw decode-order frame identity, timing traceability, accepted
+spatial geometry, and processing provenance.
 
 Subsystem 01 is functionally closed and entering maintenance.
 
@@ -23,7 +27,11 @@ scripts\install_windows_gui.bat
 scripts\launch_windows_gui.bat
 ```
 
-The installer creates or updates the `behavior_suite_gui` Conda environment with Python 3.12, FFmpeg 7.1.1 from conda-forge, PySide6 6.11.1 from conda-forge, and this repository installed in editable mode. It does not require PowerShell activation/profile setup and does not modify the user's base environment.
+The installer creates or updates the `behavior_suite_gui` Conda environment
+with Python 3.12, FFmpeg 7.1.1 from conda-forge, PySide6 6.11.1 from
+conda-forge, and this repository installed in editable mode. It does not
+require PowerShell activation/profile setup and does not modify the user's base
+environment.
 
 Manual runtime check:
 
@@ -46,7 +54,8 @@ Choose video
 → prepare
 ```
 
-Successful preprocessing writes the official artifacts under the project `preprocess/` directory:
+Successful preprocessing writes the official artifacts under the project
+`preprocess/` directory:
 
 ```text
 prepared_video.mp4
@@ -64,21 +73,33 @@ processing_log.txt
 Current active documentation:
 
 - `docs/README.md` — active documentation index
-- `docs/subsystem_01/preprocessing.md` — canonical Subsystem 01 functional specification
-- `docs/subsystem_01/status_and_roadmap.md` — current status, field-tested evidence, and future roadmap items
-- `docs/subsystem_01/design/geometry_modes.md` — active future-facing spatial geometry design reference
-- `docs/subsystem_02/mvp_scope_and_roadmap.md` — active Subsystem 02 MVP scope, status, and roadmap
-- `docs/subsystem_02/sleap_inference_specification.md` — Subsystem 02 backend pose inference contract
-- `docs/subsystem_02/acceptance_test_specification.md` — Subsystem 02 backend inference acceptance-test specification
-- `docs/general/development/ai_coding_guide.md` — repository-wide AI-assisted development guidance
+- `docs/subsystem_01/preprocessing.md` — canonical Subsystem 01 functional
+  specification
+- `docs/subsystem_01/status_and_roadmap.md` — current status, field-tested
+  evidence, and future roadmap items
+- `docs/subsystem_01/design/geometry_modes.md` — active future-facing spatial
+  geometry design reference
+- `docs/subsystem_02/mvp_scope_and_roadmap.md` — current Subsystem 02 MVP
+  scope, status, and roadmap
+- `docs/subsystem_02/sleap_inference_specification.md` — Subsystem 02 backend
+  pose inference contract
+- `docs/subsystem_02/acceptance_test_specification.md` — Subsystem 02 backend
+  inference acceptance-test specification
+- `docs/general/development/ai_coding_guide.md` — repository-wide AI-assisted
+  development guidance
 
-Historical plans, audits, release snapshots, and superseded design drafts are preserved under `docs/subsystem_01/archive/`. They are retained for traceability but are not the current source of truth.
+Historical plans, audits, release snapshots, and superseded design drafts are
+preserved under `docs/subsystem_01/archive/`. They are retained for
+traceability but are not the current source of truth.
 
 ---
 
 ## Subsystem boundary
 
-Subsystem 01 validates prepared-video compatibility and frame-domain integrity. It does not validate pose quality, SLEAP model accuracy, tracking quality, instance counts, confidence scores, coordinate exports, inference results, or SLEAP output-row structure.
+Subsystem 01 validates prepared-video compatibility and frame-domain integrity.
+It does not validate pose quality, SLEAP model accuracy, tracking quality,
+instance counts, confidence scores, coordinate exports, inference results, or
+SLEAP output-row structure.
 
 Subsystem 02 is the active pose-inference and review subsystem. Its current
 validated implementation covers the bottom-up backend inference path and
@@ -99,9 +120,13 @@ Before making repository changes, read the applicable documentation:
 
 - `docs/subsystem_01/preprocessing.md`
 - `docs/subsystem_01/status_and_roadmap.md`
-- `docs/subsystem_02/mvp_scope_and_roadmap.md` — required when changing or implementing Subsystem 02
-- `docs/subsystem_02/sleap_inference_specification.md` — required when changing or implementing the Subsystem 02 backend
-- `docs/subsystem_02/acceptance_test_specification.md` — required when changing backend inference acceptance behavior
+- `docs/subsystem_02/mvp_scope_and_roadmap.md` — required when changing or
+  implementing Subsystem 02
+- `docs/subsystem_02/sleap_inference_specification.md` — required when
+  changing or implementing the Subsystem 02 backend
+- `docs/subsystem_02/acceptance_test_specification.md` — required when
+  changing backend inference acceptance behavior
 - `docs/general/development/ai_coding_guide.md`
 
-Keep changes scoped, preserve scientific invariants, and update tests for any implementation behavior change.
+Keep changes scoped, preserve scientific invariants, and update tests for any
+implementation behavior change.

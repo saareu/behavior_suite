@@ -44,7 +44,7 @@ The backend pose inference contract is not responsible for:
 - separate tracking post-processing artifacts;
 - final long-term biological identity continuity;
 - parameter optimization or guided hyperparameter search;
-- behavior classification or downstream biological analysis.
+- behavior classification or downstream biological analysis;
 - the Subsystem 02 UI workspace;
 - main UI launch/navigation;
 - existing-run review and downstream run selection.
@@ -100,15 +100,14 @@ prepared_frame_idx
 Each run writes one minimal output directory:
 
 ```text
-pose_inference/
-└── <model-id>__<timestamp>/
-    ├── pose.slp
-    ├── pose.parquet
-    ├── overlay.mp4
-    ├── pose_meta.json
-    ├── settings_used.yaml
-    ├── job_manifest.yaml
-    └── processing_log.txt
+pose_inference/{model-id}__{timestamp}/
+├── pose.slp
+├── pose.parquet
+├── overlay.mp4
+├── pose_meta.json
+├── settings_used.yaml
+├── job_manifest.yaml
+└── processing_log.txt
 ```
 
 No other standard artifacts are part of the locked Subsystem 02 contract.

@@ -64,7 +64,7 @@ The tests must verify that Subsystem 01 remains the source of truth for:
 Each successful or warning-success run must write:
 
 ```text
-pose_inference/<model-id>__<timestamp>/
+pose_inference/{model-id}__{timestamp}/
 ├── pose.slp
 ├── pose.parquet
 ├── overlay.mp4
