@@ -1,21 +1,28 @@
-# Subsystem 02 — SLEAP-NN Inference Specification
+# Subsystem 02 — Backend Pose Inference Contract
 
 ## 1. Purpose
 
-Subsystem 02 runs SLEAP/SLEAP-NN pose inference on validated videos prepared by
-Subsystem 01.
+This document defines the backend pose inference contract for Subsystem 02. It
+covers how the backend consumes completed Subsystem 01 outputs, runs
+SLEAP/SLEAP-NN inference, and writes the locked pose inference artifact set.
 
-The purpose of Subsystem 02 is to create one native pose result, one
-analysis-ready pose table, one optional visual overlay, and the minimal
-metadata/provenance needed to reproduce and audit the run.
+This document is not the full Subsystem 02 MVP scope. The full MVP also
+requires a UI-based inference and review workflow, top-down model support,
+existing-run review, Subsystem 01 completion-to-Subsystem 02 transition, and
+main UI integration. See
+[`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md).
 
-Subsystem 02 does not change preprocessing behavior. Subsystem 01 remains the
-source of truth for frame identity, timing, crop geometry, prepared-video
+The current validated backend path is bottom-up SLEAP/SLEAP-NN inference.
+
+The backend creates one native pose result, one analysis-ready pose table, one
+visual overlay, and the minimal metadata/provenance needed to reproduce and
+audit the run. It does not change preprocessing behavior. Subsystem 01 remains
+the source of truth for frame identity, timing, crop geometry, prepared-video
 dimensions, and preprocessing provenance.
 
 ## 2. Scope
 
-Subsystem 02 is responsible for:
+The backend pose inference contract is responsible for:
 
 - validating required Subsystem 01 prepared outputs;
 - resolving a registered SLEAP/SLEAP-NN model and one established default
@@ -29,7 +36,7 @@ Subsystem 02 is responsible for:
 - writing run metadata, settings, manifest, and logs;
 - reporting pose-inference quality summaries.
 
-Subsystem 02 is not responsible for:
+The backend pose inference contract is not responsible for:
 
 - modifying Subsystem 01 artifacts;
 - redefining frame timing or crop geometry;
@@ -38,6 +45,9 @@ Subsystem 02 is not responsible for:
 - final long-term biological identity continuity;
 - parameter optimization or guided hyperparameter search;
 - behavior classification or downstream biological analysis.
+- the Subsystem 02 UI workspace;
+- main UI launch/navigation;
+- existing-run review and downstream run selection.
 
 Parameter optimization is postponed to a later guided workflow. The initial
 implementation uses one established default inference profile.
@@ -186,6 +196,9 @@ The pose-quality QC section is limited to pose inference quality. Pipeline
 success, dispatch provenance, and file provenance belong in
 `job_manifest.yaml` and `processing_log.txt`.
 
+When available, `pose_meta.json` should also include compact effective SLEAP
+provenance copied from `pose.slp` `labels.provenance`.
+
 ### `settings_used.yaml`
 
 `settings_used.yaml` records the actual SLEAP/SLEAP-NN parameters used for the
@@ -198,6 +211,10 @@ run, including:
 - tracking enabled/disabled;
 - all effective SLEAP/SLEAP-NN inference parameters.
 
+Raw SLEAP/SLEAP-NN startup logs may report Predictor construction defaults for
+checkpoint models. Effective prediction-stage settings should be read from
+`pose.slp` `labels.provenance` after inference completes.
+
 ### `job_manifest.yaml`
 
 `job_manifest.yaml` records the input/output contract and provenance:
@@ -206,6 +223,8 @@ run, including:
 - output artifact paths and fingerprints;
 - model path and model metadata fingerprint;
 - command or structured invocation record;
+- effective SLEAP inference and tracking provenance copied from `pose.slp`
+  `labels.provenance` when available;
 - run start/end timestamps;
 - run status and warning/failure summary.
 
@@ -214,9 +233,17 @@ run, including:
 `processing_log.txt` records runtime logs, command output, warnings, errors,
 and validation messages useful for debugging and audit.
 
+Raw stdout/stderr is diagnostic only. The effective SLEAP prediction-stage
+settings source is `pose.slp` `labels.provenance` when available.
+
 ## 7. Default Inference Profile
 
 The initial implementation uses one established default inference profile.
+
+The current validated backend path is bottom-up. Top-down model support is
+required for the full Subsystem 02 MVP, but it is not yet validated by the
+current backend path unless a later implementation task explicitly extends this
+contract.
 
 The profile may enable SLEAP/SLEAP-NN tracking. When enabled, tracking is run
 inside the inference call and written into `pose.slp`.
@@ -336,4 +363,3 @@ A Subsystem 02 run is complete when:
 7. `processing_log.txt` records runtime logs.
 8. `overlay.mp4` is produced, or its failure is recorded as a non-fatal warning
    when allowed.
-

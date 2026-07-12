@@ -1,20 +1,25 @@
-# Subsystem 02 — Acceptance-Test Specification
+# Subsystem 02 — Backend Inference Acceptance-Test Specification
 
 ## 1. Purpose
 
-This document defines acceptance evidence for the initial Subsystem 02
+This document defines acceptance evidence for the Subsystem 02 backend
 SLEAP/SLEAP-NN inference implementation.
 
 Acceptance focuses on reproducible inference, the minimal artifact contract,
 pose coverage, pose-quality QC, overlay generation, Parquet export, and
 preservation of the Subsystem 01 timing/frame contract.
 
+This is not the full Subsystem 02 MVP acceptance specification. The full MVP
+also requires UI-based inference and review, top-down model support, main UI
+integration, existing-run review, and downstream run selection. See
+[`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md).
+
 Identity-stable final tracking is not a blocking acceptance criterion for
 Subsystem 02.
 
 ## 2. Acceptance Scope
 
-Acceptance tests must prove that Subsystem 02 can:
+Backend acceptance tests must prove that the Subsystem 02 backend can:
 
 - consume Subsystem 01 prepared outputs without modifying them;
 - run the selected default SLEAP/SLEAP-NN inference profile reproducibly;
@@ -30,6 +35,10 @@ Acceptance tests must prove that Subsystem 02 can:
 The current provisional SLEAP tracking settings are accepted as good enough for
 Subsystem 02 development. Parameter optimization is postponed to a later guided
 workflow.
+
+The current validated backend path is bottom-up inference. Top-down support is
+required for the full Subsystem 02 MVP but is not yet covered by this backend
+acceptance set unless a later implementation task explicitly extends it.
 
 ## 3. Required Inputs
 
@@ -212,11 +221,21 @@ messages.
 
 ## 12. Non-Regression Requirement
 
-Subsystem 02 acceptance must not require changes to Subsystem 01 behavior.
+Backend Subsystem 02 acceptance must not require changes to Subsystem 01
+behavior.
 
 Before merging implementation changes, the existing Subsystem 01 tests and GUI
 launch path must remain valid. SLEAP/SLEAP-NN dependencies must not be required
 to launch or use Subsystem 01 preprocessing.
+
+Full Subsystem 02 MVP acceptance additionally requires:
+
+- UI-based inference and review;
+- top-down model support;
+- main UI launch/navigation integration;
+- opening existing completed Subsystem 02 runs for review, reuse, rerun, and
+  downstream selection;
+- a Subsystem 01 completion-to-Subsystem 02 transition.
 
 ## 13. Pass/Fail Summary
 
@@ -230,4 +249,3 @@ Subsystem 02 passes initial acceptance when:
 6. Tracking, when enabled, is stored inside `pose.slp`.
 7. No separate tracking artifacts are required.
 8. Identity-stable final tracking is not treated as a blocker.
-

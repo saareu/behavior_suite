@@ -10,8 +10,9 @@
 
 ## Subsystem 02 — SLEAP-NN Inference
 
-- [Inference Specification](subsystem_02/sleap_inference_specification.md)
-- [Acceptance-Test Specification](subsystem_02/acceptance_test_specification.md)
+- [MVP Scope and Roadmap](subsystem_02/mvp_scope_and_roadmap.md)
+- [Backend Pose Inference Contract](subsystem_02/sleap_inference_specification.md)
+- [Backend Inference Acceptance-Test Specification](subsystem_02/acceptance_test_specification.md)
 
 ## General
 

@@ -6,6 +6,11 @@ The current completed subsystem is **Subsystem 01 — Video Preprocessing**. It 
 
 Subsystem 01 is functionally closed and entering maintenance.
 
+**Subsystem 02 — SLEAP-NN Inference and Review** is under active MVP
+development. The bottom-up backend inference path is validated, but the full
+Subsystem 02 MVP still requires UI integration, top-down model support,
+existing-run review, and navigation from the main UI launch point.
+
 ---
 
 ## Supported Windows workflow
@@ -62,8 +67,9 @@ Current active documentation:
 - `docs/subsystem_01/preprocessing.md` — canonical Subsystem 01 functional specification
 - `docs/subsystem_01/status_and_roadmap.md` — current status, field-tested evidence, and future roadmap items
 - `docs/subsystem_01/design/geometry_modes.md` — active future-facing spatial geometry design reference
-- `docs/subsystem_02/sleap_inference_specification.md` — Subsystem 02 inference specification
-- `docs/subsystem_02/acceptance_test_specification.md` — Subsystem 02 acceptance-test specification
+- `docs/subsystem_02/mvp_scope_and_roadmap.md` — active Subsystem 02 MVP scope, status, and roadmap
+- `docs/subsystem_02/sleap_inference_specification.md` — Subsystem 02 backend pose inference contract
+- `docs/subsystem_02/acceptance_test_specification.md` — Subsystem 02 backend inference acceptance-test specification
 - `docs/general/development/ai_coding_guide.md` — repository-wide AI-assisted development guidance
 
 Historical plans, audits, release snapshots, and superseded design drafts are preserved under `docs/subsystem_01/archive/`. They are retained for traceability but are not the current source of truth.
@@ -74,7 +80,16 @@ Historical plans, audits, release snapshots, and superseded design drafts are pr
 
 Subsystem 01 validates prepared-video compatibility and frame-domain integrity. It does not validate pose quality, SLEAP model accuracy, tracking quality, instance counts, confidence scores, coordinate exports, inference results, or SLEAP output-row structure.
 
-Future subsystems may cover SLEAP inference and tracking, pose quality control, behavioral feature extraction, visualization, and reporting.
+Subsystem 02 is the active pose-inference and review subsystem. Its current
+validated implementation covers the bottom-up backend inference path and
+minimal artifact contract. The full MVP is not complete until the UI workflow,
+top-down support, existing-run review, S1-to-S2 transition, and main UI
+navigation are implemented.
+
+Final biological identity assignment, tracking verification, implanted/partner
+mouse assignment, identity-switch correction, imputation, pose
+smoothing/finalization, behavior-ready feature extraction, and final
+trajectory generation are downstream responsibilities.
 
 ---
 
@@ -84,7 +99,9 @@ Before making repository changes, read the applicable documentation:
 
 - `docs/subsystem_01/preprocessing.md`
 - `docs/subsystem_01/status_and_roadmap.md`
-- `docs/subsystem_02/sleap_inference_specification.md` — required when changing or implementing Subsystem 02
+- `docs/subsystem_02/mvp_scope_and_roadmap.md` — required when changing or implementing Subsystem 02
+- `docs/subsystem_02/sleap_inference_specification.md` — required when changing or implementing the Subsystem 02 backend
+- `docs/subsystem_02/acceptance_test_specification.md` — required when changing backend inference acceptance behavior
 - `docs/general/development/ai_coding_guide.md`
 
 Keep changes scoped, preserve scientific invariants, and update tests for any implementation behavior change.
