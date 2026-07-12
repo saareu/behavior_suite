@@ -10,10 +10,14 @@
 
 ## Subsystem 02 — SLEAP-NN Inference
 
-- [Current MVP Scope and Roadmap](subsystem_02/mvp_scope_and_roadmap.md)
-- [Backend Pose Inference Contract](subsystem_02/sleap_inference_specification.md)
-- [Backend Inference Acceptance-Test Specification](subsystem_02/acceptance_test_specification.md)
+- [Current MVP Scope and Roadmap][s2-mvp]
+- [Backend Pose Inference Contract][s2-backend-contract]
+- [Backend Inference Acceptance-Test Specification][s2-backend-acceptance]
 
 ## General
 
 - [AI-Assisted Development Guide](general/development/ai_coding_guide.md)
+
+[s2-mvp]: subsystem_02/mvp_scope_and_roadmap.md
+[s2-backend-contract]: subsystem_02/sleap_inference_specification.md
+[s2-backend-acceptance]: subsystem_02/acceptance_test_specification.md
