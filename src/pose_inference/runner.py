@@ -7,7 +7,9 @@ runtime boundary for real inference is the ``sleap-nn predict`` subprocess.
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
+import math
 import re
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
@@ -52,10 +54,37 @@ FORBIDDEN_STANDARD_ARTIFACT_NAMES = {
 POSE_META_SCHEMA_VERSION = "pose_meta_v1"
 JOB_MANIFEST_SCHEMA_VERSION = "pose_inference_job_manifest_v1"
 SETTINGS_SCHEMA_VERSION = "pose_inference_settings_v1"
+SLEAP_PROVENANCE_SOURCE = "pose.slp labels.provenance"
+SLEAP_PROVENANCE_NOTE = (
+    "SLEAP-NN checkpoint startup logs may report Predictor construction defaults. "
+    "Effective prediction-stage settings are read from pose.slp labels.provenance."
+)
+SLEAP_PROVENANCE_FIELDS = {
+    "inference_config": (
+        "inference_config",
+        "prediction_config",
+        "predictor_config",
+        "predict_config",
+        "inference",
+    ),
+    "tracking_config": ("tracking_config", "tracker_config", "track_config", "tracking"),
+    "device": ("device", "devices"),
+    "system_info": ("system_info", "system", "environment"),
+    "model_paths": ("model_paths", "model_path", "models"),
+    "model_type": ("model_type", "model"),
+    "source_file": ("source_file", "input_file", "data_path", "video_path"),
+    "frame_selection": ("frame_selection", "frames", "frame_range"),
+    "sleap_nn_version": ("sleap_nn_version", "sleap-nn_version", "sleap_nn"),
+    "sleap_io_version": ("sleap_io_version", "sleap-io_version", "sleap_io"),
+}
 
 
 class PoseInferenceError(RuntimeError):
     """Expected Subsystem 02 input, dispatch, or artifact error."""
+
+
+class SleapProvenanceError(RuntimeError):
+    """Expected failure while reading SLEAP provenance from pose.slp."""
 
 
 @dataclass(frozen=True)
@@ -114,10 +143,49 @@ class PoseInferenceResult:
     returncode: int | None = None
 
 
+@dataclass(frozen=True)
+class SleapProvenanceSummary:
+    """Compact effective SLEAP/SLEAP-NN provenance copied from pose.slp."""
+
+    status: str
+    source: str = SLEAP_PROVENANCE_SOURCE
+    inference_config: Any = None
+    tracking_config: Any = None
+    device: Any = None
+    system_info: Any = None
+    model_paths: Any = None
+    model_type: Any = None
+    source_file: Any = None
+    frame_selection: Any = None
+    sleap_nn_version: str | None = None
+    sleap_io_version: str | None = None
+    error: str | None = None
+    reason: str | None = None
+
+    def to_metadata(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "source": self.source,
+            "inference_config": self.inference_config,
+            "tracking_config": self.tracking_config,
+            "device": self.device,
+            "system_info": self.system_info,
+            "model_paths": self.model_paths,
+            "model_type": self.model_type,
+            "source_file": self.source_file,
+            "frame_selection": self.frame_selection,
+            "sleap_nn_version": self.sleap_nn_version,
+            "sleap_io_version": self.sleap_io_version,
+            "error": self.error,
+            "reason": self.reason,
+        }
+
+
 SubprocessRunner = Callable[..., subprocess.CompletedProcess[str]]
 ParquetExporter = Callable[..., ParquetExportSummary]
 PoseQcComputer = Callable[..., PoseQcSummary]
 OverlayGenerator = Callable[..., OverlaySummary]
+SleapProvenanceReader = Callable[[Path], SleapProvenanceSummary]
 
 
 def _now_timestamp() -> str:
@@ -149,6 +217,110 @@ def _load_json_object(path: Path) -> Mapping[str, Any]:
     if not isinstance(payload, Mapping):
         raise PoseInferenceError("prepare_meta.json must contain a top-level object.")
     return payload
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, str | int | bool) or value is None:
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_jsonable(item) for item in value]
+    if hasattr(value, "tolist"):
+        try:
+            return _jsonable(value.tolist())
+        except (TypeError, ValueError, AttributeError):
+            pass
+    return str(value)
+
+
+def _provenance_mapping(provenance: Any) -> Mapping[str, Any]:
+    if isinstance(provenance, Mapping):
+        return provenance
+    to_dict = getattr(provenance, "to_dict", None)
+    if callable(to_dict):
+        payload = to_dict()
+        if isinstance(payload, Mapping):
+            return payload
+    return {"value": provenance}
+
+
+def _find_value(payload: Any, key_candidates: Sequence[str]) -> Any:
+    if isinstance(payload, Mapping):
+        for key in key_candidates:
+            if key in payload:
+                return payload[key]
+        for value in payload.values():
+            found = _find_value(value, key_candidates)
+            if found is not None:
+                return found
+    elif isinstance(payload, Sequence) and not isinstance(payload, str | bytes | bytearray):
+        for value in payload:
+            found = _find_value(value, key_candidates)
+            if found is not None:
+                return found
+    return None
+
+
+def _package_version(package_name: str) -> str | None:
+    try:
+        return importlib.metadata.version(package_name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _sleap_provenance_from_payload(
+    provenance: Any,
+    *,
+    sleap_io_version: str | None,
+) -> SleapProvenanceSummary:
+    payload = _provenance_mapping(provenance)
+    fields = {
+        field_name: _jsonable(_find_value(payload, candidates))
+        for field_name, candidates in SLEAP_PROVENANCE_FIELDS.items()
+    }
+    if fields["sleap_io_version"] is None:
+        fields["sleap_io_version"] = sleap_io_version
+    if fields["sleap_nn_version"] is None:
+        fields["sleap_nn_version"] = _package_version("sleap-nn")
+    return SleapProvenanceSummary(status="available", **fields)
+
+
+def read_sleap_provenance(pose_slp_path: Path) -> SleapProvenanceSummary:
+    """Read effective SLEAP prediction provenance from ``labels.provenance``."""
+
+    try:
+        import sleap_io  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise SleapProvenanceError("sleap_io is required to read pose.slp provenance.") from exc
+
+    path = Path(pose_slp_path)
+    try:
+        if hasattr(sleap_io, "load_slp"):
+            labels = sleap_io.load_slp(path)
+        elif hasattr(sleap_io, "load_file"):
+            labels = sleap_io.load_file(path)
+        else:
+            raise SleapProvenanceError("Installed sleap_io does not expose load_slp/load_file.")
+    except SleapProvenanceError:
+        raise
+    except Exception as exc:
+        raise SleapProvenanceError(f"Could not read SLEAP provenance from pose.slp: {exc}") from exc
+
+    provenance = getattr(labels, "provenance", None)
+    if provenance is None:
+        return SleapProvenanceSummary(
+            status="not_available",
+            reason="labels.provenance is missing",
+        )
+    return _sleap_provenance_from_payload(
+        provenance,
+        sleap_io_version=getattr(sleap_io, "__version__", None),
+    )
 
 
 def _resolve_preprocess_dir(session_root_or_preprocess: Path) -> tuple[Path, Path]:
@@ -419,6 +591,14 @@ def _failed_overlay_summary(path: Path, error: BaseException) -> OverlaySummary:
     )
 
 
+def _not_generated_sleap_provenance_summary(reason: str) -> SleapProvenanceSummary:
+    return SleapProvenanceSummary(status="not_generated", reason=reason)
+
+
+def _failed_sleap_provenance_summary(error: BaseException) -> SleapProvenanceSummary:
+    return SleapProvenanceSummary(status="failed", error=str(error))
+
+
 def _settings_payload(
     *,
     profile_path: Path,
@@ -474,6 +654,7 @@ def _pose_meta_payload(
     parquet_summary: ParquetExportSummary,
     pose_qc_summary: PoseQcSummary,
     overlay_summary: OverlaySummary,
+    sleap_provenance: SleapProvenanceSummary,
 ) -> dict[str, Any]:
     tracking = profile.get("tracking") if isinstance(profile.get("tracking"), Mapping) else {}
     return {
@@ -511,6 +692,7 @@ def _pose_meta_payload(
         "pose_qc": pose_qc_summary.to_metadata(),
         "overlay": overlay_summary.to_metadata(),
         "parquet": parquet_summary.to_metadata(),
+        "sleap_provenance": sleap_provenance.to_metadata(),
         "artifact_status": _artifact_status(
             dry_run=dry_run,
             pose_slp_exists=paths.pose_slp.is_file(),
@@ -538,7 +720,9 @@ def _manifest_payload(
     parquet_summary: ParquetExportSummary,
     pose_qc_summary: PoseQcSummary,
     overlay_summary: OverlaySummary,
+    sleap_provenance: SleapProvenanceSummary,
 ) -> dict[str, Any]:
+    provenance_metadata = sleap_provenance.to_metadata()
     return {
         "schema_version": JOB_MANIFEST_SCHEMA_VERSION,
         "run_id": run_id,
@@ -564,6 +748,12 @@ def _manifest_payload(
         "returncode": returncode,
         "qc_status": pose_qc_summary.status,
         "overlay_status": overlay_summary.status,
+        "sleap_provenance_status": sleap_provenance.status,
+        "sleap_provenance_error": sleap_provenance.error,
+        "effective_sleap_inference_config": provenance_metadata.get("inference_config"),
+        "effective_sleap_tracking_config": provenance_metadata.get("tracking_config"),
+        "effective_sleap_provenance_source": SLEAP_PROVENANCE_SOURCE,
+        "sleap_provenance_note": SLEAP_PROVENANCE_NOTE,
         "artifact_status": _artifact_status(
             dry_run=dry_run,
             pose_slp_exists=paths.pose_slp.is_file(),
@@ -587,6 +777,7 @@ def _write_processing_log(
     parquet_summary: ParquetExportSummary,
     pose_qc_summary: PoseQcSummary,
     overlay_summary: OverlaySummary,
+    sleap_provenance: SleapProvenanceSummary,
     stdout: str | None,
     stderr: str | None,
 ) -> None:
@@ -608,6 +799,9 @@ def _write_processing_log(
         f"pose_parquet: {parquet_summary.path.resolve()}",
         f"pose_qc: {pose_qc_summary.status}",
         f"overlay: {overlay_summary.status}",
+        f"sleap_provenance_status: {sleap_provenance.status}",
+        f"sleap_provenance_source: {sleap_provenance.source}",
+        f"sleap_provenance_note: {SLEAP_PROVENANCE_NOTE}",
     ]
     if parquet_summary.error:
         lines.append(f"parquet_error: {parquet_summary.error}")
@@ -630,6 +824,8 @@ def _write_processing_log(
         lines.append(f"overlay_frames_written: {overlay_summary.frames_written}")
     if overlay_summary.error:
         lines.append(f"overlay_error: {overlay_summary.error}")
+    if sleap_provenance.error:
+        lines.append(f"sleap_provenance_error: {sleap_provenance.error}")
     if returncode is not None:
         lines.append(f"subprocess_returncode: {returncode}")
     if stdout:
@@ -655,6 +851,7 @@ def run_pose_inference(
     parquet_exporter: ParquetExporter = export_pose_parquet,
     pose_qc_computer: PoseQcComputer = compute_pose_qc_from_parquet,
     overlay_generator: OverlayGenerator = generate_overlay_video,
+    sleap_provenance_reader: SleapProvenanceReader = read_sleap_provenance,
 ) -> PoseInferenceResult:
     """Run or dry-run one Subsystem 02 SLEAP-NN inference request."""
 
@@ -691,6 +888,7 @@ def run_pose_inference(
     parquet_summary = _not_generated_parquet_summary(paths.pose_parquet)
     pose_qc_summary = _not_computed_pose_qc_summary("dry_run or parquet not generated")
     overlay_summary = _not_generated_overlay_summary(paths.overlay_mp4, "dry_run or parquet not generated")
+    sleap_provenance = _not_generated_sleap_provenance_summary("dry_run or pose.slp not generated")
     if request.dry_run:
         status = "dry_run_complete"
         success = True
@@ -709,6 +907,10 @@ def run_pose_inference(
             status = "inference_failed"
             success = False
         elif paths.pose_slp.is_file():
+            try:
+                sleap_provenance = sleap_provenance_reader(paths.pose_slp)
+            except Exception as exc:
+                sleap_provenance = _failed_sleap_provenance_summary(exc)
             try:
                 parquet_summary = parquet_exporter(
                     pose_slp_path=paths.pose_slp,
@@ -777,6 +979,7 @@ def run_pose_inference(
             parquet_summary=parquet_summary,
             pose_qc_summary=pose_qc_summary,
             overlay_summary=overlay_summary,
+            sleap_provenance=sleap_provenance,
         ),
     )
     _write_yaml(
@@ -798,6 +1001,7 @@ def run_pose_inference(
             parquet_summary=parquet_summary,
             pose_qc_summary=pose_qc_summary,
             overlay_summary=overlay_summary,
+            sleap_provenance=sleap_provenance,
         ),
     )
     _write_processing_log(
@@ -813,6 +1017,7 @@ def run_pose_inference(
         parquet_summary=parquet_summary,
         pose_qc_summary=pose_qc_summary,
         overlay_summary=overlay_summary,
+        sleap_provenance=sleap_provenance,
         stdout=stdout,
         stderr=stderr,
     )

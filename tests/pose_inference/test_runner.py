@@ -19,6 +19,7 @@ from pose_inference.__main__ import app
 from pose_inference.overlay import OverlayGenerationError, OverlaySummary
 from pose_inference.parquet_export import ParquetExportError, ParquetExportSummary
 from pose_inference.pose_qc import PoseQcError, PoseQcSummary
+from pose_inference.runner import SLEAP_PROVENANCE_NOTE, SleapProvenanceSummary
 
 DEFAULT_PROFILE = Path("configs/subsystem_02/sleapnn_default_profile.yaml")
 FORBIDDEN_ARTIFACT_NAMES = (
@@ -163,8 +164,12 @@ def test_dry_run_creates_minimal_records_without_external_sleap(
     assert pose_meta["artifact_status"]["overlay_mp4"] == "not_generated"
     assert pose_meta["overlay"]["status"] == "not_generated"
     assert pose_meta["pose_qc"]["status"] == "not_computed"
+    assert pose_meta["sleap_provenance"]["status"] == "not_generated"
+    assert pose_meta["sleap_provenance"]["inference_config"] is None
     assert manifest["dry_run"] is True
     assert manifest["overlay_status"] == "not_generated"
+    assert manifest["sleap_provenance_status"] == "not_generated"
+    assert manifest["effective_sleap_inference_config"] is None
     assert manifest["outputs"]["pose_slp"].endswith("pose.slp")
     assert settings["tracking_enabled"] is True
     assert "--output_path" in settings["command"]
@@ -219,6 +224,7 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
     export_calls: list[dict[str, Path]] = []
     qc_calls: list[dict[str, Path]] = []
     overlay_calls: list[dict[str, Path]] = []
+    provenance_calls: list[Path] = []
 
     def fake_subprocess(args, **kwargs):
         run_dir = Path(kwargs["cwd"])
@@ -261,6 +267,22 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
             height=64,
         )
 
+    def fake_sleap_provenance(path: Path) -> SleapProvenanceSummary:
+        provenance_calls.append(path)
+        return SleapProvenanceSummary(
+            status="available",
+            inference_config={"peak_threshold": 0.2, "batch_size": 4},
+            tracking_config={"tracking": True, "max_tracks": 2},
+            device="cuda",
+            system_info={"platform": "test"},
+            model_paths=["model_a"],
+            model_type="bottomup",
+            source_file="prepared_video.mp4",
+            frame_selection={"start": 0, "stop": 299},
+            sleap_nn_version="0.3.0",
+            sleap_io_version="0.2.0",
+        )
+
     result = run_pose_inference(
         PoseInferenceRequest(
             session_root=tmp_path,
@@ -273,6 +295,7 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
         parquet_exporter=fake_exporter,
         pose_qc_computer=fake_pose_qc,
         overlay_generator=fake_overlay,
+        sleap_provenance_reader=fake_sleap_provenance,
     )
 
     assert result.success is True
@@ -288,6 +311,7 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
         }
     ]
     assert qc_calls == [{"pose_parquet_path": result.run_dir / "pose.parquet"}]
+    assert provenance_calls == [result.pose_slp_path]
     assert overlay_calls == [
         {
             "prepared_video_path": tmp_path / "preprocess" / "prepared_video.mp4",
@@ -306,14 +330,40 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
     assert pose_meta["pose_qc"]["status"] == "computed"
     assert pose_meta["overlay"]["status"] == "generated"
     assert pose_meta["overlay"]["frames_written"] == 3
+    assert pose_meta["sleap_provenance"]["status"] == "available"
+    assert pose_meta["sleap_provenance"]["source"] == "pose.slp labels.provenance"
+    assert pose_meta["sleap_provenance"]["inference_config"] == {
+        "peak_threshold": 0.2,
+        "batch_size": 4,
+    }
+    assert pose_meta["sleap_provenance"]["tracking_config"] == {
+        "tracking": True,
+        "max_tracks": 2,
+    }
+    assert pose_meta["sleap_provenance"]["device"] == "cuda"
+    assert pose_meta["sleap_provenance"]["sleap_nn_version"] == "0.3.0"
+    assert pose_meta["sleap_provenance"]["sleap_io_version"] == "0.2.0"
     assert manifest["artifact_status"]["pose_parquet"] == "generated"
     assert manifest["artifact_status"]["overlay_mp4"] == "generated"
     assert manifest["qc_status"] == "computed"
     assert manifest["overlay_status"] == "generated"
+    assert manifest["sleap_provenance_status"] == "available"
+    assert manifest["effective_sleap_inference_config"] == {
+        "peak_threshold": 0.2,
+        "batch_size": 4,
+    }
+    assert manifest["effective_sleap_tracking_config"] == {
+        "tracking": True,
+        "max_tracks": 2,
+    }
+    assert manifest["effective_sleap_provenance_source"] == "pose.slp labels.provenance"
+    assert manifest["sleap_provenance_note"] == SLEAP_PROVENANCE_NOTE
     assert "parquet_status: generated" in log_text
     assert "pose_qc: computed" in log_text
     assert "overlay: generated" in log_text
     assert "overlay_frames_written: 3" in log_text
+    assert "sleap_provenance_status: available" in log_text
+    assert SLEAP_PROVENANCE_NOTE in log_text
 
 
 def test_runner_marks_export_failed_when_parquet_export_fails(tmp_path: Path) -> None:
@@ -356,6 +406,78 @@ def test_runner_marks_export_failed_when_parquet_export_fails(tmp_path: Path) ->
     assert manifest["overlay_status"] == "not_generated"
     assert "parquet_status: failed" in log_text
     assert "parquet_error: forced export failure" in log_text
+
+
+def test_runner_records_sleap_provenance_failure_without_failing_run(
+    tmp_path: Path,
+) -> None:
+    _write_s1_handoff(tmp_path)
+    model_path = _model_path(tmp_path)
+
+    def fake_subprocess(args, **kwargs):
+        run_dir = Path(kwargs["cwd"])
+        (run_dir / "pose.slp").write_bytes(b"slp")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok", stderr="")
+
+    def fake_exporter(**kwargs):
+        output_path = Path(kwargs["output_path"])
+        output_path.write_bytes(b"parquet")
+        return ParquetExportSummary(
+            status="generated",
+            path=output_path,
+            rows=4,
+            timestamp_sources=("prepared_sync:time_sec",),
+        )
+
+    def fake_pose_qc(**_kwargs):
+        return PoseQcSummary(
+            status="computed",
+            payload={
+                "status": "computed",
+                "schema_version": "pose_qc_v1",
+                "duplicate_candidate_risk": {"frames_flagged": 0},
+                "implausible_geometry": {"frames_flagged": 0},
+            },
+        )
+
+    def fake_overlay(**kwargs):
+        output_path = Path(kwargs["output_path"])
+        output_path.write_bytes(b"overlay")
+        return OverlaySummary(status="generated", path=output_path, frames_written=1)
+
+    def failing_sleap_provenance(_path: Path) -> SleapProvenanceSummary:
+        raise RuntimeError("forced provenance failure")
+
+    result = run_pose_inference(
+        PoseInferenceRequest(
+            session_root=tmp_path,
+            model_path=model_path,
+            profile_path=DEFAULT_PROFILE,
+            dry_run=False,
+            timestamp="20260709T055607",
+        ),
+        subprocess_runner=fake_subprocess,
+        parquet_exporter=fake_exporter,
+        pose_qc_computer=fake_pose_qc,
+        overlay_generator=fake_overlay,
+        sleap_provenance_reader=failing_sleap_provenance,
+    )
+
+    assert result.success is True
+    assert result.status == "success"
+    assert result.pose_slp_path.is_file()
+    assert (result.run_dir / "pose.parquet").is_file()
+    assert (result.run_dir / "overlay.mp4").is_file()
+    pose_meta = json.loads(result.pose_meta_path.read_text(encoding="utf-8"))
+    manifest = yaml.safe_load(result.job_manifest_path.read_text(encoding="utf-8"))
+    log_text = result.processing_log_path.read_text(encoding="utf-8")
+    assert pose_meta["sleap_provenance"]["status"] == "failed"
+    assert "forced provenance failure" in pose_meta["sleap_provenance"]["error"]
+    assert manifest["sleap_provenance_status"] == "failed"
+    assert "forced provenance failure" in manifest["sleap_provenance_error"]
+    assert manifest["effective_sleap_inference_config"] is None
+    assert "sleap_provenance_status: failed" in log_text
+    assert "sleap_provenance_error: forced provenance failure" in log_text
 
 
 def test_runner_marks_qc_failed_when_pose_qc_fails(tmp_path: Path) -> None:
