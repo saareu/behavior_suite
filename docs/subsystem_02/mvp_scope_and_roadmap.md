@@ -2,10 +2,11 @@
 
 ## MVP Definition
 
-Subsystem 02 is the pose inference and review subsystem. The MVP is a
-UI-based workflow that integrates with completed Subsystem 01 preprocessing,
-runs SLEAP/SLEAP-NN pose inference, supports review of generated outputs, and
-records enough validation and provenance for downstream subsystems.
+Subsystem 02 is the pose-inference and technical-QC subsystem. It integrates
+with completed Subsystem 01 preprocessing, runs SLEAP/SLEAP-NN pose inference,
+and determines whether the technical output can be passed to Subsystem 03.
+Final tracking/identity correctness and final session usability are Subsystem
+03 responsibilities.
 
 The MVP must support both bottom-up and top-down SLEAP/SLEAP-NN models. It must
 be reachable from the main UI launch point and must support both new inference
@@ -26,6 +27,9 @@ Implemented backend pieces:
 - pose-quality QC summary;
 - Subsystem 01 timing/frame metadata preservation;
 - effective SLEAP provenance capture from `pose.slp` `labels.provenance`.
+- pre-submission validation of the S1 frame/sync contract;
+- post-run technical-QC outcomes and bounded review intervals;
+- existing-run discovery.
 
 Not-yet-complete MVP pieces:
 
@@ -33,16 +37,14 @@ Not-yet-complete MVP pieces:
 - Subsystem 02 UI workspace;
 - main UI launch and navigation;
 - Subsystem 01 completion to Subsystem 02 transition;
-- existing Subsystem 02 run discovery, review, reuse, rerun, and downstream
-  selection.
+- existing-run review, reuse, rerun, and downstream selection UI.
 
 ## Required MVP Workflow
 
-Subsystem 02 MVP must combine inference, review, and S2-level usability
-validation in one workflow. A user should be able to select a prepared
-Subsystem 01 result, run pose inference, inspect the output, review quality
-signals, and choose an inference run for downstream use without leaving the
-main application flow.
+Subsystem 02 MVP combines inference and technical pose-inference QC. It does
+not create a persistent user-review decision or final-usability record. A
+future UI may expose the overlay and flagged intervals for optional inspection,
+but a dedicated elaborate S2 review screen is not required for MVP.
 
 The workflow has two required entry modes:
 
@@ -84,6 +86,28 @@ checkpoint models. Effective prediction-stage settings should be read from
 
 Raw stdout/stderr is diagnostic only. Subsystem 02 metadata should use
 `labels.provenance` as the effective SLEAP provenance source when available.
+
+## Technical-QC Policy
+
+Preflight validation occurs before inference submission and validates the
+readable S1 handoff, the prepared-video frame count, authoritative sync arrays
+and prepared-frame mapping, model/profile inputs, and writable output
+location. Missing S2 outputs are post-run failures, not preflight failures.
+
+Post-run technical validation is distinct from pose-quality review warnings.
+Technical failures, including zero represented prepared frames containing at
+least one finite x/y point, produce QC outcome `failed`. Valid output produces
+`pass` unless one of two deliberately conservative technical-review thresholds
+is reached:
+
+- fraction of represented frames with exactly one detected animal, for the
+  configured two-animal workflow;
+- fraction of pose rows with a missing x/y coordinate pair.
+
+Both global thresholds default to `0.90`. A `review_recommended` outcome is
+non-blocking, does not make a successful run fail, and does not prevent S3
+handoff. Bounded, longest-first contiguous frame intervals identify where each
+trigger is concentrated and can guide optional overlay seeking.
 
 ## Intentional Non-Scope
 

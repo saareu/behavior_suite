@@ -305,6 +305,7 @@ def test_export_pose_parquet_uses_writer_without_real_sleap_or_parquet_engine(
     )
 
     assert summary.status == "generated"
+    assert summary.timing["represented_frames"] == 2
     assert summary.rows == 6
     assert summary.timestamp_sources == ("prepared_sync:timestamps_sec",)
     assert captured["output_path"] == tmp_path / "pose.parquet"
@@ -322,3 +323,162 @@ def test_missing_pose_slp_fails_clearly(tmp_path: Path) -> None:
             labels_loader=lambda _path: _pose_frames(),
             parquet_writer=lambda _rows, _output, _columns: None,
         )
+
+
+def test_prediction_frame_mismatch_with_s1_contract_fails_export(
+    tmp_path: Path,
+) -> None:
+    preprocess = _preprocess_dir(tmp_path)
+    sync = build_prepared_sync(
+        prepared_frame_count=3,
+        start_frame=0,
+        end_frame_exclusive=3,
+        fps_header=20.0,
+        raw_fps_effective=20.0,
+        raw_pts_time_sec=np.array([0.0, 0.05, 0.1]),
+        raw_pts_status="valid",
+        external_ttl_vector=None,
+        external_time_status="not_provided",
+        external_time_source=None,
+        external_time_variable_name=None,
+        external_time_units="unknown",
+        raw_frame_count_opencv_readable=3,
+        prepared_frame_count_opencv_reported=3,
+        prepared_frame_count_opencv_readable=3,
+    )
+    write_prepared_sync_npz(preprocess / "prepared_sync.npz", sync)
+    pose_slp = tmp_path / "pose.slp"
+    pose_slp.write_bytes(b"placeholder")
+
+    with pytest.raises(ParquetExportError, match="authoritative S1"):
+        export_pose_parquet(
+            pose_slp_path=pose_slp,
+            preprocess_dir=preprocess,
+            output_path=tmp_path / "pose.parquet",
+            labels_loader=lambda _path: [PoseFrameRecord(frame_idx=3, instances=())],
+            parquet_writer=lambda _rows, _output, _columns: None,
+        )
+
+
+def test_sparse_prediction_frames_within_s1_range_are_reconciled(
+    tmp_path: Path,
+) -> None:
+    preprocess = _preprocess_dir(tmp_path)
+    sync = build_prepared_sync(
+        prepared_frame_count=3,
+        start_frame=0,
+        end_frame_exclusive=3,
+        fps_header=20.0,
+        raw_fps_effective=20.0,
+        raw_pts_time_sec=np.array([0.0, 0.05, 0.1]),
+        raw_pts_status="valid",
+        external_ttl_vector=None,
+        external_time_status="not_provided",
+        external_time_source=None,
+        external_time_variable_name=None,
+        external_time_units="unknown",
+        raw_frame_count_opencv_readable=3,
+        prepared_frame_count_opencv_reported=3,
+        prepared_frame_count_opencv_readable=3,
+    )
+    write_prepared_sync_npz(preprocess / "prepared_sync.npz", sync)
+    pose_slp = tmp_path / "pose.slp"
+    pose_slp.write_bytes(b"placeholder")
+
+    def writer(rows, output_path, _columns):
+        assert {row["frame_idx"] for row in rows} == {0, 1}
+        output_path.write_bytes(b"parquet")
+
+    summary = export_pose_parquet(
+        pose_slp_path=pose_slp,
+        preprocess_dir=preprocess,
+        output_path=tmp_path / "pose.parquet",
+        labels_loader=lambda _path: _pose_frames(),
+        parquet_writer=writer,
+    )
+
+    assert summary.status == "generated"
+    assert summary.timing["represented_frames"] == 2
+
+
+def test_inconsistent_source_prepared_frame_idx_is_rejected(tmp_path: Path) -> None:
+    preprocess = _preprocess_dir(tmp_path)
+    sync = build_prepared_sync(
+        prepared_frame_count=3,
+        start_frame=0,
+        end_frame_exclusive=3,
+        fps_header=20.0,
+        raw_fps_effective=20.0,
+        raw_pts_time_sec=np.array([0.0, 0.05, 0.1]),
+        raw_pts_status="valid",
+        external_ttl_vector=None,
+        external_time_status="not_provided",
+        external_time_source=None,
+        external_time_variable_name=None,
+        external_time_units="unknown",
+        raw_frame_count_opencv_readable=3,
+        prepared_frame_count_opencv_reported=3,
+        prepared_frame_count_opencv_readable=3,
+    )
+    write_prepared_sync_npz(preprocess / "prepared_sync.npz", sync)
+    pose_slp = tmp_path / "pose.slp"
+    pose_slp.write_bytes(b"placeholder")
+
+    with pytest.raises(ParquetExportError, match="prepared_frame_idx"):
+        export_pose_parquet(
+            pose_slp_path=pose_slp,
+            preprocess_dir=preprocess,
+            output_path=tmp_path / "pose.parquet",
+            labels_loader=lambda _path: [
+                PoseFrameRecord(
+                    frame_idx=1,
+                    prepared_frame_idx=0,
+                    instances=(),
+                )
+            ],
+            parquet_writer=lambda _rows, _output, _columns: None,
+        )
+
+
+def test_equal_frame_indices_from_two_videos_reconcile_independently(
+    tmp_path: Path,
+) -> None:
+    preprocess = _preprocess_dir(tmp_path)
+    sync = build_prepared_sync(
+        prepared_frame_count=1,
+        start_frame=0,
+        end_frame_exclusive=1,
+        fps_header=20.0,
+        raw_fps_effective=20.0,
+        raw_pts_time_sec=np.array([0.0]),
+        raw_pts_status="valid",
+        external_ttl_vector=None,
+        external_time_status="not_provided",
+        external_time_source=None,
+        external_time_variable_name=None,
+        external_time_units="unknown",
+        raw_frame_count_opencv_readable=1,
+        prepared_frame_count_opencv_reported=1,
+        prepared_frame_count_opencv_readable=1,
+    )
+    write_prepared_sync_npz(preprocess / "prepared_sync.npz", sync)
+    pose_slp = tmp_path / "pose.slp"
+    pose_slp.write_bytes(b"placeholder")
+    frames = [
+        PoseFrameRecord(frame_idx=0, video_index=0, instances=()),
+        PoseFrameRecord(frame_idx=0, video_index=1, instances=()),
+    ]
+
+    def writer(_rows, output_path, _columns):
+        output_path.write_bytes(b"parquet")
+
+    summary = export_pose_parquet(
+        pose_slp_path=pose_slp,
+        preprocess_dir=preprocess,
+        output_path=tmp_path / "pose.parquet",
+        labels_loader=lambda _path: frames,
+        parquet_writer=writer,
+    )
+
+    assert summary.status == "generated"
+    assert summary.timing["represented_frames"] == 2

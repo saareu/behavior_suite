@@ -34,7 +34,7 @@ The backend pose inference contract is responsible for:
 - exporting `pose.parquet`;
 - generating `overlay.mp4` from `pose.slp`;
 - writing run metadata, settings, manifest, and logs;
-- reporting pose-inference quality summaries.
+- reporting technical pose-inference QC and non-blocking review recommendations.
 
 The backend pose inference contract is not responsible for:
 
@@ -43,6 +43,8 @@ The backend pose inference contract is not responsible for:
 - custom candidate selection after inference;
 - separate tracking post-processing artifacts;
 - final long-term biological identity continuity;
+- final tracking/identity correctness or final session usability;
+- a persistent S2 user-review or final-usability decision;
 - parameter optimization or guided hyperparameter search;
 - behavior classification or downstream biological analysis;
 - the Subsystem 02 UI workspace;
@@ -183,8 +185,8 @@ The overlay is a visual review aid. If tracks are present in `pose.slp`, the
 overlay may color by track. Track colors must not imply final biological
 identity continuity.
 
-Overlay generation failure may be reported as a warning when `pose.slp`,
-`pose.parquet`, and required metadata are valid.
+`overlay.mp4` is a required S2 output. A missing, unreadable, or failed overlay
+is a post-run technical failure under the locked artifact contract.
 
 ### `pose_meta.json`
 
@@ -290,10 +292,18 @@ Recommended timing/frame columns:
 If a timing source is absent in Subsystem 01 metadata, the corresponding column
 may be null, but the absence must be explicit and machine-readable.
 
-## 10. Pose-Quality QC Scope
+## 10. Technical Pose-Inference QC Scope
 
-The user-facing QC summary in `pose_meta.json` is about pose inference quality
-only.
+The QC summary in `pose_meta.json` is technical pose-inference QC. It retains
+the processing status (for example, `status: computed`) and records a separate
+outcome:
+
+```text
+pass | review_recommended | failed
+```
+
+`review_recommended` is non-blocking: it does not make the run unsuccessful
+and does not prevent the output from being passed to S3.
 
 It should include, when available:
 
@@ -317,36 +327,84 @@ Implausible geometry flags may include impossible body lengths, extreme
 inter-node distances, severe skeleton self-crossing, or coordinates outside the
 prepared frame when those checks are implemented.
 
-The required Subsystem 02 QC does not evaluate final biological identity
-continuity. Identity-stable final tracking is a later workflow.
+The MVP review recommendation has exactly two triggers:
+
+1. For the configured two-animal workflow, the fraction of represented frames
+   with exactly one detected animal is at least the configured threshold.
+2. The fraction of pose rows whose x/y coordinate pair is not finite is at
+   least the configured threshold.
+
+The global defaults are `0.90` for both metrics. These are conservative
+technical-review thresholds, not scientific-validity criteria. Sparse
+detections, many one-animal frames below the extreme threshold, high but
+sub-threshold missing-keypoint rates, partial-skeleton runs, low-confidence
+periods, unexpected animal-count distributions, identity switches, and
+tracking continuity do not independently trigger an MVP review recommendation
+or hard failure.
+
+The profile fields are:
+
+```yaml
+expected_animals: 2
+review_one_animal_fraction_threshold: 0.90
+review_missing_keypoint_fraction_threshold: 0.90
+review_frame_missing_keypoint_fraction_threshold: 0.90
+```
+
+For each triggered warning, metadata retains at most the 10 longest contiguous
+prepared-frame intervals, sorted longest-first. Interval `start_frame` and
+`end_frame` are inclusive. Frame timestamps are copied when available;
+`time_span_sec` is the end-frame timestamp minus the start-frame timestamp.
+It is a timestamp span rather than an inclusive media duration, so a one-frame
+interval may have a zero span. Intervals are generated independently per
+`video_index` and include that index in each record.
+The per-frame high-missing interval threshold also defaults to `0.90`, and a
+frame is included when its missing-keypoint fraction is at least
+that threshold. These intervals guide optional overlay review; no clips or
+elaborate S2 QC dashboard are required.
+
+A hard QC failure occurs when:
+
+```text
+number of represented prepared frames containing at least one finite x/y pose point == 0
+```
+
+The required Subsystem 02 QC does not decide final biological identity,
+tracking correctness, or final session usability. Those are S3 responsibilities.
 
 Pipeline success/provenance fields are not part of pose-quality QC. They belong
 in `job_manifest.yaml` and `processing_log.txt`.
 
 ## 11. Validation Requirements
 
-Hard validation failures include:
+Pre-submission validation occurs before the inference subprocess is submitted.
+It requires readable `prepared_video.mp4`, `prepare_meta.json`, and
+`prepared_sync.npz`; validates the S1 sync array lengths and prepared-frame
+mapping; opens the prepared video and requires one readable first frame; and,
+when OpenCV reports a positive header frame count, reconciles that header count
+with authoritative S1 metadata. S2 does not repeat S1's sequential full-video
+decode. Preflight also validates the selected model and profile to the extent
+supported by the current bottom-up backend and confirms that the output run
+directory can be created. These are preflight failures. Missing S2 outputs are
+not called preflight failures because they are expected to be absent before
+inference.
 
-- missing required Subsystem 01 inputs;
-- unreadable `prepared_video.mp4`;
-- unreadable or inconsistent `prepare_meta.json`;
-- unreadable or inconsistent `prepared_sync.npz`;
-- inference failure;
-- missing or unreadable `pose.slp`;
-- failure to export required `pose.parquet`;
-- `pose.parquet` row/frame references outside the prepared-frame range;
-- inability to join required frame identity data;
-- missing required output metadata files.
+Authoritative S1 contract parsing and validation currently occurs in more than
+one S2 layer and may be centralized in a later refactor.
 
-Reportable but not automatically fatal pose-quality outcomes include:
+Post-run technical failures include:
 
-- zero detected animals in a frame;
-- fewer than expected animals;
-- extra candidate animals;
-- missing keypoints;
-- low-confidence keypoints;
-- untracked instances;
-- overlay generation failure when required pose outputs are valid.
+- inference subprocess failure;
+- an expected required S2 output that is missing or unreadable;
+- prediction frame indices/count that cannot be reconciled with the
+  authoritative S1 prepared-frame contract;
+- invalid frame/timing mapping introduced in `pose.parquet`;
+- zero represented prepared frames containing at least one finite x/y pose
+  point.
+
+Per-frame zero animals, sparse detections, moderate one-animal fractions,
+moderate missing-keypoint fractions, partial skeletons, and low-confidence
+points remain diagnostic observations rather than hard failures.
 
 ## 12. Completion Criteria
 
@@ -360,5 +418,4 @@ A Subsystem 02 run is complete when:
 5. `settings_used.yaml` records actual inference parameters.
 6. `job_manifest.yaml` records input/output provenance.
 7. `processing_log.txt` records runtime logs.
-8. `overlay.mp4` is produced, or its failure is recorded as a non-fatal warning
-   when allowed.
+8. Required `overlay.mp4` is produced and readable.

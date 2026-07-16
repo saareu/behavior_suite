@@ -3,6 +3,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import cv2
+import numpy as np
 import pytest
 import yaml
 from typer.testing import CliRunner
@@ -19,7 +21,12 @@ from pose_inference.__main__ import app
 from pose_inference.overlay import OverlayGenerationError, OverlaySummary
 from pose_inference.parquet_export import ParquetExportError, ParquetExportSummary
 from pose_inference.pose_qc import PoseQcError, PoseQcSummary
-from pose_inference.runner import SLEAP_PROVENANCE_NOTE, SleapProvenanceSummary
+from pose_inference.runner import (
+    SLEAP_PROVENANCE_NOTE,
+    SleapProvenanceSummary,
+    _pose_qc_options,
+)
+from preprocess.sync_writer import build_prepared_sync, write_prepared_sync_npz
 
 DEFAULT_PROFILE = Path("configs/subsystem_02/sleapnn_default_profile.yaml")
 FORBIDDEN_ARTIFACT_NAMES = (
@@ -31,15 +38,58 @@ FORBIDDEN_ARTIFACT_NAMES = (
 )
 
 
-def _write_s1_handoff(root: Path) -> Path:
+def _write_s1_handoff(
+    root: Path,
+    *,
+    video_frame_count: int = 3,
+    sync_frame_count: int | None = None,
+) -> Path:
     preprocess = root / "preprocess"
     preprocess.mkdir(parents=True)
-    (preprocess / "prepared_video.mp4").write_bytes(b"")
+    video_path = preprocess / "prepared_video.mp4"
+    writer = cv2.VideoWriter(
+        str(video_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        20.0,
+        (16, 16),
+    )
+    assert writer.isOpened()
+    for frame_idx in range(video_frame_count):
+        writer.write(np.full((16, 16, 3), frame_idx, dtype=np.uint8))
+    writer.release()
+    authoritative_count = sync_frame_count or video_frame_count
     (preprocess / "prepare_meta.json").write_text(
-        json.dumps({"schema_version": "prepare_meta_v1"}) + "\n",
+        json.dumps(
+            {
+                "schema_version": "prepare_meta_v1",
+                "prepared_video": {
+                    "opencv_reported_frame_count": authoritative_count,
+                    "opencv_readable_frame_count": authoritative_count,
+                    "frame_count_used_for_sleap": authoritative_count,
+                },
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
-    (preprocess / "prepared_sync.npz").write_bytes(b"")
+    sync = build_prepared_sync(
+        prepared_frame_count=authoritative_count,
+        start_frame=0,
+        end_frame_exclusive=authoritative_count,
+        fps_header=20.0,
+        raw_fps_effective=20.0,
+        raw_pts_time_sec=np.arange(authoritative_count, dtype=float) / 20.0,
+        raw_pts_status="valid",
+        external_ttl_vector=None,
+        external_time_status="not_provided",
+        external_time_source=None,
+        external_time_variable_name=None,
+        external_time_units="unknown",
+        raw_frame_count_opencv_readable=authoritative_count,
+        prepared_frame_count_opencv_reported=authoritative_count,
+        prepared_frame_count_opencv_readable=authoritative_count,
+    )
+    write_prepared_sync_npz(preprocess / "prepared_sync.npz", sync)
     return preprocess
 
 
@@ -70,6 +120,81 @@ def test_s1_handoff_validation_reports_missing_files(tmp_path: Path) -> None:
 
     with pytest.raises(PoseInferenceError, match="prepare_meta.json"):
         validate_s1_handoff(tmp_path)
+
+
+def test_unreadable_s1_video_blocks_inference_submission(tmp_path: Path) -> None:
+    preprocess = _write_s1_handoff(tmp_path)
+    (preprocess / "prepared_video.mp4").write_bytes(b"not a video")
+    called = False
+
+    def unexpected_subprocess(*_args: Any, **_kwargs: Any):
+        nonlocal called
+        called = True
+        raise AssertionError("subprocess must not be submitted")
+
+    with pytest.raises(PoseInferenceError, match="prepared_video.mp4 is unreadable"):
+        run_pose_inference(
+            PoseInferenceRequest(
+                session_root=tmp_path,
+                model_path=_model_path(tmp_path),
+                profile_path=DEFAULT_PROFILE,
+            ),
+            subprocess_runner=unexpected_subprocess,
+        )
+
+    assert called is False
+    assert not (tmp_path / "pose_inference").exists()
+
+
+def test_s1_frame_count_mismatch_blocks_inference_submission(tmp_path: Path) -> None:
+    _write_s1_handoff(tmp_path, video_frame_count=3, sync_frame_count=4)
+    called = False
+
+    def unexpected_subprocess(*_args: Any, **_kwargs: Any):
+        nonlocal called
+        called = True
+        raise AssertionError("subprocess must not be submitted")
+
+    with pytest.raises(PoseInferenceError, match="frame count does not match"):
+        run_pose_inference(
+            PoseInferenceRequest(
+                session_root=tmp_path,
+                model_path=_model_path(tmp_path),
+                profile_path=DEFAULT_PROFILE,
+            ),
+            subprocess_runner=unexpected_subprocess,
+        )
+
+    assert called is False
+    assert not (tmp_path / "pose_inference").exists()
+
+
+def test_s1_timing_array_mismatch_blocks_inference_submission(tmp_path: Path) -> None:
+    preprocess = _write_s1_handoff(tmp_path)
+    sync_path = preprocess / "prepared_sync.npz"
+    with np.load(sync_path, allow_pickle=False) as archive:
+        values = {key: np.array(archive[key], copy=True) for key in archive.files}
+    values["prepared_time_sec"] = values["prepared_time_sec"][:-1]
+    np.savez(sync_path, **values)
+    called = False
+
+    def unexpected_subprocess(*_args: Any, **_kwargs: Any):
+        nonlocal called
+        called = True
+        raise AssertionError("subprocess must not be submitted")
+
+    with pytest.raises(PoseInferenceError, match="prepared_sync.npz is unreadable or invalid"):
+        run_pose_inference(
+            PoseInferenceRequest(
+                session_root=tmp_path,
+                model_path=_model_path(tmp_path),
+                profile_path=DEFAULT_PROFILE,
+            ),
+            subprocess_runner=unexpected_subprocess,
+        )
+
+    assert called is False
+    assert not (tmp_path / "pose_inference").exists()
 
 
 def test_generated_command_writes_to_pose_slp_and_keeps_tracking_in_same_call(
@@ -119,6 +244,28 @@ def test_min_instance_peaks_is_omitted_when_profile_value_is_null(tmp_path: Path
 
     assert "--min_instance_peaks" not in command
     assert "--min-instance-peaks" not in command
+
+
+def test_legacy_profile_without_review_thresholds_uses_defaults(
+    tmp_path: Path,
+) -> None:
+    profile = load_inference_profile(DEFAULT_PROFILE)
+    for key in (
+        "review_one_animal_fraction_threshold",
+        "review_missing_keypoint_fraction_threshold",
+        "review_frame_missing_keypoint_fraction_threshold",
+    ):
+        profile.pop(key)
+    profile_path = tmp_path / "legacy_profile.yaml"
+    profile_path.write_text(yaml.safe_dump(profile), encoding="utf-8")
+
+    options = _pose_qc_options(load_inference_profile(profile_path))
+
+    assert options["review_one_animal_fraction_threshold"] == pytest.approx(0.9)
+    assert options["review_missing_keypoint_fraction_threshold"] == pytest.approx(0.9)
+    assert options["review_frame_missing_keypoint_fraction_threshold"] == pytest.approx(
+        0.9
+    )
 
 
 def test_dry_run_creates_minimal_records_without_external_sleap(
@@ -173,6 +320,48 @@ def test_dry_run_creates_minimal_records_without_external_sleap(
     assert manifest["outputs"]["pose_slp"].endswith("pose.slp")
     assert settings["tracking_enabled"] is True
     assert "--output_path" in settings["command"]
+
+
+def test_dry_run_preflight_reads_only_first_video_frame(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_s1_handoff(tmp_path)
+
+    class FirstFrameOnlyCapture:
+        def __init__(self) -> None:
+            self.read_calls = 0
+
+        def isOpened(self) -> bool:
+            return True
+
+        def get(self, _property: int) -> float:
+            return 3.0
+
+        def read(self):
+            self.read_calls += 1
+            if self.read_calls > 1:
+                raise AssertionError("preflight must not sequentially decode the video")
+            return True, np.zeros((16, 16, 3), dtype=np.uint8)
+
+        def release(self) -> None:
+            return None
+
+    capture = FirstFrameOnlyCapture()
+    monkeypatch.setattr(cv2, "VideoCapture", lambda _path: capture)
+
+    result = run_pose_inference(
+        PoseInferenceRequest(
+            session_root=tmp_path,
+            model_path=_model_path(tmp_path),
+            profile_path=DEFAULT_PROFILE,
+            dry_run=True,
+            timestamp="20260709T011203",
+        )
+    )
+
+    assert result.success is True
+    assert capture.read_calls == 1
 
 
 def test_output_root_override_and_run_directory_naming(tmp_path: Path) -> None:
@@ -256,6 +445,10 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
             payload={
                 "status": "computed",
                 "schema_version": "pose_qc_v1",
+                "outcome": "pass",
+                "review_recommendation_reasons": [],
+                "review_warning_count": 0,
+                "flagged_intervals": {},
                 "duplicate_candidate_risk": {"frames_flagged": 0},
                 "implausible_geometry": {"frames_flagged": 0},
             },
@@ -317,7 +510,15 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
             "output_path": result.run_dir / "pose.parquet",
         }
     ]
-    assert qc_calls == [{"pose_parquet_path": result.run_dir / "pose.parquet"}]
+    assert qc_calls == [
+        {
+            "pose_parquet_path": result.run_dir / "pose.parquet",
+            "expected_animals": 2,
+            "review_one_animal_fraction_threshold": 0.9,
+            "review_missing_keypoint_fraction_threshold": 0.9,
+            "review_frame_missing_keypoint_fraction_threshold": 0.9,
+        }
+    ]
     assert provenance_calls == [result.pose_slp_path]
     assert overlay_calls == [
         {
@@ -337,6 +538,7 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
     assert pose_meta["parquet"]["timing"]["status"] == "prepared_sync"
     assert pose_meta["parquet"]["timing"]["frames_with_time"] == 3
     assert pose_meta["pose_qc"]["status"] == "computed"
+    assert pose_meta["pose_qc"]["outcome"] == "pass"
     assert pose_meta["overlay"]["status"] == "generated"
     assert pose_meta["overlay"]["frames_written"] == 3
     assert pose_meta["sleap_provenance"]["status"] == "available"
@@ -355,6 +557,8 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
     assert manifest["artifact_status"]["pose_parquet"] == "generated"
     assert manifest["artifact_status"]["overlay_mp4"] == "generated"
     assert manifest["qc_status"] == "computed"
+    assert manifest["qc_outcome"] == "pass"
+    assert manifest["qc_review_warning_count"] == 0
     assert manifest["overlay_status"] == "generated"
     assert manifest["sleap_provenance_status"] == "available"
     assert manifest["effective_sleap_inference_config"] == {
@@ -371,6 +575,7 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
     assert manifest["parquet_timing"]["timestamp_sources"] == ["prepared_sync:external_time_sec"]
     assert "parquet_status: generated" in log_text
     assert "pose_qc: computed" in log_text
+    assert "pose_qc_outcome: pass" in log_text
     assert "overlay: generated" in log_text
     assert "overlay_frames_written: 3" in log_text
     assert "sleap_provenance_status: available" in log_text
@@ -412,11 +617,84 @@ def test_runner_marks_export_failed_when_parquet_export_fails(tmp_path: Path) ->
     assert pose_meta["artifact_status"]["pose_parquet"] == "failed"
     assert pose_meta["artifact_status"]["overlay_mp4"] == "not_generated"
     assert pose_meta["parquet"]["status"] == "failed"
+    assert pose_meta["pose_qc"]["outcome"] == "failed"
     assert "forced export failure" in pose_meta["parquet"]["error"]
     assert manifest["artifact_status"]["pose_parquet"] == "failed"
+    assert manifest["qc_outcome"] == "failed"
     assert manifest["overlay_status"] == "not_generated"
     assert "parquet_status: failed" in log_text
     assert "parquet_error: forced export failure" in log_text
+    assert "pose_qc_failure_reasons: parquet_export_failed" in log_text
+
+
+def test_review_recommendation_does_not_mark_run_failed(tmp_path: Path) -> None:
+    _write_s1_handoff(tmp_path)
+
+    def fake_subprocess(args, **kwargs):
+        (Path(kwargs["cwd"]) / "pose.slp").write_bytes(b"slp")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok", stderr="")
+
+    def fake_exporter(**kwargs):
+        output_path = Path(kwargs["output_path"])
+        output_path.write_bytes(b"parquet")
+        return ParquetExportSummary(status="generated", path=output_path, rows=4)
+
+    def fake_pose_qc(**_kwargs):
+        return PoseQcSummary(
+            status="computed",
+            payload={
+                "status": "computed",
+                "outcome": "review_recommended",
+                "review_recommendation_reasons": ["one_detected_animal"],
+                "review_warning_count": 1,
+                "flagged_intervals": {
+                    "one_detected_animal": [
+                        {
+                            "warning_type": "one_detected_animal",
+                            "video_index": 0,
+                            "start_frame": 0,
+                            "end_frame": 2,
+                            "frame_count": 3,
+                            "time_span_sec": 0.1,
+                        }
+                    ]
+                },
+                "duplicate_candidate_risk": {"frames_flagged": 0},
+                "implausible_geometry": {"frames_flagged": 0},
+            },
+        )
+
+    def fake_overlay(**kwargs):
+        output_path = Path(kwargs["output_path"])
+        output_path.write_bytes(b"overlay")
+        return OverlaySummary(status="generated", path=output_path, frames_written=3)
+
+    result = run_pose_inference(
+        PoseInferenceRequest(
+            session_root=tmp_path,
+            model_path=_model_path(tmp_path),
+            profile_path=DEFAULT_PROFILE,
+            timestamp="20260709T051607",
+        ),
+        subprocess_runner=fake_subprocess,
+        parquet_exporter=fake_exporter,
+        pose_qc_computer=fake_pose_qc,
+        overlay_generator=fake_overlay,
+        sleap_provenance_reader=lambda _path: SleapProvenanceSummary(
+            status="not_available"
+        ),
+    )
+
+    assert result.success is True
+    assert result.status == "success"
+    pose_meta = json.loads(result.pose_meta_path.read_text(encoding="utf-8"))
+    manifest = yaml.safe_load(result.job_manifest_path.read_text(encoding="utf-8"))
+    log_text = result.processing_log_path.read_text(encoding="utf-8")
+    assert pose_meta["pose_qc"]["outcome"] == "review_recommended"
+    assert manifest["qc_outcome"] == "review_recommended"
+    assert manifest["qc_review_warning_count"] == 1
+    assert manifest["qc_flagged_interval_count"] == 1
+    assert "pose_qc_outcome: review_recommended" in log_text
 
 
 def test_runner_records_sleap_provenance_failure_without_failing_run(
@@ -446,6 +724,7 @@ def test_runner_records_sleap_provenance_failure_without_failing_run(
             payload={
                 "status": "computed",
                 "schema_version": "pose_qc_v1",
+                "outcome": "pass",
                 "duplicate_candidate_risk": {"frames_flagged": 0},
                 "implausible_geometry": {"frames_flagged": 0},
             },
@@ -537,6 +816,7 @@ def test_runner_marks_qc_failed_when_pose_qc_fails(tmp_path: Path) -> None:
     assert pose_meta["artifact_status"]["overlay_mp4"] == "not_generated"
     assert pose_meta["parquet"]["status"] == "generated"
     assert pose_meta["pose_qc"]["status"] == "failed"
+    assert pose_meta["pose_qc"]["outcome"] == "failed"
     assert "forced QC failure" in pose_meta["pose_qc"]["error"]
     assert manifest["qc_status"] == "failed"
     assert manifest["overlay_status"] == "not_generated"
@@ -569,6 +849,7 @@ def test_runner_marks_overlay_failed_when_overlay_generation_fails(tmp_path: Pat
             payload={
                 "status": "computed",
                 "schema_version": "pose_qc_v1",
+                "outcome": "pass",
                 "duplicate_candidate_risk": {"frames_flagged": 0},
                 "implausible_geometry": {"frames_flagged": 0},
             },
@@ -602,9 +883,11 @@ def test_runner_marks_overlay_failed_when_overlay_generation_fails(tmp_path: Pat
     assert pose_meta["artifact_status"]["pose_parquet"] == "generated"
     assert pose_meta["artifact_status"]["overlay_mp4"] == "failed"
     assert pose_meta["pose_qc"]["status"] == "computed"
+    assert pose_meta["pose_qc"]["outcome"] == "failed"
     assert pose_meta["overlay"]["status"] == "failed"
     assert "forced overlay failure" in pose_meta["overlay"]["error"]
     assert manifest["qc_status"] == "computed"
+    assert manifest["qc_outcome"] == "failed"
     assert manifest["overlay_status"] == "failed"
     assert "overlay: failed" in log_text
     assert "overlay_error: forced overlay failure" in log_text

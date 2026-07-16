@@ -13,6 +13,10 @@ dist_penalty_weight: 1.0
 n_points: 10
 min_line_scores: 0.25
 min_instance_peaks:
+expected_animals: 2
+review_one_animal_fraction_threshold: 0.90
+review_missing_keypoint_fraction_threshold: 0.90
+review_frame_missing_keypoint_fraction_threshold: 0.90
 tracking:
   enabled: true
   candidates_method: local_queues

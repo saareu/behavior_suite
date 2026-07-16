@@ -748,6 +748,69 @@ def _write_rows_with_pandas(
         raise ParquetExportError(f"Could not write pose.parquet: {exc}") from exc
 
 
+def _validate_prediction_frame_contract(
+    frames: Sequence[PoseFrameRecord],
+    timing: TimingLookup,
+) -> tuple[tuple[int, int], ...]:
+    authoritative = (
+        timing.status == "prepared_sync"
+        and timing.frame_count_used_for_sleap is not None
+    )
+    expected_count = int(timing.frame_count_used_for_sleap) if authoritative else None
+    canonical_keys: list[tuple[int, int]] = []
+    invalid_indices: list[int] = []
+    for frame in frames:
+        frame_idx = int(frame.frame_idx)
+        if expected_count is not None and not 0 <= frame_idx < expected_count:
+            invalid_indices.append(frame_idx)
+            continue
+        expected_prepared_idx = (
+            int(timing.prepared_frame_idx[frame_idx])
+            if authoritative and timing.prepared_frame_idx is not None
+            else (
+                int(frame.prepared_frame_idx)
+                if frame.prepared_frame_idx is not None
+                else frame_idx
+            )
+        )
+        if (
+            authoritative
+            and frame.prepared_frame_idx is not None
+            and int(frame.prepared_frame_idx) != expected_prepared_idx
+        ):
+            raise ParquetExportError(
+                "Prediction prepared_frame_idx does not match the authoritative S1 "
+                f"mapping for video_index={frame.video_index}, frame_idx={frame_idx}: "
+                f"received {frame.prepared_frame_idx}, expected {expected_prepared_idx}."
+            )
+        canonical_keys.append((int(frame.video_index), expected_prepared_idx))
+
+    if len(canonical_keys) != len(set(canonical_keys)):
+        raise ParquetExportError(
+            "Prediction frame keys cannot be reconciled with the authoritative S1 "
+            "prepared-frame contract because duplicate "
+            "(video_index, prepared_frame_idx) records are present."
+        )
+    if invalid_indices:
+        assert expected_count is not None
+        raise ParquetExportError(
+            "Prediction frame indices cannot be reconciled with the authoritative "
+            f"S1 prepared-frame range 0..{expected_count - 1}: "
+            f"{sorted(invalid_indices)}."
+        )
+    return tuple(canonical_keys)
+
+
+def _validate_written_parquet(path: Path) -> None:
+    if not path.is_file():
+        raise ParquetExportError(f"Required pose.parquet was not generated: {path}")
+    try:
+        with path.open("rb") as stream:
+            stream.read(1)
+    except OSError as exc:
+        raise ParquetExportError(f"Required pose.parquet is unreadable: {path}: {exc}") from exc
+
+
 def export_pose_parquet(
     *,
     pose_slp_path: Path,
@@ -768,11 +831,15 @@ def export_pose_parquet(
     frames = list(loader(pose_slp))
     frame_count = max((frame.frame_idx for frame in frames), default=-1) + 1
     timing = load_timing_lookup(preprocess_dir, frame_count=frame_count or None)
+    canonical_frame_keys = _validate_prediction_frame_contract(frames, timing)
     rows = pose_frames_to_rows(frames, timing)
 
     writer = parquet_writer or _write_rows_with_pandas
     writer(rows, output, PARQUET_COLUMNS)
+    _validate_written_parquet(output)
     frame_indices = [frame.frame_idx for frame in frames]
+    timing_metadata = timing.to_metadata(frame_indices)
+    timing_metadata["represented_frames"] = len(set(canonical_frame_keys))
     return ParquetExportSummary(
         status="generated",
         path=output,
@@ -781,5 +848,5 @@ def export_pose_parquet(
         timestamp_sources=tuple(sorted({str(row["timestamp_source"]) for row in rows}))
         if rows
         else (timing.source,),
-        timing=timing.to_metadata(frame_indices),
+        timing=timing_metadata,
     )

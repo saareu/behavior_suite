@@ -76,6 +76,10 @@ class PoseInferenceRunSummary:
     completed_at: str | None = None
     parquet_status: str | None = None
     pose_qc_status: str | None = None
+    pose_qc_outcome: str | None = None
+    review_recommendation_reasons: tuple[str, ...] = ()
+    review_warning_count: int | None = None
+    flagged_intervals: Any = None
     overlay_status: str | None = None
     sleap_provenance_status: str | None = None
     effective_sleap_inference_config: Any = None
@@ -179,6 +183,23 @@ def _summarize_run(run_dir: Path) -> PoseInferenceRunSummary:
         _mapping_get(pose_meta, "pose_qc", "status"),
         processing_log.get("pose_qc"),
     )
+    pose_qc_outcome = _first_text(
+        _mapping_get(job_manifest, "qc_outcome"),
+        _mapping_get(pose_meta, "pose_qc", "outcome"),
+        processing_log.get("pose_qc_outcome"),
+    )
+    review_recommendation_reasons = _text_tuple(
+        _first_existing(
+            _mapping_get(job_manifest, "qc_review_recommendation_reasons"),
+            _mapping_get(pose_meta, "pose_qc", "review_recommendation_reasons"),
+        )
+    )
+    review_warning_count = _optional_int(
+        _first_existing(
+            _mapping_get(job_manifest, "qc_review_warning_count"),
+            _mapping_get(pose_meta, "pose_qc", "review_warning_count"),
+        )
+    )
     overlay_status = _first_text(
         _mapping_get(job_manifest, "overlay_status"),
         _mapping_get(pose_meta, "artifact_status", "overlay_mp4"),
@@ -233,6 +254,10 @@ def _summarize_run(run_dir: Path) -> PoseInferenceRunSummary:
         ),
         parquet_status=parquet_status,
         pose_qc_status=pose_qc_status,
+        pose_qc_outcome=pose_qc_outcome,
+        review_recommendation_reasons=review_recommendation_reasons,
+        review_warning_count=review_warning_count,
+        flagged_intervals=_mapping_get(pose_meta, "pose_qc", "flagged_intervals"),
         overlay_status=overlay_status,
         sleap_provenance_status=sleap_provenance_status,
         effective_sleap_inference_config=_first_existing(
@@ -339,6 +364,25 @@ def _first_bool(*values: Any) -> bool | None:
         if lowered in {"false", "0", "no"}:
             return False
     return bool(value)
+
+
+def _text_tuple(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return tuple(item.strip() for item in value.split(",") if item.strip())
+    if isinstance(value, list | tuple):
+        return tuple(str(item) for item in value)
+    return (str(value),)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _classify_run(

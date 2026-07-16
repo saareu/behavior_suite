@@ -287,3 +287,50 @@ def test_effective_sleap_configs_and_parquet_timing_are_copied(
     assert run.parquet_timing == parquet_timing
     assert run.model_id == "model_a"
     assert run.profile_id == "bottomup_default"
+
+
+def test_review_recommended_run_remains_complete_reviewable(tmp_path: Path) -> None:
+    run_dir = _write_complete_run(tmp_path)
+    pose_meta_path = run_dir / "pose_meta.json"
+    pose_meta = json.loads(pose_meta_path.read_text(encoding="utf-8"))
+    pose_meta["pose_qc"] = {
+        "status": "computed",
+        "outcome": "review_recommended",
+        "review_recommendation_reasons": ["one_detected_animal"],
+        "review_warning_count": 1,
+        "flagged_intervals": {
+            "one_detected_animal": [
+                {
+                    "warning_type": "one_detected_animal",
+                    "video_index": 0,
+                    "start_frame": 10,
+                    "end_frame": 19,
+                    "frame_count": 10,
+                    "time_span_sec": 0.45,
+                }
+            ]
+        },
+    }
+    pose_meta_path.write_text(json.dumps(pose_meta) + "\n", encoding="utf-8")
+    manifest_path = run_dir / "job_manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(
+        {
+            "qc_outcome": "review_recommended",
+            "qc_review_recommendation_reasons": ["one_detected_animal"],
+            "qc_review_warning_count": 1,
+        }
+    )
+    manifest_path.write_text(
+        yaml.safe_dump(manifest, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    run = summarize_pose_inference_project(tmp_path).runs[0]
+
+    assert run.classification == COMPLETE_REVIEWABLE
+    assert run.pose_qc_outcome == "review_recommended"
+    assert run.review_recommendation_reasons == ("one_detected_animal",)
+    assert run.review_warning_count == 1
+    assert run.flagged_intervals["one_detected_animal"][0]["start_frame"] == 10
+    assert run.flagged_intervals["one_detected_animal"][0]["time_span_sec"] == 0.45

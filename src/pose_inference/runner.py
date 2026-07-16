@@ -33,6 +33,10 @@ from pose_inference.parquet_export import (
     export_pose_parquet,
 )
 from pose_inference.pose_qc import (
+    DEFAULT_EXPECTED_ANIMALS,
+    DEFAULT_REVIEW_FRAME_MISSING_KEYPOINT_FRACTION_THRESHOLD,
+    DEFAULT_REVIEW_MISSING_KEYPOINT_FRACTION_THRESHOLD,
+    DEFAULT_REVIEW_ONE_ANIMAL_FRACTION_THRESHOLD,
     POSE_QC_SCHEMA_VERSION,
     PoseQcError,
     PoseQcSummary,
@@ -364,6 +368,132 @@ def validate_s1_handoff(session_root_or_preprocess: Path) -> S1Handoff:
     )
 
 
+def _validate_prepared_video_against_sync(handoff: S1Handoff) -> None:
+    try:
+        from preprocess.sync_writer import SyncValidationError, load_prepared_sync_npz
+
+        sync = load_prepared_sync_npz(handoff.prepared_sync)
+    except (OSError, SyncValidationError) as exc:
+        raise PoseInferenceError(
+            f"Subsystem 01 prepared_sync.npz is unreadable or invalid: {exc}"
+        ) from exc
+
+    try:
+        import cv2
+    except ImportError as exc:
+        raise PoseInferenceError(
+            "OpenCV is required for prepared-video preflight validation."
+        ) from exc
+
+    capture = cv2.VideoCapture(str(handoff.prepared_video))
+    if not capture.isOpened():
+        capture.release()
+        raise PoseInferenceError(
+            f"Subsystem 01 prepared_video.mp4 is unreadable: {handoff.prepared_video}"
+        )
+    reported_count_value = float(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    reported_count = (
+        int(reported_count_value)
+        if math.isfinite(reported_count_value) and reported_count_value > 0
+        else None
+    )
+    try:
+        success, frame = capture.read()
+        if not success or frame is None:
+            raise PoseInferenceError(
+                "Subsystem 01 prepared_video.mp4 did not yield a readable first frame."
+            )
+    except cv2.error as exc:
+        raise PoseInferenceError(
+            f"Subsystem 01 prepared_video.mp4 could not be decoded: {exc}"
+        ) from exc
+    finally:
+        capture.release()
+
+    expected_count = int(sync.frame_count_used_for_sleap)
+    if reported_count is not None and reported_count != expected_count:
+        raise PoseInferenceError(
+            "Prepared-video header frame count does not match the authoritative S1 "
+            f"sync contract: reported={reported_count}, expected={expected_count}."
+        )
+
+    prepared_meta = handoff.prepare_meta_payload.get("prepared_video")
+    if isinstance(prepared_meta, Mapping):
+        for key in (
+            "opencv_reported_frame_count",
+            "opencv_readable_frame_count",
+            "frame_count_used_for_sleap",
+        ):
+            value = prepared_meta.get(key)
+            if value is not None and value != expected_count:
+                raise PoseInferenceError(
+                    f"prepare_meta.json {key} does not match the authoritative "
+                    f"S1 sync frame count {expected_count}."
+                )
+
+
+def _validate_model_path(model_path: Path) -> None:
+    if not model_path.exists():
+        raise PoseInferenceError(f"Model path does not exist: {model_path}")
+    try:
+        if model_path.is_file():
+            with model_path.open("rb") as stream:
+                stream.read(1)
+        elif model_path.is_dir():
+            next(model_path.iterdir(), None)
+        else:
+            raise PoseInferenceError(f"Model path is not a file or directory: {model_path}")
+    except OSError as exc:
+        raise PoseInferenceError(f"Model path is unreadable: {model_path}: {exc}") from exc
+
+
+def _profile_fraction(profile: Mapping[str, Any], key: str, default: float) -> float:
+    value = profile.get(key, default)
+    if isinstance(value, bool):
+        raise PoseInferenceError(f"Inference profile {key} must be numeric.")
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise PoseInferenceError(f"Inference profile {key} must be numeric.") from exc
+    if not math.isfinite(threshold) or not 0 <= threshold <= 1:
+        raise PoseInferenceError(f"Inference profile {key} must be between 0 and 1.")
+    return threshold
+
+
+def _pose_qc_options(profile: Mapping[str, Any]) -> dict[str, Any]:
+    tracking = profile.get("tracking")
+    configured_expected = profile.get("expected_animals")
+    if configured_expected is None and isinstance(tracking, Mapping):
+        configured_expected = tracking.get("max_tracks")
+    expected_animals = (
+        DEFAULT_EXPECTED_ANIMALS
+        if configured_expected is None
+        else configured_expected
+    )
+    if isinstance(expected_animals, bool) or not isinstance(expected_animals, int):
+        raise PoseInferenceError("Inference profile expected animal count must be an integer.")
+    if expected_animals < 1:
+        raise PoseInferenceError("Inference profile expected animal count must be positive.")
+    return {
+        "expected_animals": expected_animals,
+        "review_one_animal_fraction_threshold": _profile_fraction(
+            profile,
+            "review_one_animal_fraction_threshold",
+            DEFAULT_REVIEW_ONE_ANIMAL_FRACTION_THRESHOLD,
+        ),
+        "review_missing_keypoint_fraction_threshold": _profile_fraction(
+            profile,
+            "review_missing_keypoint_fraction_threshold",
+            DEFAULT_REVIEW_MISSING_KEYPOINT_FRACTION_THRESHOLD,
+        ),
+        "review_frame_missing_keypoint_fraction_threshold": _profile_fraction(
+            profile,
+            "review_frame_missing_keypoint_fraction_threshold",
+            DEFAULT_REVIEW_FRAME_MISSING_KEYPOINT_FRACTION_THRESHOLD,
+        ),
+    }
+
+
 def load_inference_profile(profile_path: Path) -> dict[str, Any]:
     """Load the default SLEAP-NN inference profile YAML."""
 
@@ -381,6 +511,11 @@ def load_inference_profile(profile_path: Path) -> dict[str, Any]:
         raise PoseInferenceError("Inference profile must contain a top-level mapping.")
     if "tracking" in profile and not isinstance(profile["tracking"], dict):
         raise PoseInferenceError("Inference profile tracking section must be a mapping.")
+    if profile.get("output_format") not in {None, "slp"}:
+        raise PoseInferenceError(
+            "The current inference backend requires profile output_format=slp."
+        )
+    _pose_qc_options(profile)
     return profile
 
 
@@ -565,10 +700,25 @@ def _failed_pose_qc_summary(error: BaseException) -> PoseQcSummary:
         payload={
             "status": "failed",
             "schema_version": POSE_QC_SCHEMA_VERSION,
+            "outcome": "failed",
+            "failure_reasons": ["pose_qc_computation_failed"],
             "error": str(error),
         },
         error=str(error),
     )
+
+
+def _technical_failure_pose_qc_summary(
+    summary: PoseQcSummary,
+    reason: str,
+) -> PoseQcSummary:
+    payload = summary.to_metadata()
+    failure_reasons = list(payload.get("failure_reasons", []))
+    if reason not in failure_reasons:
+        failure_reasons.append(reason)
+    payload["outcome"] = "failed"
+    payload["failure_reasons"] = failure_reasons
+    return PoseQcSummary(status=summary.status, payload=payload, error=summary.error)
 
 
 def _not_generated_overlay_summary(path: Path, reason: str) -> OverlaySummary:
@@ -724,6 +874,13 @@ def _manifest_payload(
 ) -> dict[str, Any]:
     provenance_metadata = sleap_provenance.to_metadata()
     parquet_metadata = parquet_summary.to_metadata()
+    pose_qc_metadata = pose_qc_summary.to_metadata()
+    flagged_intervals = pose_qc_metadata.get("flagged_intervals", {})
+    flagged_interval_count = (
+        sum(len(value) for value in flagged_intervals.values())
+        if isinstance(flagged_intervals, Mapping)
+        else 0
+    )
     return {
         "schema_version": JOB_MANIFEST_SCHEMA_VERSION,
         "run_id": run_id,
@@ -748,6 +905,12 @@ def _manifest_payload(
         "command": list(command),
         "returncode": returncode,
         "qc_status": pose_qc_summary.status,
+        "qc_outcome": pose_qc_metadata.get("outcome"),
+        "qc_review_recommendation_reasons": pose_qc_metadata.get(
+            "review_recommendation_reasons", []
+        ),
+        "qc_review_warning_count": pose_qc_metadata.get("review_warning_count", 0),
+        "qc_flagged_interval_count": flagged_interval_count,
         "overlay_status": overlay_summary.status,
         "sleap_provenance_status": sleap_provenance.status,
         "sleap_provenance_error": sleap_provenance.error,
@@ -800,6 +963,7 @@ def _write_processing_log(
         f"parquet_status: {parquet_summary.status}",
         f"pose_parquet: {parquet_summary.path.resolve()}",
         f"pose_qc: {pose_qc_summary.status}",
+        f"pose_qc_outcome: {pose_qc_metadata.get('outcome', 'not_computed')}",
         f"overlay: {overlay_summary.status}",
         f"sleap_provenance_status: {sleap_provenance.status}",
         f"sleap_provenance_source: {sleap_provenance.source}",
@@ -807,6 +971,20 @@ def _write_processing_log(
     ]
     if parquet_summary.error:
         lines.append(f"parquet_error: {parquet_summary.error}")
+    reasons = pose_qc_metadata.get("review_recommendation_reasons", [])
+    failure_reasons = pose_qc_metadata.get("failure_reasons", [])
+    lines.append(
+        "pose_qc_review_recommendation_reasons: "
+        + (", ".join(str(reason) for reason in reasons) if reasons else "none")
+    )
+    lines.append(
+        "pose_qc_failure_reasons: "
+        + (
+            ", ".join(str(reason) for reason in failure_reasons)
+            if failure_reasons
+            else "none"
+        )
+    )
     if pose_qc_summary.status == "computed":
         duplicate_risk = pose_qc_metadata.get("duplicate_candidate_risk", {})
         geometry = pose_qc_metadata.get("implausible_geometry", {})
@@ -846,6 +1024,18 @@ def _validate_no_forbidden_outputs(paths: RunPaths) -> None:
         )
 
 
+def _validate_required_output_file(path: Path) -> None:
+    if not path.is_file():
+        raise PoseInferenceError(f"Required Subsystem 02 output is missing: {path.name}")
+    try:
+        with path.open("rb") as stream:
+            stream.read(1)
+    except OSError as exc:
+        raise PoseInferenceError(
+            f"Required Subsystem 02 output is unreadable: {path.name}: {exc}"
+        ) from exc
+
+
 def run_pose_inference(
     request: PoseInferenceRequest,
     *,
@@ -858,11 +1048,12 @@ def run_pose_inference(
     """Run or dry-run one Subsystem 02 SLEAP-NN inference request."""
 
     handoff = validate_s1_handoff(request.session_root)
+    _validate_prepared_video_against_sync(handoff)
     profile_path = Path(request.profile_path).expanduser().resolve()
     profile = load_inference_profile(profile_path)
+    pose_qc_options = _pose_qc_options(profile)
     model_path = Path(request.model_path).expanduser().resolve()
-    if not model_path.exists():
-        raise PoseInferenceError(f"Model path does not exist: {model_path}")
+    _validate_model_path(model_path)
 
     model_id = _sanitize_identifier(model_path.stem if model_path.is_file() else model_path.name)
     timestamp = request.timestamp or _now_timestamp()
@@ -874,7 +1065,12 @@ def run_pose_inference(
     )
     if paths.run_dir.exists():
         raise PoseInferenceError(f"Output run directory already exists: {paths.run_dir}")
-    paths.run_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        paths.run_dir.mkdir(parents=True, exist_ok=False)
+    except OSError as exc:
+        raise PoseInferenceError(
+            f"Output location cannot be created or written: {paths.run_dir}: {exc}"
+        ) from exc
 
     created_at = _iso_now()
     command = build_sleap_predict_command(
@@ -906,10 +1102,15 @@ def run_pose_inference(
         stderr = completed.stderr
         returncode = completed.returncode
         if completed.returncode != 0:
+            pose_qc_summary = _technical_failure_pose_qc_summary(
+                pose_qc_summary,
+                "inference_subprocess_failed",
+            )
             status = "inference_failed"
             success = False
         elif paths.pose_slp.is_file():
             try:
+                _validate_required_output_file(paths.pose_slp)
                 sleap_provenance = sleap_provenance_reader(paths.pose_slp)
             except Exception as exc:
                 sleap_provenance = _failed_sleap_provenance_summary(exc)
@@ -922,32 +1123,72 @@ def run_pose_inference(
             except ParquetExportError as exc:
                 parquet_summary = _failed_parquet_summary(paths.pose_parquet, exc)
                 pose_qc_summary = _not_computed_pose_qc_summary("parquet export failed")
+                pose_qc_summary = _technical_failure_pose_qc_summary(
+                    pose_qc_summary,
+                    "parquet_export_failed",
+                )
                 overlay_summary = _not_generated_overlay_summary(paths.overlay_mp4, "parquet export failed")
                 status = "export_failed"
                 success = False
             else:
                 try:
-                    pose_qc_summary = pose_qc_computer(pose_parquet_path=paths.pose_parquet)
+                    _validate_required_output_file(paths.pose_parquet)
+                    pose_qc_summary = pose_qc_computer(
+                        pose_parquet_path=paths.pose_parquet,
+                        **pose_qc_options,
+                    )
+                except PoseInferenceError as exc:
+                    parquet_summary = _failed_parquet_summary(paths.pose_parquet, exc)
+                    pose_qc_summary = _not_computed_pose_qc_summary(
+                        "required pose.parquet validation failed"
+                    )
+                    pose_qc_summary = _technical_failure_pose_qc_summary(
+                        pose_qc_summary,
+                        "required_pose_parquet_missing_or_unreadable",
+                    )
+                    overlay_summary = _not_generated_overlay_summary(
+                        paths.overlay_mp4,
+                        "required pose.parquet validation failed",
+                    )
+                    status = "export_failed"
+                    success = False
                 except PoseQcError as exc:
                     pose_qc_summary = _failed_pose_qc_summary(exc)
                     overlay_summary = _not_generated_overlay_summary(paths.overlay_mp4, "pose-quality QC failed")
                     status = "qc_failed"
                     success = False
                 else:
-                    try:
-                        overlay_summary = overlay_generator(
-                            prepared_video_path=handoff.prepared_video,
-                            pose_parquet_path=paths.pose_parquet,
-                            output_path=paths.overlay_mp4,
+                    if pose_qc_summary.to_metadata().get("outcome") == "failed":
+                        overlay_summary = _not_generated_overlay_summary(
+                            paths.overlay_mp4,
+                            "technical pose QC failed",
                         )
-                    except OverlayGenerationError as exc:
-                        overlay_summary = _failed_overlay_summary(paths.overlay_mp4, exc)
-                        status = "overlay_failed"
+                        status = "qc_failed"
                         success = False
                     else:
-                        status = "success"
-                        success = True
+                        try:
+                            overlay_summary = overlay_generator(
+                                prepared_video_path=handoff.prepared_video,
+                                pose_parquet_path=paths.pose_parquet,
+                                output_path=paths.overlay_mp4,
+                            )
+                            _validate_required_output_file(paths.overlay_mp4)
+                        except (OverlayGenerationError, PoseInferenceError) as exc:
+                            overlay_summary = _failed_overlay_summary(paths.overlay_mp4, exc)
+                            pose_qc_summary = _technical_failure_pose_qc_summary(
+                                pose_qc_summary,
+                                "required_overlay_missing_unreadable_or_failed",
+                            )
+                            status = "overlay_failed"
+                            success = False
+                        else:
+                            status = "success"
+                            success = True
         else:
+            pose_qc_summary = _technical_failure_pose_qc_summary(
+                pose_qc_summary,
+                "required_pose_slp_missing",
+            )
             status = "validation_failed"
             success = False
 
@@ -1023,6 +1264,13 @@ def run_pose_inference(
         stdout=stdout,
         stderr=stderr,
     )
+    for required_metadata in (
+        paths.pose_meta,
+        paths.settings_used,
+        paths.job_manifest,
+        paths.processing_log,
+    ):
+        _validate_required_output_file(required_metadata)
     _validate_no_forbidden_outputs(paths)
 
     return PoseInferenceResult(

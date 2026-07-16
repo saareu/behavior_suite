@@ -15,6 +15,10 @@ DEFAULT_EXPECTED_ANIMALS = 2
 DEFAULT_SCORE_THRESHOLD = 0.2
 DEFAULT_DUPLICATE_DISTANCE_PX = 15.0
 DEFAULT_IMPLAUSIBLE_MAD_THRESHOLD = 8.0
+DEFAULT_REVIEW_ONE_ANIMAL_FRACTION_THRESHOLD = 0.90
+DEFAULT_REVIEW_MISSING_KEYPOINT_FRACTION_THRESHOLD = 0.90
+DEFAULT_REVIEW_FRAME_MISSING_KEYPOINT_FRACTION_THRESHOLD = 0.90
+MAX_REVIEW_INTERVALS_PER_WARNING = 10
 GEOMETRY_NODE_PAIRS = (("nose", "tail_base"), ("neck", "tail_base"))
 EXAMPLE_LIMIT = 25
 
@@ -73,6 +77,10 @@ def _count_summary(count: int, total: int, frame_indices: object | None = None) 
     return summary
 
 
+def _prepared_frame_indices(frame_keys: object) -> list[int]:
+    return [int(key[1]) for key in frame_keys]
+
+
 def _require_columns(columns: object, required: set[str]) -> None:
     present = {str(column) for column in columns}
     missing = sorted(required - present)
@@ -105,6 +113,66 @@ def _prepare_dataframe(pose_parquet_path: Path) -> Any:
             raise PoseQcError(f"pose.parquet column {column} has missing or non-numeric values.")
         work[column] = numeric.astype("int64")
 
+    if "video_index" in work.columns:
+        video_indices = pd.to_numeric(work["video_index"], errors="coerce")
+        if video_indices.isna().any():
+            raise PoseQcError(
+                "pose.parquet video_index has missing or non-numeric values."
+            )
+        work["video_index"] = video_indices.astype("int64")
+    else:
+        work["video_index"] = 0
+
+    if "prepared_frame_idx" in work.columns:
+        prepared_indices = pd.to_numeric(work["prepared_frame_idx"], errors="coerce")
+        if prepared_indices.isna().any():
+            raise PoseQcError(
+                "pose.parquet prepared_frame_idx has missing or non-numeric values."
+            )
+        work["prepared_frame_idx"] = prepared_indices.astype("int64")
+        if not np.array_equal(
+            work["prepared_frame_idx"].to_numpy(), work["frame_idx"].to_numpy()
+        ):
+            raise PoseQcError(
+                "pose.parquet prepared_frame_idx does not match prediction frame_idx."
+            )
+    else:
+        work["prepared_frame_idx"] = work["frame_idx"]
+
+    if "sync_frame_count_used_for_sleap" in work.columns and not work.empty:
+        sync_counts = pd.to_numeric(
+            work["sync_frame_count_used_for_sleap"], errors="coerce"
+        )
+        if sync_counts.isna().any() or sync_counts.nunique() != 1:
+            raise PoseQcError(
+                "pose.parquet has an invalid or inconsistent S1 sync frame count."
+            )
+        sync_count = int(sync_counts.iloc[0])
+        if sync_count < 1 or (work["frame_idx"] < 0).any() or (
+            work["frame_idx"] >= sync_count
+        ).any():
+            raise PoseQcError(
+                "pose.parquet frame indices fall outside the authoritative S1 frame range."
+            )
+
+    if {"prepared_frame_idx", "prepared_time_sec", "fps_header"}.issubset(
+        work.columns
+    ):
+        prepared_times = pd.to_numeric(work["prepared_time_sec"], errors="coerce")
+        fps_values = pd.to_numeric(work["fps_header"], errors="coerce")
+        available = prepared_times.notna() & fps_values.notna()
+        if available.any():
+            expected_times = work.loc[available, "prepared_frame_idx"] / fps_values[available]
+            if not np.allclose(
+                prepared_times[available].to_numpy(),
+                expected_times.to_numpy(),
+                rtol=0,
+                atol=1e-12,
+            ):
+                raise PoseQcError(
+                    "pose.parquet prepared-frame timing does not match the S1 mapping."
+                )
+
     work["node"] = work["node"].astype("string").fillna("unknown")
     work["x"] = pd.to_numeric(work["x"], errors="coerce")
     work["y"] = pd.to_numeric(work["y"], errors="coerce")
@@ -123,16 +191,15 @@ def _frame_and_instance_summary(
     *,
     expected_animals: int,
     score_threshold: float,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    group_cols = ["frame_idx", "instance_index"]
-    frame_indices = sorted(int(value) for value in work["frame_idx"].dropna().unique())
-    frame_total = len(frame_indices)
+) -> tuple[dict[str, Any], dict[str, Any], Any]:
+    frame_cols = ["video_index", "prepared_frame_idx"]
+    group_cols = [*frame_cols, "instance_index"]
 
     valid_instances = work.groupby(group_cols, dropna=False)["_valid_xy"].any()
-    valid_instances_per_frame = (
-        valid_instances.groupby(level=0).sum().reindex(frame_indices, fill_value=0).astype(int)
-    )
+    valid_instances_per_frame = valid_instances.groupby(level=[0, 1]).sum().astype(int)
+    frame_total = int(len(valid_instances_per_frame))
     zero_frames = valid_instances_per_frame[valid_instances_per_frame == 0].index
+    one_animal_frames = valid_instances_per_frame[valid_instances_per_frame == 1].index
     fewer_frames = valid_instances_per_frame[valid_instances_per_frame < expected_animals].index
     expected_frames = valid_instances_per_frame[valid_instances_per_frame == expected_animals].index
     extra_frames = valid_instances_per_frame[valid_instances_per_frame > expected_animals].index
@@ -140,10 +207,25 @@ def _frame_and_instance_summary(
     frames = {
         "total": frame_total,
         "expected_animals": int(expected_animals),
-        "zero_animals": _count_summary(len(zero_frames), frame_total, zero_frames),
-        "fewer_than_expected": _count_summary(len(fewer_frames), frame_total, fewer_frames),
+        "zero_animals": _count_summary(
+            len(zero_frames), frame_total, _prepared_frame_indices(zero_frames)
+        ),
+        "exactly_one_animal": _count_summary(
+            len(one_animal_frames),
+            frame_total,
+            _prepared_frame_indices(one_animal_frames),
+        ),
+        "fewer_than_expected": _count_summary(
+            len(fewer_frames),
+            frame_total,
+            _prepared_frame_indices(fewer_frames),
+        ),
         "expected_count": _count_summary(len(expected_frames), frame_total),
-        "more_than_expected": _count_summary(len(extra_frames), frame_total, extra_frames),
+        "more_than_expected": _count_summary(
+            len(extra_frames),
+            frame_total,
+            _prepared_frame_indices(extra_frames),
+        ),
     }
 
     instance_score_summary: dict[str, Any] = {"status": "unavailable", "reason": "missing column"}
@@ -166,7 +248,7 @@ def _frame_and_instance_summary(
         "invalid": int((~valid_instances).sum()),
         "instance_score": instance_score_summary,
     }
-    return frames, instances
+    return frames, instances, valid_instances_per_frame
 
 
 def _keypoint_summary(work: Any, score_threshold: float) -> dict[str, Any]:
@@ -351,6 +433,191 @@ def _timestamp_sources(work: Any) -> list[str]:
     return sorted(values)
 
 
+def _validate_fraction_threshold(name: str, value: float) -> None:
+    if not math.isfinite(value) or not 0 <= value <= 1:
+        raise PoseQcError(f"{name} must be between 0 and 1 inclusive.")
+
+
+def _frame_times(work: Any) -> dict[tuple[int, int], float]:
+    for column in ("time_sec", "prepared_time_sec"):
+        if column not in work.columns:
+            continue
+        times: dict[tuple[int, int], float] = {}
+        for frame_key, values in work.groupby(
+            ["video_index", "prepared_frame_idx"], sort=True
+        )[column]:
+            for value in values:
+                numeric = _finite_float(value)
+                if numeric is not None:
+                    times[(int(frame_key[0]), int(frame_key[1]))] = numeric
+                    break
+        if times:
+            return times
+    return {}
+
+
+def _contiguous_intervals(
+    frame_keys: object,
+    *,
+    warning_type: str,
+    frame_times: Mapping[tuple[int, int], float],
+    frame_values: Mapping[tuple[int, int], float] | None = None,
+) -> list[dict[str, Any]]:
+    keys = sorted({(int(key[0]), int(key[1])) for key in frame_keys})
+    groups: list[list[tuple[int, int]]] = []
+    for frame_key in keys:
+        if (
+            not groups
+            or frame_key[0] != groups[-1][-1][0]
+            or frame_key[1] != groups[-1][-1][1] + 1
+        ):
+            groups.append([frame_key])
+        else:
+            groups[-1].append(frame_key)
+
+    intervals: list[dict[str, Any]] = []
+    for group in groups:
+        video_index = group[0][0]
+        start_frame = group[0][1]
+        end_frame = group[-1][1]
+        start_time = frame_times.get(group[0])
+        end_time = frame_times.get(group[-1])
+        interval: dict[str, Any] = {
+            "warning_type": warning_type,
+            "video_index": video_index,
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "frame_count": len(group),
+            "start_time_sec": start_time,
+            "end_time_sec": end_time,
+            "time_span_sec": (
+                max(0.0, end_time - start_time)
+                if start_time is not None and end_time is not None
+                else None
+            ),
+        }
+        if frame_values is not None:
+            values = [frame_values[frame_key] for frame_key in group]
+            interval["mean_missing_keypoint_fraction"] = float(np.mean(values))
+            interval["max_missing_keypoint_fraction"] = float(max(values))
+        intervals.append(interval)
+    return sorted(
+        intervals,
+        key=lambda interval: (
+            -int(interval["frame_count"]),
+            int(interval["video_index"]),
+            int(interval["start_frame"]),
+        ),
+    )[:MAX_REVIEW_INTERVALS_PER_WARNING]
+
+
+def _technical_outcome(
+    work: Any,
+    *,
+    frames: Mapping[str, Any],
+    keypoints: Mapping[str, Any],
+    valid_instances_per_frame: Any,
+    expected_animals: int,
+    review_one_animal_fraction_threshold: float,
+    review_missing_keypoint_fraction_threshold: float,
+    review_frame_missing_keypoint_fraction_threshold: float,
+) -> dict[str, Any]:
+    represented_finite_frames = int((valid_instances_per_frame > 0).sum())
+    failure_reasons = (
+        ["zero_represented_frames_with_finite_pose"]
+        if represented_finite_frames == 0
+        else []
+    )
+    reasons: list[str] = []
+    warning_summaries: list[dict[str, Any]] = []
+    flagged_intervals: dict[str, list[dict[str, Any]]] = {}
+    frame_times = _frame_times(work)
+
+    one_animal_fraction = float(frames["exactly_one_animal"]["fraction"])
+    if (
+        expected_animals == 2
+        and one_animal_fraction >= review_one_animal_fraction_threshold
+    ):
+        warning_type = "one_detected_animal"
+        reasons.append(warning_type)
+        one_animal_frames = valid_instances_per_frame[
+            valid_instances_per_frame == 1
+        ].index
+        intervals = _contiguous_intervals(
+            one_animal_frames,
+            warning_type=warning_type,
+            frame_times=frame_times,
+        )
+        flagged_intervals[warning_type] = intervals
+        warning_summaries.append(
+            {
+                "warning_type": warning_type,
+                "fraction": one_animal_fraction,
+                "threshold": float(review_one_animal_fraction_threshold),
+                "interval_count_retained": len(intervals),
+            }
+        )
+
+    missing_fraction = float(keypoints["missing_coordinates"]["fraction"])
+    if missing_fraction >= review_missing_keypoint_fraction_threshold:
+        warning_type = "high_missing_keypoint_fraction"
+        reasons.append(warning_type)
+        frame_missing = work.groupby(
+            ["video_index", "prepared_frame_idx"], sort=True
+        )["_valid_xy"].apply(lambda values: float((~values).mean()))
+        flagged = frame_missing[
+            frame_missing >= review_frame_missing_keypoint_fraction_threshold
+        ]
+        frame_values = {
+            (int(index[0]), int(index[1])): float(value)
+            for index, value in flagged.items()
+        }
+        intervals = _contiguous_intervals(
+            flagged.index,
+            warning_type=warning_type,
+            frame_times=frame_times,
+            frame_values=frame_values,
+        )
+        flagged_intervals[warning_type] = intervals
+        warning_summaries.append(
+            {
+                "warning_type": warning_type,
+                "fraction": missing_fraction,
+                "threshold": float(review_missing_keypoint_fraction_threshold),
+                "per_frame_threshold": float(
+                    review_frame_missing_keypoint_fraction_threshold
+                ),
+                "interval_count_retained": len(intervals),
+            }
+        )
+
+    if failure_reasons:
+        outcome = "failed"
+    elif reasons:
+        outcome = "review_recommended"
+    else:
+        outcome = "pass"
+    return {
+        "outcome": outcome,
+        "represented_frames_with_finite_pose": represented_finite_frames,
+        "failure_reasons": failure_reasons,
+        "review_recommendation_reasons": reasons,
+        "review_warning_count": len(reasons),
+        "review_warnings": warning_summaries,
+        "flagged_intervals": flagged_intervals,
+        "review_thresholds": {
+            "one_animal_fraction": float(review_one_animal_fraction_threshold),
+            "missing_keypoint_fraction": float(
+                review_missing_keypoint_fraction_threshold
+            ),
+            "frame_missing_keypoint_fraction": float(
+                review_frame_missing_keypoint_fraction_threshold
+            ),
+            "max_intervals_per_warning_type": MAX_REVIEW_INTERVALS_PER_WARNING,
+        },
+    }
+
+
 def _warnings(
     *,
     frames: Mapping[str, Any],
@@ -388,6 +655,15 @@ def compute_pose_qc_from_parquet(
     score_threshold: float = DEFAULT_SCORE_THRESHOLD,
     duplicate_distance_px: float = DEFAULT_DUPLICATE_DISTANCE_PX,
     implausible_mad_threshold: float = DEFAULT_IMPLAUSIBLE_MAD_THRESHOLD,
+    review_one_animal_fraction_threshold: float = (
+        DEFAULT_REVIEW_ONE_ANIMAL_FRACTION_THRESHOLD
+    ),
+    review_missing_keypoint_fraction_threshold: float = (
+        DEFAULT_REVIEW_MISSING_KEYPOINT_FRACTION_THRESHOLD
+    ),
+    review_frame_missing_keypoint_fraction_threshold: float = (
+        DEFAULT_REVIEW_FRAME_MISSING_KEYPOINT_FRACTION_THRESHOLD
+    ),
 ) -> PoseQcSummary:
     """Compute ``pose_qc_v1`` from a long/tidy pose.parquet file."""
 
@@ -397,9 +673,21 @@ def compute_pose_qc_from_parquet(
         raise PoseQcError("score_threshold must be non-negative.")
     if duplicate_distance_px <= 0:
         raise PoseQcError("duplicate_distance_px must be positive.")
+    _validate_fraction_threshold(
+        "review_one_animal_fraction_threshold",
+        review_one_animal_fraction_threshold,
+    )
+    _validate_fraction_threshold(
+        "review_missing_keypoint_fraction_threshold",
+        review_missing_keypoint_fraction_threshold,
+    )
+    _validate_fraction_threshold(
+        "review_frame_missing_keypoint_fraction_threshold",
+        review_frame_missing_keypoint_fraction_threshold,
+    )
 
     work = _prepare_dataframe(Path(pose_parquet_path))
-    frames, instances = _frame_and_instance_summary(
+    frames, instances, valid_instances_per_frame = _frame_and_instance_summary(
         work,
         expected_animals=expected_animals,
         score_threshold=score_threshold,
@@ -419,10 +707,27 @@ def compute_pose_qc_from_parquet(
         duplicate_risk=duplicate_risk,
         geometry=geometry,
     )
+    outcome = _technical_outcome(
+        work,
+        frames=frames,
+        keypoints=keypoints,
+        valid_instances_per_frame=valid_instances_per_frame,
+        expected_animals=expected_animals,
+        review_one_animal_fraction_threshold=(
+            review_one_animal_fraction_threshold
+        ),
+        review_missing_keypoint_fraction_threshold=(
+            review_missing_keypoint_fraction_threshold
+        ),
+        review_frame_missing_keypoint_fraction_threshold=(
+            review_frame_missing_keypoint_fraction_threshold
+        ),
+    )
 
     payload = {
         "status": "computed",
         "schema_version": POSE_QC_SCHEMA_VERSION,
+        **outcome,
         "expected_animals": int(expected_animals),
         "score_threshold": float(score_threshold),
         "frames": frames,

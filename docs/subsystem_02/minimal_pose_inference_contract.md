@@ -38,7 +38,8 @@ pose_inference/{model-id}__{timestamp}/
   S1 timing, and relevant frame-level metadata.
 - `overlay.mp4` is generated from `pose.slp`; it may color by track when tracks
   are present.
-- `pose_meta.json` contains pose-quality QC, not pipeline provenance.
+- `pose_meta.json` contains technical pose-inference QC, including a separate
+  `pass`, `review_recommended`, or `failed` outcome, not pipeline provenance.
 - `settings_used.yaml` records actual inference parameters.
 - `job_manifest.yaml` records input/output contract and provenance.
 - `processing_log.txt` records runtime logs.
@@ -50,3 +51,8 @@ pose_inference/{model-id}__{timestamp}/
 - Tracking reports, tracking QC CSVs, or identity maps as standard outputs.
 - Parameter optimization and guided profile tuning.
 - Any change to Subsystem 01 preprocessing behavior.
+
+Subsystem 02 decides technical completion and S3 handoff eligibility. A
+`review_recommended` result is non-blocking. Final tracking/identity correctness
+and final session usability are Subsystem 03 responsibilities; Subsystem 02
+does not persist those decisions.

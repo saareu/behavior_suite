@@ -30,7 +30,8 @@ Backend acceptance tests must prove that the Subsystem 02 backend can:
 - generate `overlay.mp4` from `pose.slp`;
 - write `pose_meta.json`, `settings_used.yaml`, `job_manifest.yaml`, and
   `processing_log.txt`;
-- report pose-quality QC without claiming final biological identity continuity.
+- report technical pose-inference QC without claiming final biological identity
+  continuity or final session usability.
 
 The current provisional SLEAP tracking settings are accepted as good enough for
 Subsystem 02 development. Parameter optimization is postponed to a later guided
@@ -126,8 +127,7 @@ Each A-D clip must check:
 - all exported rows retain `prepared_frame_idx`;
 - S1 timing columns are joined when available;
 - frame references remain inside the prepared-video frame range;
-- overlay generation is attempted and either succeeds or records a non-fatal
-  warning;
+- required overlay generation succeeds and writes a readable artifact;
 - pose-quality QC is written to `pose_meta.json`;
 - `settings_used.yaml`, `job_manifest.yaml`, and `processing_log.txt` are
   written.
@@ -164,7 +164,7 @@ The full-session integration case must check:
 The export must preserve retained instances from `pose.slp`. Missing keypoints
 must remain missing rather than being interpolated.
 
-## 9. Pose-Quality QC Acceptance Criteria
+## 9. Technical Pose-Inference QC Acceptance Criteria
 
 `pose_meta.json` must include a pose-quality QC summary covering, when
 available:
@@ -184,8 +184,29 @@ This QC section must not include pipeline success/provenance as pose-quality
 metrics. Pipeline success and provenance belong in `job_manifest.yaml` and
 `processing_log.txt`.
 
-Final biological identity-continuity evaluation is excluded from required
-Subsystem 02 QC.
+QC retains `status: computed` and separately records outcome `pass`,
+`review_recommended`, or `failed`. Acceptance must prove that:
+
+- zero represented prepared frames containing at least one finite x/y pose
+  point produces `failed`;
+- at least one such frame avoids that hard-failure condition;
+- a moderate exactly-one-animal fraction does not recommend review;
+- an exactly-one-animal fraction at or above `0.90` recommends review only for
+  the configured two-animal workflow;
+- a moderate missing-keypoint fraction does not recommend review;
+- a missing-keypoint fraction at or above `0.90` recommends review;
+- `review_recommended` remains a successful, S3-eligible run;
+- triggered warnings include at most 10 longest-first contiguous intervals,
+  generated independently per video, using inclusive frame bounds and timing
+  when available; `time_span_sec` is the end timestamp minus the start timestamp
+  and may be zero for a one-frame interval.
+
+These are conservative technical-review thresholds, not scientific-validity
+criteria. No MVP triggers are added for partial-skeleton runs, extended
+low-confidence periods, unexpected animal-count distributions, identity
+switches, or tracking continuity. Final biological identity, tracking
+correctness, and final session usability are S3 responsibilities. No persistent
+S2 user-review/final-usability record or elaborate S2 review screen is required.
 
 ## 10. Overlay Acceptance Criteria
 
@@ -200,10 +221,23 @@ Overlay validation should check:
 - expected frame count when available;
 - prepared-video dimensions unless explicitly documented otherwise;
 - visible skeleton/node rendering on sampled frames;
-- clear warning record if overlay generation fails while inference and Parquet
-  export are valid.
+- a hard post-run failure if the required overlay is missing, unreadable, or
+  cannot be generated.
 
-## 11. Settings and Provenance Acceptance Criteria
+## 11. Preflight and Post-Run Validation Acceptance
+
+Before subprocess submission, acceptance tests must cover missing or unreadable
+S1 inputs, invalid S1 timing-array lengths or prepared-frame mappings,
+prepared-video/S1 frame-count disagreement, missing model/profile inputs, and
+an output location that cannot be created or written. A valid S1 handoff must
+still permit normal command execution and dry-run behavior.
+
+Post-run tests must cover subprocess failure, missing/unreadable required S2
+artifacts, prediction/S1 frame mismatch, invalid exported frame/timing mapping,
+and the exact zero-finite-pose-frame hard-failure definition. Missing S2
+outputs are post-run failures, not preflight failures.
+
+## 12. Settings and Provenance Acceptance Criteria
 
 `settings_used.yaml` must record the actual SLEAP/SLEAP-NN parameters used.
 
@@ -219,7 +253,7 @@ Overlay validation should check:
 `processing_log.txt` must record runtime logs, warnings, errors, and validation
 messages.
 
-## 12. Non-Regression Requirement
+## 13. Non-Regression Requirement
 
 Backend Subsystem 02 acceptance must not require changes to Subsystem 01
 behavior.
@@ -237,7 +271,7 @@ Full Subsystem 02 MVP acceptance additionally requires:
   downstream selection;
 - a Subsystem 01 completion-to-Subsystem 02 transition.
 
-## 13. Pass/Fail Summary
+## 14. Pass/Fail Summary
 
 Subsystem 02 passes initial acceptance when:
 
@@ -245,7 +279,7 @@ Subsystem 02 passes initial acceptance when:
 2. E full-session integration produces valid minimal artifacts.
 3. `pose.parquet` preserves S1 frame/timing contract.
 4. `pose_meta.json` reports pose-quality QC.
-5. `overlay.mp4` is created or failure is recorded as an allowed warning.
+5. Required `overlay.mp4` is created and readable.
 6. Tracking, when enabled, is stored inside `pose.slp`.
 7. No separate tracking artifacts are required.
 8. Identity-stable final tracking is not treated as a blocker.
