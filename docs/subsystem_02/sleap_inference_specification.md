@@ -334,6 +334,11 @@ The MVP review recommendation has exactly two triggers:
 2. The fraction of pose rows whose x/y coordinate pair is not finite is at
    least the configured threshold.
 
+Other informational pose observations are preserved in the
+`diagnostic_findings` list. They do not determine `review_recommended`; the MVP
+review scope is represented separately by `review_recommendation_reasons`,
+`review_warnings`, and `flagged_intervals`.
+
 The global defaults are `0.90` for both metrics. These are conservative
 technical-review thresholds, not scientific-validity criteria. Sparse
 detections, many one-animal frames below the extreme threshold, high but

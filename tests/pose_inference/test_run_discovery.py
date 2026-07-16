@@ -334,3 +334,18 @@ def test_review_recommended_run_remains_complete_reviewable(tmp_path: Path) -> N
     assert run.review_warning_count == 1
     assert run.flagged_intervals["one_detected_animal"][0]["start_frame"] == 10
     assert run.flagged_intervals["one_detected_animal"][0]["time_span_sec"] == 0.45
+
+
+def test_legacy_pose_qc_warnings_field_does_not_affect_discovery(
+    tmp_path: Path,
+) -> None:
+    run_dir = _write_complete_run(tmp_path)
+    pose_meta_path = run_dir / "pose_meta.json"
+    pose_meta = json.loads(pose_meta_path.read_text(encoding="utf-8"))
+    pose_meta["pose_qc"]["warnings"] = ["legacy informational observation"]
+    pose_meta_path.write_text(json.dumps(pose_meta) + "\n", encoding="utf-8")
+
+    run = summarize_pose_inference_project(tmp_path).runs[0]
+
+    assert run.classification == COMPLETE_REVIEWABLE
+    assert run.pose_qc_status == "computed"

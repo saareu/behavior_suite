@@ -86,7 +86,7 @@ def test_pose_qc_reports_perfect_two_animal_output(tmp_path: Path) -> None:
     assert metadata["duplicate_candidate_risk"]["frames_flagged"] == 0
     assert metadata["implausible_geometry"]["frames_flagged"] == 0
     assert metadata["timestamp_sources"] == ["prepared_sync:time_sec"]
-    assert metadata["warnings"] == []
+    assert metadata["diagnostic_findings"] == []
 
 
 def test_pose_qc_counts_missing_low_confidence_and_partial_skeletons(tmp_path: Path) -> None:
@@ -103,8 +103,8 @@ def test_pose_qc_counts_missing_low_confidence_and_partial_skeletons(tmp_path: P
     assert metadata["keypoints"]["missing_coordinates"]["count"] == 1
     assert metadata["keypoints"]["low_confidence"]["count"] == 2
     assert metadata["skeletons"]["partial_skeleton_instances"] == 1
-    assert "missing keypoint coordinates are present" in metadata["warnings"]
-    assert "low-confidence keypoints are present" in metadata["warnings"]
+    assert "missing keypoint coordinates are present" in metadata["diagnostic_findings"]
+    assert "low-confidence keypoints are present" in metadata["diagnostic_findings"]
 
 
 def test_pose_qc_counts_zero_fewer_and_more_than_expected_animals(tmp_path: Path) -> None:

@@ -737,6 +737,6 @@ def compute_pose_qc_from_parquet(
         "duplicate_candidate_risk": duplicate_risk,
         "implausible_geometry": geometry,
         "timestamp_sources": _timestamp_sources(work),
-        "warnings": warnings,
+        "diagnostic_findings": warnings,
     }
     return PoseQcSummary(status="computed", payload=payload)
