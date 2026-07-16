@@ -218,6 +218,26 @@ def test_dry_run_metadata_status_is_classified_failed_or_incomplete(
     assert run.dry_run is True
 
 
+def test_dry_run_missing_outputs_is_classified_failed_or_incomplete(
+    tmp_path: Path,
+) -> None:
+    _write_complete_run(
+        tmp_path,
+        status="dry_run_complete",
+        dry_run=True,
+        missing_artifacts={"pose.slp", "pose.parquet", "overlay.mp4"},
+    )
+
+    run = summarize_pose_inference_project(tmp_path).runs[0]
+
+    assert run.classification == FAILED_OR_INCOMPLETE
+    assert run.missing_required_artifacts == (
+        "pose.slp",
+        "pose.parquet",
+        "overlay.mp4",
+    )
+
+
 def test_corrupt_metadata_does_not_crash_discovery(tmp_path: Path) -> None:
     run_dir = _write_complete_run(tmp_path, write_pose_meta=False, write_job_manifest=False)
     (run_dir / "pose_meta.json").write_text("{not valid json", encoding="utf-8")

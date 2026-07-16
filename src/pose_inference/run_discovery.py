@@ -113,9 +113,7 @@ def _summarize_s1_handoff(session_root: Path) -> S1HandoffStatus:
     }
     artifact_presence = {key: path.is_file() for key, path in paths.items()}
     missing = tuple(
-        REQUIRED_S1_HANDOFF_FILES[index]
-        for index, present in enumerate(artifact_presence.values())
-        if not present
+        path.name for key, path in paths.items() if not artifact_presence[key]
     )
     return S1HandoffStatus(
         session_root=session_root,
@@ -350,9 +348,11 @@ def _classify_run(
     dry_run: bool | None,
     metadata_errors: list[str],
 ) -> str:
+    if dry_run is True or _status_is_failed_or_incomplete(status):
+        return FAILED_OR_INCOMPLETE
     if missing:
         return MISSING_REQUIRED_ARTIFACTS
-    if dry_run is True or metadata_errors or _status_is_failed_or_incomplete(status):
+    if metadata_errors:
         return FAILED_OR_INCOMPLETE
     return COMPLETE_REVIEWABLE
 
