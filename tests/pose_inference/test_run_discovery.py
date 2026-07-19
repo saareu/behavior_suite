@@ -286,6 +286,11 @@ def test_effective_sleap_configs_and_parquet_timing_are_copied(
     assert run.effective_sleap_tracking_config == tracking_config
     assert run.parquet_timing == parquet_timing
     assert run.model_id == "model_a"
+    assert run.model_path == "C:/models/model_a"
+    assert run.inference_mode == "bottomup"
+    assert run.bottomup_model_id == "model_a"
+    assert run.bottomup_model_path == "C:/models/model_a"
+    assert run.centroid_model_id is None
     assert run.profile_id == "bottomup_default"
 
 
@@ -334,6 +339,64 @@ def test_review_recommended_run_remains_complete_reviewable(tmp_path: Path) -> N
     assert run.review_warning_count == 1
     assert run.flagged_intervals["one_detected_animal"][0]["start_frame"] == 10
     assert run.flagged_intervals["one_detected_animal"][0]["time_span_sec"] == 0.45
+
+
+def test_topdown_review_recommended_discovery_exposes_both_models(
+    tmp_path: Path,
+) -> None:
+    run_dir = _write_complete_run(
+        tmp_path,
+        run_id="topdown-centroid-instance__20260716T010203",
+    )
+    topdown_model = {
+        "inference_mode": "topdown",
+        "model_id": "topdown-centroid-instance",
+        "centroid": {
+            "model_id": "centroid_a",
+            "model_path": "C:/models/centroid_a",
+        },
+        "centered_instance": {
+            "model_id": "instance_a",
+            "model_path": "C:/models/instance_a",
+        },
+    }
+    pose_meta_path = run_dir / "pose_meta.json"
+    pose_meta = json.loads(pose_meta_path.read_text(encoding="utf-8"))
+    pose_meta.update(
+        {
+            "inference_mode": "topdown",
+            "model": topdown_model,
+            "pose_qc": {
+                "status": "computed",
+                "outcome": "review_recommended",
+                "review_recommendation_reasons": ["one_detected_animal"],
+            },
+        }
+    )
+    pose_meta_path.write_text(json.dumps(pose_meta) + "\n", encoding="utf-8")
+    manifest_path = run_dir / "job_manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(
+        {
+            "inference_mode": "topdown",
+            "model": topdown_model,
+            "qc_outcome": "review_recommended",
+            "qc_review_recommendation_reasons": ["one_detected_animal"],
+        }
+    )
+    manifest_path.write_text(yaml.safe_dump(manifest), encoding="utf-8")
+
+    run = summarize_pose_inference_project(tmp_path).runs[0]
+
+    assert run.classification == COMPLETE_REVIEWABLE
+    assert run.inference_mode == "topdown"
+    assert run.model_id == "topdown-centroid-instance"
+    assert run.model_path is None
+    assert run.bottomup_model_id is None
+    assert run.centroid_model_id == "centroid_a"
+    assert run.centroid_model_path == "C:/models/centroid_a"
+    assert run.centered_instance_model_id == "instance_a"
+    assert run.centered_instance_model_path == "C:/models/instance_a"
 
 
 def test_legacy_pose_qc_warnings_field_does_not_affect_discovery(

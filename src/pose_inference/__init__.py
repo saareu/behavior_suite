@@ -8,6 +8,7 @@ from pose_inference.run_discovery import (
 )
 from pose_inference.runner import (
     PoseInferenceError,
+    PoseInferenceModelSpec,
     PoseInferenceRequest,
     PoseInferenceResult,
     build_sleap_predict_command,
@@ -20,6 +21,7 @@ __all__ = [
     "PoseInferenceProjectSummary",
     "PoseInferenceRunSummary",
     "PoseInferenceError",
+    "PoseInferenceModelSpec",
     "PoseInferenceRequest",
     "PoseInferenceResult",
     "S1HandoffStatus",

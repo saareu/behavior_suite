@@ -14,13 +14,16 @@ runs and review of existing completed Subsystem 02 runs.
 
 ## Current Status
 
-Subsystem 02 is under active MVP development. The validated implementation
-currently covers the bottom-up backend inference path and the minimal backend
-artifact contract. The full MVP is not complete yet.
+Subsystem 02 is under active MVP development. The implementation covers both
+bottom-up and top-down backend inference paths and the minimal backend artifact
+contract. Bottom-up has passed a real GPU smoke test; top-down has passed a
+real GPU smoke test using a centroid plus centered-instance bundle
+and SLEAP-NN 0.3.0. The full MVP is not complete yet.
 
 Implemented backend pieces:
 
 - bottom-up backend inference path;
+- top-down centroid plus centered-instance model-bundle path;
 - minimal artifact generation;
 - `pose.parquet` export;
 - `overlay.mp4` generation;
@@ -33,7 +36,6 @@ Implemented backend pieces:
 
 Not-yet-complete MVP pieces:
 
-- top-down model support;
 - Subsystem 02 UI workspace;
 - main UI launch and navigation;
 - Subsystem 01 completion to Subsystem 02 transition;

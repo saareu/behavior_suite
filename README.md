@@ -11,8 +11,9 @@ spatial geometry, and processing provenance.
 Subsystem 01 is functionally closed and entering maintenance.
 
 **Subsystem 02 — SLEAP-NN Inference and Review** is under active MVP
-development. The bottom-up backend inference path is validated, but the full
-Subsystem 02 MVP still requires UI integration, top-down model support,
+development. The bottom-up backend inference path is GPU-validated and the
+top-down centroid plus centered-instance path has passed a SLEAP-NN 0.3.0 GPU
+smoke test, but the full Subsystem 02 MVP still requires UI integration,
 existing-run review, and navigation from the main UI launch point.
 
 ---
@@ -102,10 +103,10 @@ instance counts, confidence scores, coordinate exports, inference results, or
 SLEAP output-row structure.
 
 Subsystem 02 is the active pose-inference and review subsystem. Its current
-validated implementation covers the bottom-up backend inference path and
-minimal artifact contract. The full MVP is not complete until the UI workflow,
-top-down support, existing-run review, S1-to-S2 transition, and main UI
-navigation are implemented.
+validated implementation covers the bottom-up backend inference path and the
+GPU-smoke-tested top-down model-bundle path under the same minimal artifact
+contract. The full MVP is not complete until the UI workflow, existing-run
+review, S1-to-S2 transition, and main UI navigation are implemented.
 
 Final biological identity assignment, tracking verification, implanted/partner
 mouse assignment, identity-switch correction, imputation, pose

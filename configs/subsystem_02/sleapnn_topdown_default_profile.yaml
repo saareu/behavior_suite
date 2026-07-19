@@ -1,7 +1,7 @@
 schema_version: sleapnn_inference_profile_v1
-profile_id: sleapnn_default_profile_v1
-profile_name: SLEAP-NN default inference profile
-inference_mode: bottomup
+profile_id: sleapnn_topdown_default_profile_v1
+profile_name: SLEAP-NN top-down default inference profile
+inference_mode: topdown
 output_format: slp
 device: cuda
 batch_size: 4
@@ -9,11 +9,6 @@ max_instances: 4
 peak_threshold: 0.05
 integral_refinement: integral
 integral_patch_size: 5
-max_edge_length_ratio: 0.25
-dist_penalty_weight: 1.0
-n_points: 10
-min_line_scores: 0.25
-min_instance_peaks:
 expected_animals: 2
 review_one_animal_fraction_threshold: 0.90
 review_missing_keypoint_fraction_threshold: 0.90

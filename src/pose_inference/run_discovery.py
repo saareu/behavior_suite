@@ -70,6 +70,13 @@ class PoseInferenceRunSummary:
     missing_required_artifacts: tuple[str, ...]
     model_id: str | None = None
     model_path: str | None = None
+    inference_mode: str | None = None
+    bottomup_model_id: str | None = None
+    bottomup_model_path: str | None = None
+    centroid_model_id: str | None = None
+    centroid_model_path: str | None = None
+    centered_instance_model_id: str | None = None
+    centered_instance_model_path: str | None = None
     profile_id: str | None = None
     profile_path: str | None = None
     created_at: str | None = None
@@ -217,6 +224,23 @@ def _summarize_run(run_dir: Path) -> PoseInferenceRunSummary:
         dry_run=dry_run,
         metadata_errors=metadata_errors,
     )
+    model_id = _first_text(
+        _mapping_get(job_manifest, "model", "model_id"),
+        _mapping_get(pose_meta, "model", "model_id"),
+    )
+    model_path = _first_text(
+        _mapping_get(job_manifest, "model", "model_path"),
+        _mapping_get(pose_meta, "model", "model_path"),
+    )
+    inference_mode = _first_text(
+        _mapping_get(job_manifest, "inference_mode"),
+        _mapping_get(pose_meta, "inference_mode"),
+        _mapping_get(settings_used, "inference_mode"),
+        _mapping_get(job_manifest, "model", "inference_mode"),
+        _mapping_get(pose_meta, "model", "inference_mode"),
+    )
+    if inference_mode is None and model_path is not None:
+        inference_mode = "bottomup"
 
     return PoseInferenceRunSummary(
         run_dir=run_dir.resolve(),
@@ -225,13 +249,28 @@ def _summarize_run(run_dir: Path) -> PoseInferenceRunSummary:
         classification=classification,
         artifact_presence=artifact_presence,
         missing_required_artifacts=missing,
-        model_id=_first_text(
-            _mapping_get(job_manifest, "model", "model_id"),
-            _mapping_get(pose_meta, "model", "model_id"),
+        model_id=model_id,
+        model_path=model_path,
+        inference_mode=inference_mode,
+        bottomup_model_id=model_id if inference_mode == "bottomup" else None,
+        bottomup_model_path=model_path if inference_mode == "bottomup" else None,
+        centroid_model_id=_first_text(
+            _mapping_get(job_manifest, "model", "centroid", "model_id"),
+            _mapping_get(pose_meta, "model", "centroid", "model_id"),
         ),
-        model_path=_first_text(
-            _mapping_get(job_manifest, "model", "model_path"),
-            _mapping_get(pose_meta, "model", "model_path"),
+        centroid_model_path=_first_text(
+            _mapping_get(job_manifest, "model", "centroid", "model_path"),
+            _mapping_get(pose_meta, "model", "centroid", "model_path"),
+        ),
+        centered_instance_model_id=_first_text(
+            _mapping_get(job_manifest, "model", "centered_instance", "model_id"),
+            _mapping_get(pose_meta, "model", "centered_instance", "model_id"),
+        ),
+        centered_instance_model_path=_first_text(
+            _mapping_get(
+                job_manifest, "model", "centered_instance", "model_path"
+            ),
+            _mapping_get(pose_meta, "model", "centered_instance", "model_path"),
         ),
         profile_id=_first_text(
             _mapping_get(pose_meta, "settings", "profile_id"),
