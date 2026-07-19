@@ -10,8 +10,9 @@ pose coverage, pose-quality QC, overlay generation, Parquet export, and
 preservation of the Subsystem 01 timing/frame contract.
 
 This is not the full Subsystem 02 MVP acceptance specification. The full MVP
-also requires UI-based inference and review, top-down model support, main UI
-integration, existing-run review, and downstream run selection. See
+also requires UI-based inference and review, real GPU validation of the
+implemented top-down path, main UI integration, existing-run review, and
+downstream run selection. See
 [`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md).
 
 Identity-stable final tracking is not a blocking acceptance criterion for
@@ -37,9 +38,27 @@ The current provisional SLEAP tracking settings are accepted as good enough for
 Subsystem 02 development. Parameter optimization is postponed to a later guided
 workflow.
 
-The current validated backend path is bottom-up inference. Top-down support is
-required for the full Subsystem 02 MVP but is not yet covered by this backend
-acceptance set unless a later implementation task explicitly extends it.
+The backend supports bottom-up inference from one model and top-down inference
+from a centroid plus centered-instance bundle. Bottom-up has real GPU smoke
+evidence. Top-down unit/preflight/metadata coverage is present, but a real GPU
+top-down acceptance run is still required.
+
+Acceptance exercises these public command forms (with optional `--profile` and
+`--dry-run` as appropriate):
+
+```powershell
+python -m pose_inference run --session-root SESSION `
+  --inference-mode bottomup --model-path BOTTOMUP_MODEL
+
+python -m pose_inference run --session-root SESSION `
+  --inference-mode topdown --centroid-model-path CENTROID_MODEL `
+  --centered-instance-model-path CENTERED_INSTANCE_MODEL
+```
+
+Both modes must produce the same locked artifacts and traverse the same S1
+timing, Parquet, technical-QC, diagnostic-findings, review-recommendation, and
+overlay path. Provisional tracks remain S2 output preparation and are not final
+identity validation.
 
 ## 3. Required Inputs
 
@@ -229,7 +248,9 @@ Overlay validation should check:
 Before subprocess submission, acceptance tests must cover missing or unreadable
 S1 inputs, invalid S1 timing-array lengths or prepared-frame mappings,
 prepared-video/S1 frame-count disagreement, missing model/profile inputs, and
-an output location that cannot be created or written. A valid S1 handoff must
+an output location that cannot be created or written. Top-down cases must also
+cover incomplete bundles, duplicate component paths, structurally incompatible
+model roles, and profile/mode conflicts. A valid S1 handoff must
 still permit normal command execution and dry-run behavior.
 
 Post-run tests must cover subprocess failure, missing/unreadable required S2
@@ -265,7 +286,7 @@ to launch or use Subsystem 01 preprocessing.
 Full Subsystem 02 MVP acceptance additionally requires:
 
 - UI-based inference and review;
-- top-down model support;
+- real GPU top-down inference validation;
 - main UI launch/navigation integration;
 - opening existing completed Subsystem 02 runs for review, reuse, rerun, and
   downstream selection;

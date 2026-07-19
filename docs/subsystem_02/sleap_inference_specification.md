@@ -7,12 +7,15 @@ covers how the backend consumes completed Subsystem 01 outputs, runs
 SLEAP/SLEAP-NN inference, and writes the locked pose inference artifact set.
 
 This document is not the full Subsystem 02 MVP scope. The full MVP also
-requires a UI-based inference and review workflow, top-down model support,
+requires a UI-based inference and review workflow, real GPU validation of the
+implemented top-down path,
 existing-run review, Subsystem 01 completion-to-Subsystem 02 transition, and
 main UI integration. See
 [`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md).
 
-The current validated backend path is bottom-up SLEAP/SLEAP-NN inference.
+The backend supports bottom-up SLEAP/SLEAP-NN inference and a top-down bundle
+containing centroid and centered-instance checkpoints. Bottom-up has passed a
+real GPU smoke test; top-down still requires a real GPU-machine smoke test.
 
 The backend creates one native pose result, one analysis-ready pose table, one
 visual overlay, and the minimal metadata/provenance needed to reproduce and
@@ -51,8 +54,8 @@ The backend pose inference contract is not responsible for:
 - main UI launch/navigation;
 - existing-run review and downstream run selection.
 
-Parameter optimization is postponed to a later guided workflow. The initial
-implementation uses one established default inference profile.
+Parameter optimization is postponed to a later guided workflow. The
+implementation uses one explicit default profile per supported inference mode.
 
 ## 3. Required Inputs
 
@@ -72,6 +75,81 @@ timing mapping.
 
 Subsystem 02 may read additional Subsystem 01 artifacts when useful for
 diagnostics, but these three files are the required input contract.
+
+### Model specification and CLI
+
+Model selection never relies on an undocumented positional meaning. A
+bottom-up specification contains `inference_mode: bottomup` and one model
+path. A top-down specification contains `inference_mode: topdown`, one centroid
+model path, and one centered-instance model path. Top-down preflight requires
+both paths to exist and be readable, requires distinct resolved paths, and
+reads `training_config.yaml` or `training_config.json` to reconcile the active
+`model_config.head_configs` role with the requested component. Missing or
+unreconcilable roles and profile/mode conflicts fail before SLEAP submission.
+
+Behavior Suite CLI examples are:
+
+```powershell
+python -m pose_inference run --session-root SESSION `
+  --inference-mode bottomup --model-path BOTTOMUP_MODEL
+
+python -m pose_inference run --session-root SESSION `
+  --inference-mode topdown `
+  --centroid-model-path CENTROID_MODEL `
+  --centered-instance-model-path CENTERED_INSTANCE_MODEL
+```
+
+For compatibility, omitting `--inference-mode` while supplying only
+`--model-path` selects bottom-up. Ambiguous bottom-up/top-down flag mixtures
+and incomplete top-down bundles are rejected. If `--profile` is omitted, the
+mode selects `sleapnn_default_profile.yaml` or
+`sleapnn_topdown_default_profile.yaml`.
+
+The project’s captured SLEAP-NN 0.3.0 `predict --help` evidence documents a
+repeatable `--model_paths` option. The inspected SLEAP-NN checkpoint predictor
+implementation loads each training config, identifies its active head, and
+selects paths by `centroid` and `centered_instance` role, so semantic model
+order does not matter. Behavior Suite nevertheless emits centroid first and
+centered-instance second for deterministic audit logs. The generated command
+shapes are:
+
+The separately configured developer runtime inspected during implementation is
+SLEAP-NN 0.2.0. In that version, the checkpoint-oriented equivalent is exposed
+as `sleap-nn track`, while `predict` has an export-runtime interface. Behavior
+Suite deliberately retains the already GPU-validated project command builder
+for the captured 0.3.0 `predict` interface. A top-down smoke run in that target
+GPU environment remains required.
+
+```text
+sleap-nn predict --data_path PREPARED_VIDEO --model_paths BOTTOMUP_MODEL \
+  --output_path POSE_SLP --output_format slp --device cuda --batch_size 4 \
+  --max_instances 4 --peak_threshold 0.05 --integral_refinement integral \
+  --integral_patch_size 5 --max_edge_length_ratio 0.25 \
+  --dist_penalty_weight 1.0 --n_points 10 --min_line_scores 0.25 \
+  --tracking --candidates_method local_queues --max_tracks 2 \
+  --tracking_window_size 240 --min_new_track_points 1 --min_match_points 1 \
+  --track_matching_method hungarian --features keypoints \
+  --scoring_method oks --scoring_reduction robust_quantile \
+  --robust_best_instance 0.95
+
+sleap-nn predict --data_path PREPARED_VIDEO --model_paths CENTROID_MODEL \
+  --model_paths CENTERED_INSTANCE_MODEL --output_path POSE_SLP \
+  --output_format slp --device cuda --batch_size 4 --max_instances 4 \
+  --peak_threshold 0.05 --integral_refinement integral \
+  --integral_patch_size 5 --tracking --candidates_method local_queues \
+  --max_tracks 2 --tracking_window_size 240 --min_new_track_points 1 \
+  --min_match_points 1 --track_matching_method hungarian \
+  --features keypoints --scoring_method oks \
+  --scoring_reduction robust_quantile --robust_best_instance 0.95
+```
+
+Device, batch size, `max_instances`, peak/integral settings, and tracking are
+shared by both modes in the verified CLI. The CLI also exposes top-down
+facilities such as centroid-stage peak overrides and crop sizing, but the
+default profile does not set those optional values. Bottom-up PAF grouping
+options remain exclusive to the bottom-up profile. `max_instances` bounds
+top-down instance consideration, while tracking operates on the resulting
+predicted instances inside the same inference call.
 
 ## 4. Subsystem 01 Contract
 
@@ -193,6 +271,10 @@ is a post-run technical failure under the locked artifact contract.
 `pose_meta.json` contains machine-readable run metadata and pose-quality QC
 summary.
 
+It records `inference_mode`. Bottom-up retains the legacy `model_id` and
+`model_path`; top-down retains a stable bundle id plus separate centroid and
+centered-instance ids and paths.
+
 The pose-quality QC section is limited to pose inference quality. Pipeline
 success, dispatch provenance, and file provenance belong in
 `job_manifest.yaml` and `processing_log.txt`.
@@ -206,6 +288,7 @@ provenance copied from `pose.slp` `labels.provenance`.
 run, including:
 
 - model id;
+- inference mode and separate component identities for top-down bundles;
 - runtime profile id;
 - execution provider and device;
 - inference profile;
@@ -222,7 +305,8 @@ checkpoint models. Effective prediction-stage settings should be read from
 
 - Subsystem 01 input artifact paths and fingerprints;
 - output artifact paths and fingerprints;
-- model path and model metadata fingerprint;
+- model path or separate top-down component paths and model metadata
+  fingerprints;
 - command or structured invocation record;
 - effective SLEAP inference and tracking provenance copied from `pose.slp`
   `labels.provenance` when available;
@@ -236,15 +320,18 @@ and validation messages useful for debugging and audit.
 
 Raw stdout/stderr is diagnostic only. The effective SLEAP prediction-stage
 settings source is `pose.slp` `labels.provenance` when available.
+That provenance is copied without inferring settings from startup text and may
+include the effective model paths/model type, inference configuration, tracking
+configuration, device/system information, and SLEAP-NN/SLEAP-IO versions for
+the two-stage run.
 
-## 7. Default Inference Profile
+## 7. Default Inference Profiles
 
-The initial implementation uses one established default inference profile.
-
-The current validated backend path is bottom-up. Top-down model support is
-required for the full Subsystem 02 MVP, but it is not yet validated by the
-current backend path unless a later implementation task explicitly extends this
-contract.
+The implementation has explicit bottom-up and top-down default profiles. Shared
+device, batching, maximum-instance, expected-animal, technical-QC, and
+provisional-tracking settings are aligned. The bottom-up profile alone contains
+bottom-up PAF grouping options. Each profile declares `inference_mode`, and a
+conflict with the selected model specification is a preflight failure.
 
 The profile may enable SLEAP/SLEAP-NN tracking. When enabled, tracking is run
 inside the inference call and written into `pose.slp`.
@@ -388,9 +475,10 @@ It requires readable `prepared_video.mp4`, `prepare_meta.json`, and
 mapping; opens the prepared video and requires one readable first frame; and,
 when OpenCV reports a positive header frame count, reconciles that header count
 with authoritative S1 metadata. S2 does not repeat S1's sequential full-video
-decode. Preflight also validates the selected model and profile to the extent
-supported by the current bottom-up backend and confirms that the output run
-directory can be created. These are preflight failures. Missing S2 outputs are
+decode. Preflight also validates model-bundle completeness, readability,
+distinct top-down component paths, structurally identifiable model roles, and
+profile/mode agreement, then confirms that the output run directory can be
+created. These are preflight failures. Missing S2 outputs are
 not called preflight failures because they are expected to be absent before
 inference.
 

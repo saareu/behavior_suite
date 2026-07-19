@@ -9,6 +9,7 @@ import typer
 
 from pose_inference.runner import (
     PoseInferenceError,
+    PoseInferenceModelSpec,
     PoseInferenceRequest,
     run_pose_inference,
 )
@@ -36,11 +37,32 @@ def run(
             help="Session root containing preprocess/ or the preprocess directory itself.",
         ),
     ],
-    model_path: Annotated[Path, typer.Option("--model-path", help="SLEAP model path.")],
+    model_path: Annotated[
+        Path | None,
+        typer.Option("--model-path", help="Bottom-up SLEAP model path."),
+    ] = None,
+    inference_mode: Annotated[
+        str | None,
+        typer.Option("--inference-mode", help="Inference mode: bottomup or topdown."),
+    ] = None,
+    centroid_model_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--centroid-model-path",
+            help="Top-down centroid SLEAP model path.",
+        ),
+    ] = None,
+    centered_instance_model_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--centered-instance-model-path",
+            help="Top-down centered-instance SLEAP model path.",
+        ),
+    ] = None,
     profile: Annotated[
-        Path,
+        Path | None,
         typer.Option("--profile", help="SLEAP-NN inference profile YAML."),
-    ] = Path("configs/subsystem_02/sleapnn_default_profile.yaml"),
+    ] = None,
     output_root: Annotated[
         Path | None,
         typer.Option("--output-root", help="Optional parent directory for run outputs."),
@@ -54,14 +76,47 @@ def run(
     """Validate S1 handoff files and run or dry-run one SLEAP-NN inference."""
 
     try:
+        has_topdown_component = (
+            centroid_model_path is not None
+            or centered_instance_model_path is not None
+        )
+        if inference_mode is None and has_topdown_component:
+            raise PoseInferenceError(
+                "Top-down component paths require --inference-mode topdown."
+            )
+        model_spec = None
+        legacy_model_path = model_path
+        if inference_mode is not None:
+            normalized_mode = inference_mode.strip().lower().replace("-", "")
+            if normalized_mode == "topdown" and model_path is not None:
+                raise PoseInferenceError(
+                    "Top-down inference cannot be combined with --model-path; use only "
+                    "the two top-down component flags."
+                )
+            model_spec = PoseInferenceModelSpec(
+                inference_mode=inference_mode,
+                bottomup_model_path=model_path
+                if normalized_mode == "bottomup"
+                else None,
+                centroid_model_path=centroid_model_path,
+                centered_instance_model_path=centered_instance_model_path,
+            )
+            legacy_model_path = None
+        selected_profile = profile or Path(
+            "configs/subsystem_02/sleapnn_topdown_default_profile.yaml"
+            if inference_mode is not None
+            and inference_mode.strip().lower().replace("-", "") == "topdown"
+            else "configs/subsystem_02/sleapnn_default_profile.yaml"
+        )
         result = run_pose_inference(
             PoseInferenceRequest(
                 session_root=session_root,
-                model_path=model_path,
-                profile_path=profile,
+                model_path=legacy_model_path,
+                profile_path=selected_profile,
                 output_root=output_root,
                 run_purpose=run_purpose,
                 dry_run=dry_run,
+                model_spec=model_spec,
             )
         )
     except PoseInferenceError as exc:

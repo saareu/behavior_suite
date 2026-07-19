@@ -13,6 +13,11 @@ preprocess/prepared_sync.npz
 Subsystem 01 remains the source of truth for frame indices, timing, crop
 geometry, prepared-video metadata, and preprocessing provenance.
 
+The inference model selection is explicit. Bottom-up uses one model path.
+Top-down uses a complete bundle containing distinct centroid and
+centered-instance model paths. Both modes use the same output contract and the
+same S1 timing, Parquet, technical-QC, and overlay pipeline.
+
 ## Outputs
 
 Each Subsystem 02 run writes:
@@ -41,6 +46,8 @@ pose_inference/{model-id}__{timestamp}/
 - `pose_meta.json` contains technical pose-inference QC, including a separate
   `pass`, `review_recommended`, or `failed` outcome, not pipeline provenance.
 - `settings_used.yaml` records actual inference parameters.
+- Model metadata records `inference_mode`; top-down metadata retains separate
+  centroid and centered-instance paths and stable component identifiers.
 - `job_manifest.yaml` records input/output contract and provenance.
 - `processing_log.txt` records runtime logs.
 

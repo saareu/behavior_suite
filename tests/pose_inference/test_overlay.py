@@ -6,6 +6,14 @@ import pandas as pd
 import pytest
 
 from pose_inference.overlay import OverlayGenerationError, generate_overlay_video
+from pose_inference.parquet_export import (
+    PoseFrameRecord,
+    PoseInstanceRecord,
+    PoseNodeRecord,
+    TimingLookup,
+    pose_frames_to_rows,
+)
+from pose_inference.pose_qc import compute_pose_qc_from_parquet
 
 
 def _write_video(
@@ -90,6 +98,72 @@ def test_overlay_creates_mp4_and_preserves_video_metadata(tmp_path: Path) -> Non
     assert int(metadata["width"]) == 64
     assert int(metadata["height"]) == 64
     assert 10.0 <= metadata["fps"] <= 14.0
+
+
+def test_synthetic_topdown_records_use_shared_parquet_qc_and_overlay_pipeline(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "prepared_video.mp4"
+    parquet = tmp_path / "pose.parquet"
+    output = tmp_path / "overlay.mp4"
+    _write_video(video, frame_count=2, fps=10.0)
+    frames = []
+    for frame_idx in range(2):
+        instances = []
+        for instance_index, offset in enumerate((0.0, 30.0)):
+            instances.append(
+                PoseInstanceRecord(
+                    instance_index=instance_index,
+                    track=f"track_{instance_index}",
+                    instance_score=0.95,
+                    nodes=(
+                        PoseNodeRecord(
+                            node="nose",
+                            x=10.0 + offset,
+                            y=10.0,
+                            score=0.9,
+                        ),
+                        PoseNodeRecord(
+                            node="tail_base",
+                            x=15.0 + offset,
+                            y=15.0,
+                            score=0.9,
+                        ),
+                    ),
+                )
+            )
+        frames.append(
+            PoseFrameRecord(
+                frame_idx=frame_idx,
+                video_index=0,
+                video_path=str(video),
+                video_fps=10.0,
+                instances=tuple(instances),
+            )
+        )
+    timing = TimingLookup(
+        source="prepared_sync:prepared_time_sec",
+        status="prepared_sync",
+        prepared_frame_idx=(0, 1),
+        prepared_time_sec=(0.0, 0.1),
+        frame_count_used_for_sleap=2,
+    )
+    pd.DataFrame(pose_frames_to_rows(frames, timing)).to_parquet(
+        parquet,
+        engine="pyarrow",
+        index=False,
+    )
+
+    qc = compute_pose_qc_from_parquet(pose_parquet_path=parquet)
+    overlay = generate_overlay_video(
+        prepared_video_path=video,
+        pose_parquet_path=parquet,
+        output_path=output,
+    )
+
+    assert qc.to_metadata()["outcome"] == "pass"
+    assert overlay.status == "generated"
+    assert overlay.frames_written == 2
 
 
 def test_overlay_skips_missing_coordinates_and_writes_frames_without_pose_rows(
