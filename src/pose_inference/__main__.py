@@ -63,6 +63,13 @@ def run(
         Path | None,
         typer.Option("--profile", help="SLEAP-NN inference profile YAML."),
     ] = None,
+    sleap_executable: Annotated[
+        Path | None,
+        typer.Option(
+            "--sleap-executable",
+            help="Optional explicit SLEAP-NN 0.3.x executable path.",
+        ),
+    ] = None,
     output_root: Annotated[
         Path | None,
         typer.Option("--output-root", help="Optional parent directory for run outputs."),
@@ -117,6 +124,7 @@ def run(
                 run_purpose=run_purpose,
                 dry_run=dry_run,
                 model_spec=model_spec,
+                sleap_executable=sleap_executable,
             )
         )
     except PoseInferenceError as exc:

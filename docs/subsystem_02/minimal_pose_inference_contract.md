@@ -48,6 +48,9 @@ pose_inference/{model-id}__{timestamp}/
 - `settings_used.yaml` records actual inference parameters.
 - Model metadata records `inference_mode`; top-down metadata retains separate
   centroid and centered-instance paths and stable component identifiers.
+- Run metadata records the absolute external SLEAP-NN executable and its
+  queried version. The supported execution interface is currently SLEAP-NN
+  0.3.x `predict`.
 - `job_manifest.yaml` records input/output contract and provenance.
 - `processing_log.txt` records runtime logs.
 

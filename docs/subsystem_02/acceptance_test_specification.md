@@ -10,9 +10,8 @@ pose coverage, pose-quality QC, overlay generation, Parquet export, and
 preservation of the Subsystem 01 timing/frame contract.
 
 This is not the full Subsystem 02 MVP acceptance specification. The full MVP
-also requires UI-based inference and review, real GPU validation of the
-implemented top-down path, main UI integration, existing-run review, and
-downstream run selection. See
+also requires UI-based inference and review, main UI integration, existing-run
+review, and downstream run selection. See
 [`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md).
 
 Identity-stable final tracking is not a blocking acceptance criterion for
@@ -40,8 +39,10 @@ workflow.
 
 The backend supports bottom-up inference from one model and top-down inference
 from a centroid plus centered-instance bundle. Bottom-up has real GPU smoke
-evidence. Top-down unit/preflight/metadata coverage is present, but a real GPU
-top-down acceptance run is still required.
+evidence. A SLEAP-NN 0.3.0 top-down smoke also completed inference, Parquet
+export, technical QC, overlay generation, and run discovery with a successful
+`complete_reviewable` result and QC outcome `pass`.
+See [`evidence/topdown_gpu_smoke_v030.md`](evidence/topdown_gpu_smoke_v030.md).
 
 Acceptance exercises these public command forms (with optional `--profile` and
 `--dry-run` as appropriate):
@@ -286,7 +287,6 @@ to launch or use Subsystem 01 preprocessing.
 Full Subsystem 02 MVP acceptance additionally requires:
 
 - UI-based inference and review;
-- real GPU top-down inference validation;
 - main UI launch/navigation integration;
 - opening existing completed Subsystem 02 runs for review, reuse, rerun, and
   downstream selection;

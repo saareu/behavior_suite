@@ -7,15 +7,17 @@ covers how the backend consumes completed Subsystem 01 outputs, runs
 SLEAP/SLEAP-NN inference, and writes the locked pose inference artifact set.
 
 This document is not the full Subsystem 02 MVP scope. The full MVP also
-requires a UI-based inference and review workflow, real GPU validation of the
-implemented top-down path,
+requires a UI-based inference and review workflow,
 existing-run review, Subsystem 01 completion-to-Subsystem 02 transition, and
 main UI integration. See
 [`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md).
 
 The backend supports bottom-up SLEAP/SLEAP-NN inference and a top-down bundle
 containing centroid and centered-instance checkpoints. Bottom-up has passed a
-real GPU smoke test; top-down still requires a real GPU-machine smoke test.
+real GPU smoke test. Top-down has also passed a SLEAP-NN 0.3.0 GPU smoke test
+using a centroid plus centered-instance bundle; pose, Parquet, technical QC,
+overlay, and discovery completed successfully.
+See [`evidence/topdown_gpu_smoke_v030.md`](evidence/topdown_gpu_smoke_v030.md).
 
 The backend creates one native pose result, one analysis-ready pose table, one
 visual overlay, and the minimal metadata/provenance needed to reproduce and
@@ -105,6 +107,11 @@ and incomplete top-down bundles are rejected. If `--profile` is omitted, the
 mode selects `sleapnn_default_profile.yaml` or
 `sleapnn_topdown_default_profile.yaml`.
 
+`--sleap-executable PATH` may explicitly select the runtime and takes
+precedence over a profile `sleap_executable` value, a runtime beside the active
+Python executable, and PATH. The resolved executable must report SLEAP-NN
+0.3.x; other interfaces fail preflight before a run directory is created.
+
 The project’s captured SLEAP-NN 0.3.0 `predict --help` evidence documents a
 repeatable `--model_paths` option. The inspected SLEAP-NN checkpoint predictor
 implementation loads each training config, identifies its active head, and
@@ -117,11 +124,14 @@ The separately configured developer runtime inspected during implementation is
 SLEAP-NN 0.2.0. In that version, the checkpoint-oriented equivalent is exposed
 as `sleap-nn track`, while `predict` has an export-runtime interface. Behavior
 Suite deliberately retains the already GPU-validated project command builder
-for the captured 0.3.0 `predict` interface. A top-down smoke run in that target
-GPU environment remains required.
+for the captured 0.3.x `predict` interface and rejects incompatible 0.2.x
+executables during preflight. The external executable is resolved in this
+order: an explicit CLI/profile path, a `sleap-nn.exe` or `sleap-nn` sibling of
+the active Python executable, then PATH. Its absolute path and queried version
+are recorded in run metadata and logs.
 
 ```text
-sleap-nn predict --data_path PREPARED_VIDEO --model_paths BOTTOMUP_MODEL \
+SLEAP_EXECUTABLE predict --data_path PREPARED_VIDEO --model_paths BOTTOMUP_MODEL \
   --output_path POSE_SLP --output_format slp --device cuda --batch_size 4 \
   --max_instances 4 --peak_threshold 0.05 --integral_refinement integral \
   --integral_patch_size 5 --max_edge_length_ratio 0.25 \
@@ -132,7 +142,7 @@ sleap-nn predict --data_path PREPARED_VIDEO --model_paths BOTTOMUP_MODEL \
   --scoring_method oks --scoring_reduction robust_quantile \
   --robust_best_instance 0.95
 
-sleap-nn predict --data_path PREPARED_VIDEO --model_paths CENTROID_MODEL \
+SLEAP_EXECUTABLE predict --data_path PREPARED_VIDEO --model_paths CENTROID_MODEL \
   --model_paths CENTERED_INSTANCE_MODEL --output_path POSE_SLP \
   --output_format slp --device cuda --batch_size 4 --max_instances 4 \
   --peak_threshold 0.05 --integral_refinement integral \
@@ -191,6 +201,12 @@ pose_inference/{model-id}__{timestamp}/
 ```
 
 No other standard artifacts are part of the locked Subsystem 02 contract.
+
+Top-down run IDs use
+`topdown-{centroid-name}-{centered-instance-name}-{path-hash}`. Names are
+sanitized and bounded, and the deterministic hash always incorporates both
+resolved component paths in role order. Existing legacy run names remain
+discoverable.
 
 The following are not standard outputs:
 

@@ -10,8 +10,11 @@ import hashlib
 import importlib.metadata
 import json
 import math
+import os
 import re
+import shutil
 import subprocess
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -125,6 +128,15 @@ class PoseInferenceRequest:
     dry_run: bool = False
     timestamp: str | None = None
     model_spec: PoseInferenceModelSpec | None = None
+    sleap_executable: Path | None = None
+
+
+@dataclass(frozen=True)
+class SleapRuntime:
+    """Resolved external SLEAP-NN command runtime."""
+
+    executable_path: Path
+    version: str
 
 
 @dataclass(frozen=True)
@@ -202,6 +214,12 @@ PoseQcComputer = Callable[..., PoseQcSummary]
 OverlayGenerator = Callable[..., OverlaySummary]
 SleapProvenanceReader = Callable[[Path], SleapProvenanceSummary]
 
+SUPPORTED_SLEAP_NN_MAJOR_MINOR = (0, 3)
+_SLEAP_VERSION_PATTERN = re.compile(
+    r"\bsleap(?:-nn)?\s+v?(\d+)\.(\d+)(?:\.(\d+))?\b",
+    flags=re.IGNORECASE,
+)
+
 
 def _now_timestamp() -> str:
     return datetime.now().strftime("%Y%m%dT%H%M%S")
@@ -219,6 +237,140 @@ def _sanitize_identifier(value: str) -> str:
 
 def _path_text(path: Path) -> str:
     return str(path.resolve())
+
+
+def _validate_sleap_executable(path: Path, *, source: str) -> Path:
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        raise PoseInferenceError(
+            f"SLEAP-NN executable selected from {source} does not exist or is not "
+            f"a file: {resolved}"
+        )
+    if not os.access(resolved, os.R_OK):
+        raise PoseInferenceError(
+            f"SLEAP-NN executable selected from {source} is not readable: {resolved}"
+        )
+    if not os.access(resolved, os.X_OK):
+        raise PoseInferenceError(
+            f"SLEAP-NN executable selected from {source} is not executable: {resolved}"
+        )
+    try:
+        with resolved.open("rb") as stream:
+            stream.read(1)
+    except OSError as exc:
+        raise PoseInferenceError(
+            f"SLEAP-NN executable selected from {source} is unreadable: "
+            f"{resolved}: {exc}"
+        ) from exc
+    return resolved
+
+
+def _resolve_sleap_executable(
+    *,
+    explicit_path: Path | None,
+    profile: Mapping[str, Any],
+) -> Path:
+    configured = explicit_path
+    configured_source = "the explicit CLI/request value"
+    if configured is None:
+        profile_value = profile.get("sleap_executable")
+        if profile_value is not None:
+            if not isinstance(profile_value, str | Path) or not str(profile_value).strip():
+                raise PoseInferenceError(
+                    "Inference profile sleap_executable must be a non-empty path."
+                )
+            configured = Path(profile_value)
+            configured_source = "the inference profile"
+    if configured is not None:
+        return _validate_sleap_executable(
+            Path(configured),
+            source=configured_source,
+        )
+
+    python_dir = Path(sys.executable).expanduser().resolve().parent
+    for executable_name in ("sleap-nn.exe", "sleap-nn"):
+        sibling = python_dir / executable_name
+        if sibling.is_file():
+            return _validate_sleap_executable(
+                sibling,
+                source=f"the Python executable directory ({python_dir})",
+            )
+
+    path_match = shutil.which("sleap-nn")
+    if path_match:
+        return _validate_sleap_executable(
+            Path(path_match),
+            source="PATH",
+        )
+    raise PoseInferenceError(
+        "Could not locate a SLEAP-NN executable. Provide --sleap-executable, "
+        "install sleap-nn beside the active Python executable, or add sleap-nn "
+        "to PATH."
+    )
+
+
+def _query_sleap_version(
+    executable_path: Path,
+    *,
+    version_runner: SubprocessRunner,
+) -> str:
+    try:
+        completed = version_runner(
+            [_path_text(executable_path), "--version"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise PoseInferenceError(
+            f"Could not query SLEAP-NN executable version: {executable_path}: {exc}"
+        ) from exc
+    stdout = completed.stdout or ""
+    stderr = completed.stderr or ""
+    output = "\n".join(part for part in (stdout.strip(), stderr.strip()) if part)
+    if completed.returncode != 0:
+        detail = f" Output: {output}" if output else ""
+        raise PoseInferenceError(
+            "SLEAP-NN version query failed for "
+            f"{executable_path} with exit code {completed.returncode}.{detail}"
+        )
+    match = _SLEAP_VERSION_PATTERN.search(output)
+    if match is None:
+        raise PoseInferenceError(
+            "Could not parse SLEAP-NN version from "
+            f"'{executable_path} --version'. Output: {output or '<empty>'}"
+        )
+    major = int(match.group(1))
+    minor = int(match.group(2))
+    patch = int(match.group(3) or 0)
+    version = f"{major}.{minor}.{patch}"
+    if (major, minor) != SUPPORTED_SLEAP_NN_MAJOR_MINOR:
+        raise PoseInferenceError(
+            f"SLEAP-NN {version} at {executable_path} is incompatible with the "
+            "current command interface. Behavior Suite currently requires "
+            "SLEAP-NN 0.3.x; SLEAP-NN 0.2.x uses 'track' instead of the "
+            "supported 'predict' interface."
+        )
+    return version
+
+
+def _resolve_sleap_runtime(
+    *,
+    explicit_path: Path | None,
+    profile: Mapping[str, Any],
+    version_runner: SubprocessRunner,
+) -> SleapRuntime:
+    executable_path = _resolve_sleap_executable(
+        explicit_path=explicit_path,
+        profile=profile,
+    )
+    return SleapRuntime(
+        executable_path=executable_path,
+        version=_query_sleap_version(
+            executable_path,
+            version_runner=version_runner,
+        ),
+    )
 
 
 def _load_json_object(path: Path) -> Mapping[str, Any]:
@@ -654,17 +806,16 @@ def _model_bundle_id(spec: PoseInferenceModelSpec) -> str:
     if spec.inference_mode == "bottomup":
         return _model_identity(_model_paths(spec)[0])
     centroid, centered_instance = _model_paths(spec)
-    value = _sanitize_identifier(
+    readable = _sanitize_identifier(
         "topdown-"
         f"{_component_model_identity(centroid)}-"
         f"{_component_model_identity(centered_instance)}"
     )
-    if len(value) <= 80:
-        return value
     digest = hashlib.sha256(
         f"{_path_text(centroid)}\0{_path_text(centered_instance)}".encode()
     ).hexdigest()[:10]
-    return f"{value[:69].rstrip('._-')}-{digest}"
+    bounded_readable = readable[:69].rstrip("._-") or "topdown"
+    return f"{bounded_readable}-{digest}"
 
 
 def _model_metadata(spec: PoseInferenceModelSpec, model_id: str) -> dict[str, Any]:
@@ -686,6 +837,13 @@ def _model_metadata(spec: PoseInferenceModelSpec, model_id: str) -> dict[str, An
         "model_path": _path_text(centered_instance),
     }
     return payload
+
+
+def _sleap_runtime_metadata(runtime: SleapRuntime) -> dict[str, str]:
+    return {
+        "executable_path": _path_text(runtime.executable_path),
+        "version": runtime.version,
+    }
 
 
 def _profile_fraction(profile: Mapping[str, Any], key: str, default: float) -> float:
@@ -780,6 +938,7 @@ def build_sleap_predict_command(
     handoff: S1Handoff,
     model_path: Path | None = None,
     model_spec: PoseInferenceModelSpec | None = None,
+    sleap_executable: Path | None = None,
     profile: Mapping[str, Any],
     pose_slp_path: Path,
 ) -> tuple[str, ...]:
@@ -804,9 +963,13 @@ def build_sleap_predict_command(
             centered_instance_model_path=model_spec.centered_instance_model_path,
         )
     _validate_profile_mode(profile, model_spec)
+    resolved_executable = _resolve_sleap_executable(
+        explicit_path=sleap_executable,
+        profile=profile,
+    )
 
     command = [
-        "sleap-nn",
+        _path_text(resolved_executable),
         "predict",
         "--data_path",
         _path_text(handoff.prepared_video),
@@ -1015,6 +1178,7 @@ def _settings_payload(
     profile_path: Path,
     model_spec: PoseInferenceModelSpec,
     model_id: str,
+    sleap_runtime: SleapRuntime,
     profile: Mapping[str, Any],
     command: Sequence[str],
 ) -> dict[str, Any]:
@@ -1023,6 +1187,7 @@ def _settings_payload(
         "schema_version": SETTINGS_SCHEMA_VERSION,
         "inference_mode": model_spec.inference_mode,
         "model": _model_metadata(model_spec, model_id),
+        "sleap_runtime": _sleap_runtime_metadata(sleap_runtime),
         "profile": {
             "profile_path": _path_text(profile_path),
             "profile_id": profile.get("profile_id"),
@@ -1054,6 +1219,7 @@ def _pose_meta_payload(
     paths: RunPaths,
     model_spec: PoseInferenceModelSpec,
     model_id: str,
+    sleap_runtime: SleapRuntime,
     profile_path: Path,
     profile: Mapping[str, Any],
     dry_run: bool,
@@ -1074,6 +1240,7 @@ def _pose_meta_payload(
         "status": status,
         "dry_run": dry_run,
         "inference_mode": model_spec.inference_mode,
+        "sleap_runtime": _sleap_runtime_metadata(sleap_runtime),
         "input": {
             "session_root": _path_text(handoff.session_root),
             "preprocess_dir": _path_text(handoff.preprocess_dir),
@@ -1119,6 +1286,7 @@ def _manifest_payload(
     paths: RunPaths,
     model_spec: PoseInferenceModelSpec,
     model_id: str,
+    sleap_runtime: SleapRuntime,
     profile_path: Path,
     command: Sequence[str],
     dry_run: bool,
@@ -1147,6 +1315,7 @@ def _manifest_payload(
         "status": status,
         "dry_run": dry_run,
         "inference_mode": model_spec.inference_mode,
+        "sleap_runtime": _sleap_runtime_metadata(sleap_runtime),
         "input": {
             "session_root": _path_text(handoff.session_root),
             "preprocess_dir": _path_text(handoff.preprocess_dir),
@@ -1192,6 +1361,7 @@ def _write_processing_log(
     paths: RunPaths,
     model_spec: PoseInferenceModelSpec,
     model_id: str,
+    sleap_runtime: SleapRuntime,
     command: Sequence[str],
     dry_run: bool,
     status: str,
@@ -1211,6 +1381,8 @@ def _write_processing_log(
         f"dry_run: {dry_run}",
         f"inference_mode: {model_spec.inference_mode}",
         f"model_id: {model_id}",
+        f"sleap_executable_path: {_path_text(sleap_runtime.executable_path)}",
+        f"sleap_executable_version: {sleap_runtime.version}",
         f"preprocess_dir: {_path_text(handoff.preprocess_dir)}",
         f"prepared_video: {_path_text(handoff.prepared_video)}",
         f"prepare_meta: {_path_text(handoff.prepare_meta)}",
@@ -1309,6 +1481,7 @@ def run_pose_inference(
     request: PoseInferenceRequest,
     *,
     subprocess_runner: SubprocessRunner = subprocess.run,
+    version_runner: SubprocessRunner = subprocess.run,
     parquet_exporter: ParquetExporter = export_pose_parquet,
     pose_qc_computer: PoseQcComputer = compute_pose_qc_from_parquet,
     overlay_generator: OverlayGenerator = generate_overlay_video,
@@ -1321,6 +1494,11 @@ def run_pose_inference(
     profile_path = Path(request.profile_path).expanduser().resolve()
     profile = load_inference_profile(profile_path)
     pose_qc_options = _pose_qc_options(profile)
+    sleap_runtime = _resolve_sleap_runtime(
+        explicit_path=request.sleap_executable,
+        profile=profile,
+        version_runner=version_runner,
+    )
     model_spec = _resolve_model_spec(request)
     _validate_profile_mode(profile, model_spec)
 
@@ -1345,6 +1523,7 @@ def run_pose_inference(
     command = build_sleap_predict_command(
         handoff=handoff,
         model_spec=model_spec,
+        sleap_executable=sleap_runtime.executable_path,
         profile=profile,
         pose_slp_path=paths.pose_slp,
     )
@@ -1468,6 +1647,7 @@ def run_pose_inference(
             profile_path=profile_path,
             model_spec=model_spec,
             model_id=model_id,
+            sleap_runtime=sleap_runtime,
             profile=profile,
             command=command,
         ),
@@ -1482,6 +1662,7 @@ def run_pose_inference(
             paths=paths,
             model_spec=model_spec,
             model_id=model_id,
+            sleap_runtime=sleap_runtime,
             profile_path=profile_path,
             profile=profile,
             dry_run=request.dry_run,
@@ -1505,6 +1686,7 @@ def run_pose_inference(
             paths=paths,
             model_spec=model_spec,
             model_id=model_id,
+            sleap_runtime=sleap_runtime,
             profile_path=profile_path,
             command=command,
             dry_run=request.dry_run,
@@ -1524,6 +1706,7 @@ def run_pose_inference(
         paths=paths,
         model_spec=model_spec,
         model_id=model_id,
+        sleap_runtime=sleap_runtime,
         command=command,
         dry_run=request.dry_run,
         status=status,

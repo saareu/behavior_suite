@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
+import pose_inference.runner as runner_module
 from pose_inference import (
     PoseInferenceError,
     PoseInferenceModelSpec,
@@ -25,7 +27,11 @@ from pose_inference.pose_qc import PoseQcError, PoseQcSummary
 from pose_inference.runner import (
     SLEAP_PROVENANCE_NOTE,
     SleapProvenanceSummary,
+    SleapRuntime,
+    _model_bundle_id,
     _pose_qc_options,
+    _query_sleap_version,
+    _resolve_sleap_executable,
 )
 from preprocess.sync_writer import build_prepared_sync, write_prepared_sync_npz
 
@@ -40,6 +46,35 @@ FORBIDDEN_ARTIFACT_NAMES = (
     "tracking_report.json",
     "track_identity_map.json",
 )
+
+
+@pytest.fixture(autouse=True)
+def stable_sleap_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> SleapRuntime:
+    executable = tmp_path / "runtime" / "sleap-nn.exe"
+    executable.parent.mkdir()
+    executable.write_bytes(b"fake executable")
+    runtime = SleapRuntime(
+        executable_path=executable.resolve(),
+        version="0.3.0",
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "_resolve_sleap_runtime",
+        lambda **_kwargs: runtime,
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "_resolve_sleap_executable",
+        lambda *, explicit_path, profile: (
+            Path(explicit_path).resolve()
+            if explicit_path is not None
+            else runtime.executable_path
+        ),
+    )
+    return runtime
 
 
 def _write_s1_handoff(
@@ -136,6 +171,174 @@ def _topdown_model_spec(tmp_path: Path) -> PoseInferenceModelSpec:
             tmp_path, "centered instance model", "centered_instance"
         ),
     )
+
+
+def test_explicit_sleap_executable_wins_over_sibling_and_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    explicit = tmp_path / "explicit" / "sleap-nn.exe"
+    explicit.parent.mkdir()
+    explicit.write_bytes(b"explicit")
+    python_dir = tmp_path / "python"
+    python_dir.mkdir()
+    sibling = python_dir / "sleap-nn.exe"
+    sibling.write_bytes(b"sibling")
+    path_match = tmp_path / "path" / "sleap-nn.exe"
+    path_match.parent.mkdir()
+    path_match.write_bytes(b"path")
+    monkeypatch.setattr(runner_module.sys, "executable", str(python_dir / "python.exe"))
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: str(path_match))
+
+    resolved = _resolve_sleap_executable(
+        explicit_path=explicit,
+        profile={"sleap_executable": str(path_match)},
+    )
+
+    assert resolved == explicit.resolve()
+
+
+def test_profile_sleap_executable_is_used_when_cli_value_is_absent(
+    tmp_path: Path,
+) -> None:
+    configured = tmp_path / "configured" / "sleap-nn.exe"
+    configured.parent.mkdir()
+    configured.write_bytes(b"configured")
+
+    resolved = _resolve_sleap_executable(
+        explicit_path=None,
+        profile={"sleap_executable": str(configured)},
+    )
+
+    assert resolved == configured.resolve()
+
+
+def test_sibling_sleap_executable_is_selected_before_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    python_dir = tmp_path / "python"
+    python_dir.mkdir()
+    sibling = python_dir / "sleap-nn.exe"
+    sibling.write_bytes(b"sibling")
+    path_match = tmp_path / "path" / "sleap-nn.exe"
+    path_match.parent.mkdir()
+    path_match.write_bytes(b"path")
+    monkeypatch.setattr(runner_module.sys, "executable", str(python_dir / "python.exe"))
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: str(path_match))
+
+    resolved = _resolve_sleap_executable(explicit_path=None, profile={})
+
+    assert resolved == sibling.resolve()
+
+
+def test_path_sleap_executable_is_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    python_dir = tmp_path / "python"
+    python_dir.mkdir()
+    path_match = tmp_path / "path" / "sleap-nn.exe"
+    path_match.parent.mkdir()
+    path_match.write_bytes(b"path")
+    monkeypatch.setattr(runner_module.sys, "executable", str(python_dir / "python.exe"))
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: str(path_match))
+
+    resolved = _resolve_sleap_executable(explicit_path=None, profile={})
+
+    assert resolved == path_match.resolve()
+
+
+def test_missing_sleap_executable_fails_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        runner_module.sys,
+        "executable",
+        str(tmp_path / "python" / "python.exe"),
+    )
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: None)
+
+    with pytest.raises(PoseInferenceError, match="--sleap-executable"):
+        _resolve_sleap_executable(explicit_path=None, profile={})
+
+
+@pytest.mark.parametrize("reported_version", ["0.2.0", "0.4.0", "1.0.0"])
+def test_incompatible_sleap_version_is_rejected(
+    tmp_path: Path,
+    reported_version: str,
+) -> None:
+    executable = tmp_path / "sleap-nn.exe"
+    executable.write_bytes(b"runtime")
+
+    def version_runner(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=f"sleap-nn {reported_version}\n",
+            stderr="",
+        )
+
+    with pytest.raises(PoseInferenceError, match="requires SLEAP-NN 0.3.x"):
+        _query_sleap_version(executable, version_runner=version_runner)
+
+
+def test_sleap_version_03_is_accepted(tmp_path: Path) -> None:
+    executable = tmp_path / "sleap-nn.exe"
+    executable.write_bytes(b"runtime")
+
+    def version_runner(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="sleap-nn 0.3.7\n",
+            stderr="",
+        )
+
+    assert _query_sleap_version(executable, version_runner=version_runner) == "0.3.7"
+
+
+def test_topdown_model_id_is_stable_bounded_and_always_hashed(tmp_path: Path) -> None:
+    spec = PoseInferenceModelSpec(
+        inference_mode="topdown",
+        centroid_model_path=tmp_path / ("centroid_" + "a" * 100),
+        centered_instance_model_path=tmp_path / ("instance_" + "b" * 100),
+    )
+
+    first = _model_bundle_id(spec)
+    second = _model_bundle_id(spec)
+
+    assert first == second
+    assert first.startswith("topdown-centroid_")
+    assert re.search(r"-[0-9a-f]{10}$", first)
+    assert re.fullmatch(r"[A-Za-z0-9_.-]+", first)
+    assert len(first) <= 80
+
+
+def test_topdown_model_id_hash_distinguishes_roles_and_parent_paths(
+    tmp_path: Path,
+) -> None:
+    first = PoseInferenceModelSpec(
+        inference_mode="topdown",
+        centroid_model_path=tmp_path / "bundle_a" / "centroid",
+        centered_instance_model_path=tmp_path / "bundle_a" / "instance",
+    )
+    same_names_different_parent = PoseInferenceModelSpec(
+        inference_mode="topdown",
+        centroid_model_path=tmp_path / "bundle_b" / "centroid",
+        centered_instance_model_path=tmp_path / "bundle_b" / "instance",
+    )
+    swapped = PoseInferenceModelSpec(
+        inference_mode="topdown",
+        centroid_model_path=first.centered_instance_model_path,
+        centered_instance_model_path=first.centroid_model_path,
+    )
+
+    first_id = _model_bundle_id(first)
+    assert re.fullmatch(r"topdown-centroid-instance-[0-9a-f]{10}", first_id)
+    assert first_id != _model_bundle_id(same_names_different_parent)
+    assert first_id != _model_bundle_id(swapped)
 
 
 def test_s1_handoff_validation_accepts_session_root_and_preprocess_dir(
@@ -238,6 +441,7 @@ def test_s1_timing_array_mismatch_blocks_inference_submission(tmp_path: Path) ->
 
 def test_generated_command_writes_to_pose_slp_and_keeps_tracking_in_same_call(
     tmp_path: Path,
+    stable_sleap_runtime: SleapRuntime,
 ) -> None:
     _write_s1_handoff(tmp_path)
     handoff = validate_s1_handoff(tmp_path)
@@ -251,7 +455,10 @@ def test_generated_command_writes_to_pose_slp_and_keeps_tracking_in_same_call(
         pose_slp_path=pose_slp,
     )
 
-    assert command[:2] == ("sleap-nn", "predict")
+    assert command[:2] == (
+        str(stable_sleap_runtime.executable_path),
+        "predict",
+    )
     assert "--data_path" in command
     assert "--model_paths" in command
     assert "--output_path" in command
@@ -264,11 +471,14 @@ def test_generated_command_writes_to_pose_slp_and_keeps_tracking_in_same_call(
     assert "--output-path" not in command
     assert "--model-path" not in command
     assert "--max-tracks" not in command
-    assert command.count("sleap-nn") == 1
+    assert command.count(str(stable_sleap_runtime.executable_path)) == 1
     assert not any(name in " ".join(command) for name in FORBIDDEN_ARTIFACT_NAMES)
 
 
-def test_bottomup_command_tokens_remain_exact(tmp_path: Path) -> None:
+def test_bottomup_command_tokens_remain_exact(
+    tmp_path: Path,
+    stable_sleap_runtime: SleapRuntime,
+) -> None:
     _write_s1_handoff(tmp_path)
     handoff = validate_s1_handoff(tmp_path)
     model = _model_path(tmp_path)
@@ -282,7 +492,7 @@ def test_bottomup_command_tokens_remain_exact(tmp_path: Path) -> None:
     )
 
     assert command == (
-        "sleap-nn",
+        str(stable_sleap_runtime.executable_path),
         "predict",
         "--data_path",
         str(handoff.prepared_video.resolve()),
@@ -338,6 +548,7 @@ def test_bottomup_command_tokens_remain_exact(tmp_path: Path) -> None:
 
 def test_topdown_command_contains_both_role_paths_and_shared_settings(
     tmp_path: Path,
+    stable_sleap_runtime: SleapRuntime,
 ) -> None:
     _write_s1_handoff(tmp_path)
     handoff = validate_s1_handoff(tmp_path)
@@ -353,6 +564,7 @@ def test_topdown_command_contains_both_role_paths_and_shared_settings(
     model_flag_indices = [
         index for index, token in enumerate(command) if token == "--model_paths"
     ]
+    assert command[0] == str(stable_sleap_runtime.executable_path)
     assert len(model_flag_indices) == 2
     assert command[model_flag_indices[0] + 1] == str(
         spec.centroid_model_path.resolve()
@@ -486,6 +698,7 @@ def test_dry_run_creates_minimal_records_without_external_sleap(
 
 def test_topdown_dry_run_records_bundle_and_does_not_launch_inference(
     tmp_path: Path,
+    stable_sleap_runtime: SleapRuntime,
 ) -> None:
     _write_s1_handoff(tmp_path)
     spec = _topdown_model_spec(tmp_path)
@@ -511,6 +724,10 @@ def test_topdown_dry_run_records_bundle_and_does_not_launch_inference(
     log_text = result.processing_log_path.read_text(encoding="utf-8")
     for payload in (pose_meta, settings, manifest):
         assert payload["inference_mode"] == "topdown"
+        assert payload["sleap_runtime"] == {
+            "executable_path": str(stable_sleap_runtime.executable_path),
+            "version": "0.3.0",
+        }
         assert payload["model"]["centroid"]["model_path"] == str(
             spec.centroid_model_path.resolve()
         )
@@ -525,6 +742,11 @@ def test_topdown_dry_run_records_bundle_and_does_not_launch_inference(
     assert "inference_mode: topdown" in log_text
     assert "centroid_model_path:" in log_text
     assert "centered_instance_model_path:" in log_text
+    assert (
+        f"sleap_executable_path: {stable_sleap_runtime.executable_path}"
+        in log_text
+    )
+    assert "sleap_executable_version: 0.3.0" in log_text
 
 
 @pytest.mark.parametrize(
@@ -1283,6 +1505,44 @@ def test_cli_explicit_bottomup_dry_run(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     assert "Status: dry_run_complete" in result.output
+
+
+def test_cli_explicit_sleap_executable_is_forwarded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_s1_handoff(tmp_path)
+    model_path = _model_path(tmp_path)
+    explicit = tmp_path / "explicit" / "sleap-nn.exe"
+    explicit.parent.mkdir()
+    explicit.write_bytes(b"explicit")
+    captured: dict[str, Path | None] = {}
+
+    def capture_runtime(**kwargs: Any) -> SleapRuntime:
+        captured["explicit_path"] = kwargs["explicit_path"]
+        return SleapRuntime(explicit.resolve(), "0.3.2")
+
+    monkeypatch.setattr(runner_module, "_resolve_sleap_runtime", capture_runtime)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            "--session-root",
+            str(tmp_path),
+            "--model-path",
+            str(model_path),
+            "--sleap-executable",
+            str(explicit),
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["explicit_path"] == explicit
+    run_dir = next((tmp_path / "pose_inference").iterdir())
+    settings = yaml.safe_load((run_dir / "settings_used.yaml").read_text())
+    assert settings["command"][0] == str(explicit.resolve())
 
 
 def test_cli_complete_topdown_pair_is_accepted(tmp_path: Path) -> None:
