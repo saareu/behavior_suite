@@ -18,7 +18,8 @@ Subsystem 02 is under active MVP development. The implementation covers both
 bottom-up and top-down backend inference paths and the minimal backend artifact
 contract. Bottom-up has passed a real GPU smoke test; top-down has passed a
 real GPU smoke test using a centroid plus centered-instance bundle
-and SLEAP-NN 0.3.0. The full MVP is not complete yet.
+and SLEAP-NN 0.3.0. A PySide6 MVP workspace is now integrated into the main
+application; final field acceptance is not yet recorded.
 
 Implemented backend pieces:
 
@@ -33,13 +34,30 @@ Implemented backend pieces:
 - pre-submission validation of the S1 frame/sync contract;
 - post-run technical-QC outcomes and bounded review intervals;
 - existing-run discovery.
+- main-application S1/S2 navigation with preserved session context;
+- automatic transition to the same-session S2 screen after successful S1
+  completion, without automatic inference submission;
+- existing-session browsing and metadata-only run listing/details;
+- bottom-up and top-down profile-driven configuration and asynchronous
+  submission;
+- overlay/folder actions, settings-copy rerun support, and transient technically
+  complete run selection for the S3 placeholder;
+- QSettings convenience persistence for existing model/profile/runtime paths.
+- validation-only authoritative backend preflight, which reports the S1
+  handoff, model/profile consistency, resolved SLEAP-NN executable/version, and
+  prospective command without creating a run directory or launching inference;
+- generation-token protection for asynchronous progress/results and action-time
+  revalidation of the selected S3 handoff artifacts and QC outcome.
 
-Not-yet-complete MVP pieces:
+Not-yet-complete release/field-validation pieces:
 
-- Subsystem 02 UI workspace;
-- main UI launch and navigation;
-- Subsystem 01 completion to Subsystem 02 transition;
-- existing-run review, reuse, rerun, and downstream selection UI.
+- field acceptance of the integrated S2 workspace on the supported Windows
+  runtime;
+- percentage progress and live subprocess-log streaming beyond the implemented
+  validating/inference/export/QC/overlay stage callbacks;
+- safe active-subprocess cancellation. Cancellation remains omitted because the
+  backend still executes one blocking pipeline call and force termination
+  would not reliably preserve terminal metadata/logging.
 
 ## Required MVP Workflow
 
@@ -58,6 +76,19 @@ The workflow has two required entry modes:
 The main UI must expose Subsystem 02 from the same launch/navigation surface as
 Subsystem 01. Subsystem 02 should not be a separate hidden command-line-only
 workflow for the MVP.
+
+The implemented desktop workspace uses run discovery metadata only for listing
+and selection; it does not load `pose.slp` or `pose.parquet`. It shows S1
+handoff/frame/timing context, existing-run status/artifacts/QC/review intervals,
+profile-driven bottom-up or top-down configuration, and a copyable technical
+details panel. The authoritative backend preflight and full run execute in the
+existing Qt worker abstraction with coarse stage callbacks and an indeterminate
+progress indicator.
+
+`review_recommended` is displayed as successful and optionally reviewable, not
+failed. Both `pass` and `review_recommended` technically complete runs can form
+a transient S3 navigation handoff. Failed/incomplete/missing-artifact runs
+cannot. No permanent downstream-approval artifact is written.
 
 ## Backend Contract
 

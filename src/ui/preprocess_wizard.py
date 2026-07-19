@@ -33,6 +33,8 @@ class PreprocessWizard(QWidget):
     """Render workflow steps while the controller owns validation state."""
 
     unexpected_error = Signal(str)
+    session_changed = Signal(object)
+    preprocessing_completed = Signal(object)
 
     def __init__(self, controller: PreprocessSetupController) -> None:
         super().__init__()
@@ -70,7 +72,10 @@ class PreprocessWizard(QWidget):
             page.status_message.connect(self._set_status)
             page.error_message.connect(self._set_error)
             page.unexpected_error.connect(self.unexpected_error.emit)
-        self.project_page.project_changed.connect(self._refresh_probe_pages)
+        self.project_page.project_changed.connect(self._project_changed)
+        self.run_validate_page.preprocessing_completed.connect(
+            self.preprocessing_completed.emit
+        )
         self.raw_video_page.raw_probe_changed.connect(self._refresh_probe_pages)
         self.timing_page.raw_probe_changed.connect(self._refresh_probe_pages)
 
@@ -128,6 +133,12 @@ class PreprocessWizard(QWidget):
         self.raw_video_page.on_activated()
         self.timing_page.refresh_from_state()
         self._update_buttons()
+
+    def _project_changed(self) -> None:
+        self._refresh_probe_pages()
+        project_dir = self.controller.state.project_dir
+        if project_dir is not None:
+            self.session_changed.emit(project_dir)
 
     def _current_interactive_page(self):
         index = self.pages.currentIndex()

@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -88,6 +88,44 @@ SLEAP_PROVENANCE_FIELDS = {
 
 class PoseInferenceError(RuntimeError):
     """Expected Subsystem 02 input, dispatch, or artifact error."""
+
+
+PREFLIGHT_STAGE_NAMES = (
+    "S1 handoff",
+    "prepared-video/frame/timing contract",
+    "inference mode and model bundle",
+    "profile compatibility",
+    "SLEAP executable resolution",
+    "SLEAP version compatibility",
+    "command construction",
+)
+
+
+@dataclass(frozen=True)
+class PoseInferencePreflightStage:
+    """Status and optional detail for one ordered validation-only stage."""
+
+    name: str
+    status: str
+    detail: str | None = None
+
+
+@dataclass(frozen=True)
+class PoseInferencePreflightFailure:
+    """Structured validation failure retained on ``PoseInferencePreflightError``."""
+
+    stages: tuple[PoseInferencePreflightStage, ...]
+    error: str
+    resolved_executable_path: Path | None = None
+    found_sleap_version: str | None = None
+
+
+class PoseInferencePreflightError(PoseInferenceError):
+    """Authoritative validation-only failure with ordered stage results."""
+
+    def __init__(self, report: PoseInferencePreflightFailure) -> None:
+        super().__init__(report.error)
+        self.report = report
 
 
 class SleapProvenanceError(RuntimeError):
@@ -171,6 +209,35 @@ class PoseInferenceResult:
 
 
 @dataclass(frozen=True)
+class PoseInferencePreflightResult:
+    """Validated inputs and prospective command without creating a run."""
+
+    s1_handoff: S1Handoff
+    profile_path: Path
+    profile_id: str | None
+    inference_mode: str
+    model_id: str
+    sleap_runtime: SleapRuntime
+    prospective_run_id: str
+    prospective_run_dir: Path
+    command: tuple[str, ...]
+    stages: tuple[PoseInferencePreflightStage, ...] = ()
+
+
+@dataclass(frozen=True)
+class _ValidatedPoseInferenceRequest:
+    """Internal validated inputs shared by preflight-only and execution paths."""
+
+    handoff: S1Handoff
+    profile_path: Path
+    profile: Mapping[str, Any]
+    pose_qc_options: Mapping[str, Any]
+    sleap_runtime: SleapRuntime
+    model_spec: PoseInferenceModelSpec
+    model_id: str
+
+
+@dataclass(frozen=True)
 class SleapProvenanceSummary:
     """Compact effective SLEAP/SLEAP-NN provenance copied from pose.slp."""
 
@@ -213,12 +280,26 @@ ParquetExporter = Callable[..., ParquetExportSummary]
 PoseQcComputer = Callable[..., PoseQcSummary]
 OverlayGenerator = Callable[..., OverlaySummary]
 SleapProvenanceReader = Callable[[Path], SleapProvenanceSummary]
+PoseInferenceProgressCallback = Callable[[str, Path | None], None]
+PoseInferencePreflightStageCallback = Callable[[str, str, str | None], None]
 
 SUPPORTED_SLEAP_NN_MAJOR_MINOR = (0, 3)
 _SLEAP_VERSION_PATTERN = re.compile(
     r"\bsleap(?:-nn)?\s+v?(\d+)\.(\d+)(?:\.(\d+))?\b",
     flags=re.IGNORECASE,
 )
+
+
+class _IncompatibleSleapVersionError(PoseInferenceError):
+    def __init__(self, version: str, executable_path: Path) -> None:
+        self.version = version
+        self.executable_path = executable_path
+        super().__init__(
+            f"SLEAP-NN {version} at {executable_path} is incompatible with the "
+            "current command interface. Behavior Suite currently requires "
+            "SLEAP-NN 0.3.x; SLEAP-NN 0.2.x uses 'track' instead of the "
+            "supported 'predict' interface."
+        )
 
 
 def _now_timestamp() -> str:
@@ -345,12 +426,7 @@ def _query_sleap_version(
     patch = int(match.group(3) or 0)
     version = f"{major}.{minor}.{patch}"
     if (major, minor) != SUPPORTED_SLEAP_NN_MAJOR_MINOR:
-        raise PoseInferenceError(
-            f"SLEAP-NN {version} at {executable_path} is incompatible with the "
-            "current command interface. Behavior Suite currently requires "
-            "SLEAP-NN 0.3.x; SLEAP-NN 0.2.x uses 'track' instead of the "
-            "supported 'predict' interface."
-        )
+        raise _IncompatibleSleapVersionError(version, executable_path)
     return version
 
 
@@ -1477,6 +1553,199 @@ def _validate_required_output_file(path: Path) -> None:
         ) from exc
 
 
+def _validate_pose_inference_request(
+    request: PoseInferenceRequest,
+    *,
+    version_runner: SubprocessRunner,
+    stage_callback: PoseInferencePreflightStageCallback | None = None,
+) -> _ValidatedPoseInferenceRequest:
+    """Run authoritative read-only validation shared by UI preflight and execution."""
+
+    def passed(stage: str, detail: str | None = None) -> None:
+        if stage_callback is not None:
+            stage_callback(stage, "passed", detail)
+
+    def failed(stage: str, exc: PoseInferenceError) -> None:
+        if stage_callback is not None:
+            stage_callback(stage, "failed", str(exc))
+
+    try:
+        handoff = validate_s1_handoff(request.session_root)
+    except PoseInferenceError as exc:
+        failed("S1 handoff", exc)
+        raise
+    passed("S1 handoff", str(handoff.preprocess_dir))
+
+    try:
+        _validate_prepared_video_against_sync(handoff)
+    except PoseInferenceError as exc:
+        failed("prepared-video/frame/timing contract", exc)
+        raise
+    passed(
+        "prepared-video/frame/timing contract",
+        "authoritative S1 sync count matches prepared-video metadata/header",
+    )
+
+    try:
+        model_spec = _resolve_model_spec(request)
+        model_id = _model_bundle_id(model_spec)
+    except PoseInferenceError as exc:
+        failed("inference mode and model bundle", exc)
+        raise
+    passed(
+        "inference mode and model bundle",
+        f"{model_spec.inference_mode}: {model_id}",
+    )
+
+    try:
+        profile_path = Path(request.profile_path).expanduser().resolve()
+        profile = load_inference_profile(profile_path)
+        pose_qc_options = _pose_qc_options(profile)
+        _validate_profile_mode(profile, model_spec)
+    except PoseInferenceError as exc:
+        failed("profile compatibility", exc)
+        raise
+    passed("profile compatibility", str(profile_path))
+
+    if stage_callback is None:
+        sleap_runtime = _resolve_sleap_runtime(
+            explicit_path=request.sleap_executable,
+            profile=profile,
+            version_runner=version_runner,
+        )
+    else:
+        try:
+            executable_path = _resolve_sleap_executable(
+                explicit_path=request.sleap_executable,
+                profile=profile,
+            )
+        except PoseInferenceError as exc:
+            failed("SLEAP executable resolution", exc)
+            raise
+        passed("SLEAP executable resolution", str(executable_path))
+
+        try:
+            sleap_version = _query_sleap_version(
+                executable_path,
+                version_runner=version_runner,
+            )
+        except PoseInferenceError as exc:
+            failed("SLEAP version compatibility", exc)
+            raise
+        passed("SLEAP version compatibility", sleap_version)
+        sleap_runtime = SleapRuntime(
+            executable_path=executable_path,
+            version=sleap_version,
+        )
+    return _ValidatedPoseInferenceRequest(
+        handoff=handoff,
+        profile_path=profile_path,
+        profile=profile,
+        pose_qc_options=pose_qc_options,
+        sleap_runtime=sleap_runtime,
+        model_spec=model_spec,
+        model_id=model_id,
+    )
+
+
+class _PreflightStageTracker:
+    def __init__(self) -> None:
+        self._stages = {
+            name: PoseInferencePreflightStage(name=name, status="not reached")
+            for name in PREFLIGHT_STAGE_NAMES
+        }
+
+    def record(self, name: str, status: str, detail: str | None = None) -> None:
+        self._stages[name] = PoseInferencePreflightStage(
+            name=name,
+            status=status,
+            detail=detail,
+        )
+
+    def results(self) -> tuple[PoseInferencePreflightStage, ...]:
+        return tuple(self._stages[name] for name in PREFLIGHT_STAGE_NAMES)
+
+    def detail(self, name: str) -> str | None:
+        return self._stages[name].detail
+
+
+def _build_preflight_result(
+    request: PoseInferenceRequest,
+    validated: _ValidatedPoseInferenceRequest,
+) -> tuple[PoseInferencePreflightResult, RunPaths]:
+    timestamp = request.timestamp or _now_timestamp()
+    run_id, paths = _resolve_run_paths(
+        session_root=validated.handoff.session_root,
+        model_id=validated.model_id,
+        timestamp=timestamp,
+        output_root=request.output_root,
+    )
+    command = build_sleap_predict_command(
+        handoff=validated.handoff,
+        model_spec=validated.model_spec,
+        sleap_executable=validated.sleap_runtime.executable_path,
+        profile=validated.profile,
+        pose_slp_path=paths.pose_slp,
+    )
+    profile_id = validated.profile.get("profile_id")
+    return (
+        PoseInferencePreflightResult(
+            s1_handoff=validated.handoff,
+            profile_path=validated.profile_path,
+            profile_id=str(profile_id) if profile_id is not None else None,
+            inference_mode=validated.model_spec.inference_mode,
+            model_id=validated.model_id,
+            sleap_runtime=validated.sleap_runtime,
+            prospective_run_id=run_id,
+            prospective_run_dir=paths.run_dir,
+            command=command,
+        ),
+        paths,
+    )
+
+
+def preflight_pose_inference(
+    request: PoseInferenceRequest,
+    *,
+    version_runner: SubprocessRunner = subprocess.run,
+) -> PoseInferencePreflightResult:
+    """Validate one request and build its command without writing or launching SLEAP."""
+
+    tracker = _PreflightStageTracker()
+    try:
+        validated = _validate_pose_inference_request(
+            request,
+            version_runner=version_runner,
+            stage_callback=tracker.record,
+        )
+        try:
+            result, _paths = _build_preflight_result(request, validated)
+        except PoseInferenceError as exc:
+            tracker.record("command construction", "failed", str(exc))
+            raise
+        tracker.record(
+            "command construction",
+            "passed",
+            subprocess.list2cmdline(list(result.command)),
+        )
+        return replace(result, stages=tracker.results())
+    except PoseInferenceError as exc:
+        executable_detail = tracker.detail("SLEAP executable resolution")
+        found_version = (
+            exc.version if isinstance(exc, _IncompatibleSleapVersionError) else None
+        )
+        raise PoseInferencePreflightError(
+            PoseInferencePreflightFailure(
+                stages=tracker.results(),
+                error=str(exc),
+                resolved_executable_path=(
+                    Path(executable_detail) if executable_detail else None
+                ),
+                found_sleap_version=found_version,
+            )
+        ) from exc
+
+
 def run_pose_inference(
     request: PoseInferenceRequest,
     *,
@@ -1486,23 +1755,23 @@ def run_pose_inference(
     pose_qc_computer: PoseQcComputer = compute_pose_qc_from_parquet,
     overlay_generator: OverlayGenerator = generate_overlay_video,
     sleap_provenance_reader: SleapProvenanceReader = read_sleap_provenance,
+    progress_callback: PoseInferenceProgressCallback | None = None,
 ) -> PoseInferenceResult:
     """Run or dry-run one Subsystem 02 SLEAP-NN inference request."""
 
-    handoff = validate_s1_handoff(request.session_root)
-    _validate_prepared_video_against_sync(handoff)
-    profile_path = Path(request.profile_path).expanduser().resolve()
-    profile = load_inference_profile(profile_path)
-    pose_qc_options = _pose_qc_options(profile)
-    sleap_runtime = _resolve_sleap_runtime(
-        explicit_path=request.sleap_executable,
-        profile=profile,
+    if progress_callback is not None:
+        progress_callback("validating", None)
+    validated = _validate_pose_inference_request(
+        request,
         version_runner=version_runner,
     )
-    model_spec = _resolve_model_spec(request)
-    _validate_profile_mode(profile, model_spec)
-
-    model_id = _model_bundle_id(model_spec)
+    handoff = validated.handoff
+    profile_path = validated.profile_path
+    profile = validated.profile
+    pose_qc_options = validated.pose_qc_options
+    sleap_runtime = validated.sleap_runtime
+    model_spec = validated.model_spec
+    model_id = validated.model_id
     timestamp = request.timestamp or _now_timestamp()
     run_id, paths = _resolve_run_paths(
         session_root=handoff.session_root,
@@ -1510,6 +1779,8 @@ def run_pose_inference(
         timestamp=timestamp,
         output_root=request.output_root,
     )
+    if progress_callback is not None:
+        progress_callback("preparing run", paths.run_dir)
     if paths.run_dir.exists():
         raise PoseInferenceError(f"Output run directory already exists: {paths.run_dir}")
     try:
@@ -1520,6 +1791,8 @@ def run_pose_inference(
         ) from exc
 
     created_at = _iso_now()
+    if progress_callback is not None:
+        progress_callback("building command", paths.run_dir)
     command = build_sleap_predict_command(
         handoff=handoff,
         model_spec=model_spec,
@@ -1539,6 +1812,8 @@ def run_pose_inference(
         status = "dry_run_complete"
         success = True
     else:
+        if progress_callback is not None:
+            progress_callback("running inference", paths.run_dir)
         completed = subprocess_runner(
             list(command),
             cwd=paths.run_dir,
@@ -1563,6 +1838,8 @@ def run_pose_inference(
             except Exception as exc:
                 sleap_provenance = _failed_sleap_provenance_summary(exc)
             try:
+                if progress_callback is not None:
+                    progress_callback("exporting parquet", paths.run_dir)
                 parquet_summary = parquet_exporter(
                     pose_slp_path=paths.pose_slp,
                     preprocess_dir=handoff.preprocess_dir,
@@ -1581,6 +1858,8 @@ def run_pose_inference(
             else:
                 try:
                     _validate_required_output_file(paths.pose_parquet)
+                    if progress_callback is not None:
+                        progress_callback("computing QC", paths.run_dir)
                     pose_qc_summary = pose_qc_computer(
                         pose_parquet_path=paths.pose_parquet,
                         **pose_qc_options,
@@ -1615,6 +1894,8 @@ def run_pose_inference(
                         success = False
                     else:
                         try:
+                            if progress_callback is not None:
+                                progress_callback("generating overlay", paths.run_dir)
                             overlay_summary = overlay_generator(
                                 prepared_video_path=handoff.prepared_video,
                                 pose_parquet_path=paths.pose_parquet,
@@ -1726,6 +2007,9 @@ def run_pose_inference(
     ):
         _validate_required_output_file(required_metadata)
     _validate_no_forbidden_outputs(paths)
+
+    if progress_callback is not None:
+        progress_callback("complete" if success else "failed", paths.run_dir)
 
     return PoseInferenceResult(
         success=success,

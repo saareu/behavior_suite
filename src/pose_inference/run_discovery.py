@@ -92,6 +92,11 @@ class PoseInferenceRunSummary:
     effective_sleap_inference_config: Any = None
     effective_sleap_tracking_config: Any = None
     parquet_timing: Any = None
+    sleap_executable_path: str | None = None
+    sleap_executable_version: str | None = None
+    command: tuple[str, ...] = ()
+    qc_thresholds: Any = None
+    diagnostic_findings: tuple[str, ...] = ()
     dry_run: bool | None = None
     metadata_errors: tuple[str, ...] = ()
 
@@ -310,6 +315,32 @@ def _summarize_run(run_dir: Path) -> PoseInferenceRunSummary:
         parquet_timing=_first_existing(
             _mapping_get(job_manifest, "parquet_timing"),
             _mapping_get(pose_meta, "parquet", "timing"),
+        ),
+        sleap_executable_path=_first_text(
+            _mapping_get(job_manifest, "sleap_runtime", "executable_path"),
+            _mapping_get(pose_meta, "sleap_runtime", "executable_path"),
+            _mapping_get(settings_used, "sleap_runtime", "executable_path"),
+            processing_log.get("sleap_executable_path"),
+        ),
+        sleap_executable_version=_first_text(
+            _mapping_get(job_manifest, "sleap_runtime", "version"),
+            _mapping_get(pose_meta, "sleap_runtime", "version"),
+            _mapping_get(settings_used, "sleap_runtime", "version"),
+            processing_log.get("sleap_executable_version"),
+        ),
+        command=_text_tuple(
+            _first_existing(
+                _mapping_get(job_manifest, "command"),
+                _mapping_get(pose_meta, "command"),
+                _mapping_get(settings_used, "command"),
+            )
+        ),
+        qc_thresholds=_first_existing(
+            _mapping_get(pose_meta, "pose_qc", "review_thresholds"),
+            _mapping_get(pose_meta, "pose_qc", "thresholds"),
+        ),
+        diagnostic_findings=_text_tuple(
+            _mapping_get(pose_meta, "pose_qc", "diagnostic_findings")
         ),
         dry_run=dry_run,
         metadata_errors=tuple(metadata_errors),

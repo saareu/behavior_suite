@@ -23,7 +23,13 @@ Choose video
 → review geometry
 → optional static mask
 → prepare
+→ continue to Subsystem 02 for the same project/session
 ```
+
+After successful preparation, the main PySide6 application transitions to the
+Subsystem 02 workspace with the session context preserved. This transition does
+not start inference automatically. Users may return to S1 without losing that
+context.
 
 Internal concepts such as source facts, detector diagnostics, camera context, and future detector presets are developer/design concepts. They must not become mandatory user-facing steps in the ordinary workflow.
 

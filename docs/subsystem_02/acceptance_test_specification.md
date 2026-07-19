@@ -9,13 +9,50 @@ Acceptance focuses on reproducible inference, the minimal artifact contract,
 pose coverage, pose-quality QC, overlay generation, Parquet export, and
 preservation of the Subsystem 01 timing/frame contract.
 
-This is not the full Subsystem 02 MVP acceptance specification. The full MVP
-also requires UI-based inference and review, main UI integration, existing-run
-review, and downstream run selection. See
+This document retains backend acceptance as its primary scope. The repository
+also contains headless controller and offscreen PySide6 tests for UI-based
+inference/review, main UI integration, existing-run review, and transient
+downstream run selection. See
 [`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md).
 
 Identity-stable final tracking is not a blocking acceptance criterion for
 Subsystem 02.
+
+## UI integration acceptance
+
+For UI-only inspection of existing pass and top-down runs without launching
+inference, open the prepared development test session at
+`bsuite/test_cases/A_clear_separation`. This fixture is manual-test support
+only; production behavior must not depend on that repository-relative path.
+
+Automated UI/controller acceptance covers:
+
+- successful S1 completion opening S2 with the same session and no automatic
+  inference run;
+- normal S1/S2 navigation and back-navigation session preservation;
+- valid, incomplete, unavailable, and unreadable S1 states;
+- metadata-only newest-first run presentation, including malformed legacy
+  metadata that remains nonfatal;
+- explicit bottom-up and top-down model specifications and mode-specific
+  default profiles;
+- missing/ambiguous input rejection before dispatch, with authoritative backend
+  preflight errors surfaced from the worker;
+- validation-only reuse of authoritative S1/model/profile/runtime/command
+  preflight without creating a run directory or launching inference;
+- responsive mocked background execution, completion refresh/selection, and
+  technical failure display without GPU requirements;
+- immediate active-task control/navigation guards and task-generation checks
+  that reject stale queued progress or terminal updates;
+- `pass` and `review_recommended` S3 eligibility, failed/incomplete rejection,
+  action-time artifact/QC revalidation, and robust flagged-interval display;
+- graceful convenience-setting restoration without probing saved UNC/NAS paths
+  during window construction.
+
+The backend exposes coarse validating/preparing-run/building-command/inference/
+export/QC/overlay/terminal stage callbacks but no reliable percentage or safe
+process-cancellation contract. `running inference` is emitted only immediately
+before subprocess launch. UI progress is therefore indeterminate, and
+cancellation is not presented.
 
 ## 2. Acceptance Scope
 

@@ -13,8 +13,10 @@ Subsystem 01 is functionally closed and entering maintenance.
 **Subsystem 02 — SLEAP-NN Inference and Review** is under active MVP
 development. The bottom-up backend inference path is GPU-validated and the
 top-down centroid plus centered-instance path has passed a SLEAP-NN 0.3.0 GPU
-smoke test, but the full Subsystem 02 MVP still requires UI integration,
-existing-run review, and navigation from the main UI launch point.
+smoke test. The PySide6 desktop application now includes S1-to-S2 navigation,
+existing-run technical review, bottom-up/top-down submission, and transient S3
+input selection. Final field acceptance, safe cancellation, and live
+subprocess-log streaming remain future work.
 
 ---
 
@@ -67,6 +69,23 @@ settings_used.yaml
 processing_log.txt
 ```
 
+After a successful S1 run, the desktop application opens the same session in
+the Subsystem 2 workspace without starting inference automatically. The
+application-level navigation can also open S2 for an already selected project,
+and S2 itself can browse an existing project/session.
+
+In S2, users can review discovery metadata for prior runs, open available
+overlays/run folders, copy discoverable settings, or configure a new bottom-up
+model or top-down centroid + centered-instance bundle. Advanced device, batch,
+animal-count, and tracking settings remain profile-driven. The backend performs
+the authoritative handoff/model/profile/runtime preflight in a background
+worker, so the UI stays responsive and displays honest indeterminate activity.
+
+Both QC `pass` and non-blocking `review_recommended` runs that are technically
+complete can be selected as intended S3 input. This selection is not identity
+approval or a final scientific-usability judgment; S3 is currently represented
+by a clear placeholder only.
+
 ---
 
 ## Active documentation
@@ -105,8 +124,9 @@ SLEAP output-row structure.
 Subsystem 02 is the active pose-inference and review subsystem. Its current
 validated implementation covers the bottom-up backend inference path and the
 GPU-smoke-tested top-down model-bundle path under the same minimal artifact
-contract. The full MVP is not complete until the UI workflow, existing-run
-review, S1-to-S2 transition, and main UI navigation are implemented.
+contract. Its MVP desktop workflow and main-application navigation are now
+implemented. Full MVP release status still depends on field acceptance and any
+later backend progress/cancellation work chosen for release.
 
 Final biological identity assignment, tracking verification, implanted/partner
 mouse assignment, identity-switch correction, imputation, pose

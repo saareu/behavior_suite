@@ -6,10 +6,10 @@ This document defines the backend pose inference contract for Subsystem 02. It
 covers how the backend consumes completed Subsystem 01 outputs, runs
 SLEAP/SLEAP-NN inference, and writes the locked pose inference artifact set.
 
-This document is not the full Subsystem 02 MVP scope. The full MVP also
-requires a UI-based inference and review workflow,
-existing-run review, Subsystem 01 completion-to-Subsystem 02 transition, and
-main UI integration. See
+This document is not the full Subsystem 02 MVP scope. The PySide6 application
+now provides the UI-based inference/review workflow, existing-run review,
+Subsystem 01 completion-to-Subsystem 02 transition, and main UI integration.
+See
 [`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md).
 
 The backend supports bottom-up SLEAP/SLEAP-NN inference and a top-down bundle
@@ -52,12 +52,35 @@ The backend pose inference contract is not responsible for:
 - a persistent S2 user-review or final-usability decision;
 - parameter optimization or guided hyperparameter search;
 - behavior classification or downstream biological analysis;
-- the Subsystem 02 UI workspace;
-- main UI launch/navigation;
-- existing-run review and downstream run selection.
+- final identity review, scientific-usability approval, or S3 processing.
 
 Parameter optimization is postponed to a later guided workflow. The
 implementation uses one explicit default profile per supported inference mode.
+
+### Desktop integration
+
+The main PySide6 application contains persistent S1 and S2 screens. Successful
+S1 completion opens S2 with the same project/session but does not start
+inference. A user can also enter S2 through subsystem navigation or browse an
+existing session directly. Back navigation preserves the selected session.
+
+S2 calls `summarize_pose_inference_project(...)` to populate newest-first run
+rows and the technical-details panel without opening large pose artifacts. A
+selected technically complete run with QC outcome `pass` or
+`review_recommended` may be represented as a transient S3 input containing the
+session/run and locked artifact paths. This is navigation input selection, not
+identity correctness or final usability approval.
+
+New runs use the typed `PoseInferenceRequest` and `PoseInferenceModelSpec` APIs.
+Only basic mode/field presence is checked in the UI; backend preflight remains
+authoritative for the S1 contract, model roles, profile/mode agreement, output
+location, and SLEAP-NN 0.3.x runtime. The full backend call runs on the existing
+Qt worker thread. The backend reports validating, inference, Parquet export,
+QC, overlay, and terminal stage transitions plus the run directory, but no
+reliable percentage. Because it provides no safe cancellation hook or live
+subprocess-log streaming, the UI uses indeterminate activity, exposes the final
+log after return, disables navigation while active, and does not offer
+cancellation.
 
 ## 3. Required Inputs
 

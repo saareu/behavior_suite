@@ -303,6 +303,8 @@ def test_review_recommended_run_remains_complete_reviewable(tmp_path: Path) -> N
         "outcome": "review_recommended",
         "review_recommendation_reasons": ["one_detected_animal"],
         "review_warning_count": 1,
+        "thresholds": {"missing_keypoint_fraction": 0.9},
+        "diagnostic_findings": ["partial skeletons are present"],
         "flagged_intervals": {
             "one_detected_animal": [
                 {
@@ -316,6 +318,11 @@ def test_review_recommended_run_remains_complete_reviewable(tmp_path: Path) -> N
             ]
         },
     }
+    pose_meta["sleap_runtime"] = {
+        "executable_path": "C:/env/sleap-nn.exe",
+        "version": "0.3.0",
+    }
+    pose_meta["command"] = ["C:/env/sleap-nn.exe", "predict"]
     pose_meta_path.write_text(json.dumps(pose_meta) + "\n", encoding="utf-8")
     manifest_path = run_dir / "job_manifest.yaml"
     manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
@@ -339,6 +346,11 @@ def test_review_recommended_run_remains_complete_reviewable(tmp_path: Path) -> N
     assert run.review_warning_count == 1
     assert run.flagged_intervals["one_detected_animal"][0]["start_frame"] == 10
     assert run.flagged_intervals["one_detected_animal"][0]["time_span_sec"] == 0.45
+    assert run.qc_thresholds == {"missing_keypoint_fraction": 0.9}
+    assert run.diagnostic_findings == ("partial skeletons are present",)
+    assert run.sleap_executable_path == "C:/env/sleap-nn.exe"
+    assert run.sleap_executable_version == "0.3.0"
+    assert run.command == ("C:/env/sleap-nn.exe", "predict")
 
 
 def test_topdown_review_recommended_discovery_exposes_both_models(

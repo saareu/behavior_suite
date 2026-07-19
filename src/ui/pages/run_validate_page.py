@@ -37,6 +37,7 @@ class RunValidatePage(QWidget):
     status_message = Signal(str)
     error_message = Signal(str)
     unexpected_error = Signal(str)
+    preprocessing_completed = Signal(object)
 
     def __init__(self, setup_controller: PreprocessSetupController) -> None:
         super().__init__()
@@ -95,10 +96,13 @@ class RunValidatePage(QWidget):
         self.cancel_button.setVisible(False)
         self.open_folder_button = QPushButton("Open Preprocess Folder")
         self.open_folder_button.clicked.connect(self._open_preprocess_folder)
+        self.continue_s2_button = QPushButton("Continue to Pose Inference")
+        self.continue_s2_button.clicked.connect(self._continue_to_pose_inference)
         action_row = QHBoxLayout()
         action_row.addWidget(self.run_button)
         action_row.addWidget(self.cancel_button)
         action_row.addWidget(self.open_folder_button)
+        action_row.addWidget(self.continue_s2_button)
         action_row.addStretch(1)
 
         self.ffmpeg_runtime_label = QLabel()
@@ -211,6 +215,13 @@ class RunValidatePage(QWidget):
         self.open_folder_button.setEnabled(
             not running and self.controller.can_open_preprocess_folder()
         )
+        result = self.controller.state.preprocess_result
+        self.continue_s2_button.setEnabled(
+            not running
+            and result is not None
+            and result.success
+            and self.controller.state.project_dir is not None
+        )
         self.stage_label.setText(self.controller.state.run_status)
         self._update_elapsed()
         self._render_result(self.controller.result_summary())
@@ -275,6 +286,8 @@ class RunValidatePage(QWidget):
 
     def _task_complete(self, _result: PreprocessResult) -> None:
         self.refresh_from_state()
+        if _result.success and self.controller.state.project_dir is not None:
+            self.preprocessing_completed.emit(self.controller.state.project_dir)
 
     def _task_error(self, _exc: BaseException) -> None:
         self.refresh_from_state()
@@ -365,6 +378,16 @@ class RunValidatePage(QWidget):
             return
         self.error_label.clear()
         self.status_message.emit(f"Opened preprocess folder: {folder}")
+
+    def _continue_to_pose_inference(self) -> None:
+        project_dir = self.controller.state.project_dir
+        result = self.controller.state.preprocess_result
+        if project_dir is None or result is None or not result.success:
+            self._show_expected_error(
+                "Complete preprocessing successfully before continuing to pose inference."
+            )
+            return
+        self.preprocessing_completed.emit(project_dir)
 
     def _show_expected_error(self, message: str) -> None:
         self.error_label.setText(message)

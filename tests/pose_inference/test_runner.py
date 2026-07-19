@@ -14,9 +14,11 @@ import pose_inference.runner as runner_module
 from pose_inference import (
     PoseInferenceError,
     PoseInferenceModelSpec,
+    PoseInferencePreflightError,
     PoseInferenceRequest,
     build_sleap_predict_command,
     load_inference_profile,
+    preflight_pose_inference,
     run_pose_inference,
     validate_s1_handoff,
 )
@@ -647,6 +649,7 @@ def test_dry_run_creates_minimal_records_without_external_sleap(
 ) -> None:
     _write_s1_handoff(tmp_path)
     called = False
+    progress: list[tuple[str, Path | None]] = []
 
     def unexpected_subprocess(**_kwargs: Any) -> subprocess.CompletedProcess[str]:
         nonlocal called
@@ -663,6 +666,7 @@ def test_dry_run_creates_minimal_records_without_external_sleap(
             timestamp="20260709T010203",
         ),
         subprocess_runner=unexpected_subprocess,
+        progress_callback=lambda stage, run_dir: progress.append((stage, run_dir)),
     )
 
     assert called is False
@@ -694,6 +698,103 @@ def test_dry_run_creates_minimal_records_without_external_sleap(
     assert manifest["outputs"]["pose_slp"].endswith("pose.slp")
     assert settings["tracking_enabled"] is True
     assert "--output_path" in settings["command"]
+    assert [stage for stage, _run_dir in progress] == [
+        "validating",
+        "preparing run",
+        "building command",
+        "complete",
+    ]
+    assert progress[0][1] is None
+    assert progress[1][1] == result.run_dir
+
+
+def test_public_preflight_builds_command_without_creating_or_running(
+    tmp_path: Path,
+) -> None:
+    _write_s1_handoff(tmp_path)
+    model = _model_path(tmp_path)
+
+    result = preflight_pose_inference(
+        PoseInferenceRequest(
+            session_root=tmp_path,
+            model_path=model,
+            profile_path=DEFAULT_PROFILE,
+            timestamp="20260719T101112",
+        ),
+        version_runner=lambda args, **_kwargs: subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="sleap-nn 0.3.0",
+            stderr="",
+        ),
+    )
+
+    assert result.s1_handoff.prepared_video.is_file()
+    assert result.inference_mode == "bottomup"
+    assert result.sleap_runtime.version == "0.3.0"
+    assert result.command[1] == "predict"
+    assert [stage.status for stage in result.stages] == ["passed"] * 7
+    assert not result.prospective_run_dir.exists()
+    assert not (tmp_path / "pose_inference").exists()
+
+
+def test_structured_preflight_reports_runtime_incompatibility_after_inputs_pass(
+    tmp_path: Path,
+    stable_sleap_runtime: SleapRuntime,
+) -> None:
+    _write_s1_handoff(tmp_path)
+    model = _model_path(tmp_path)
+
+    with pytest.raises(PoseInferencePreflightError) as captured:
+        preflight_pose_inference(
+            PoseInferenceRequest(
+                session_root=tmp_path,
+                model_path=model,
+                profile_path=DEFAULT_PROFILE,
+            ),
+            version_runner=lambda args, **_kwargs: subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout="sleap-nn 0.2.0",
+                stderr="",
+            ),
+        )
+
+    report = captured.value.report
+    statuses = {stage.name: stage.status for stage in report.stages}
+    assert statuses["S1 handoff"] == "passed"
+    assert statuses["prepared-video/frame/timing contract"] == "passed"
+    assert statuses["inference mode and model bundle"] == "passed"
+    assert statuses["profile compatibility"] == "passed"
+    assert statuses["SLEAP executable resolution"] == "passed"
+    assert statuses["SLEAP version compatibility"] == "failed"
+    assert statuses["command construction"] == "not reached"
+    assert report.found_sleap_version == "0.2.0"
+    assert report.resolved_executable_path == stable_sleap_runtime.executable_path
+    assert "requires SLEAP-NN 0.3.x" in report.error
+    assert not (tmp_path / "pose_inference").exists()
+
+
+def test_structured_preflight_early_s1_failure_marks_later_stages_not_reached(
+    tmp_path: Path,
+) -> None:
+    missing_session = tmp_path / "missing-session"
+
+    with pytest.raises(PoseInferencePreflightError) as captured:
+        preflight_pose_inference(
+            PoseInferenceRequest(
+                session_root=missing_session,
+                model_path=tmp_path / "unused-model",
+                profile_path=DEFAULT_PROFILE,
+            )
+        )
+
+    stages = captured.value.report.stages
+    assert stages[0].name == "S1 handoff"
+    assert stages[0].status == "failed"
+    assert all(stage.status == "not reached" for stage in stages[1:])
+    assert captured.value.report.resolved_executable_path is None
+    assert not (tmp_path / "pose_inference").exists()
 
 
 def test_topdown_dry_run_records_bundle_and_does_not_launch_inference(
@@ -978,6 +1079,7 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
     qc_calls: list[dict[str, Path]] = []
     overlay_calls: list[dict[str, Path]] = []
     provenance_calls: list[Path] = []
+    progress: list[tuple[str, Path | None]] = []
 
     def fake_subprocess(args, **kwargs):
         run_dir = Path(kwargs["cwd"])
@@ -1060,6 +1162,7 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
         pose_qc_computer=fake_pose_qc,
         overlay_generator=fake_overlay,
         sleap_provenance_reader=fake_sleap_provenance,
+        progress_callback=lambda stage, run_dir: progress.append((stage, run_dir)),
     )
 
     assert result.success is True
@@ -1067,6 +1170,17 @@ def test_runner_exports_parquet_after_successful_inference(tmp_path: Path) -> No
     assert result.pose_slp_path.is_file()
     assert (result.run_dir / "pose.parquet").is_file()
     assert (result.run_dir / "overlay.mp4").is_file()
+    assert [stage for stage, _run_dir in progress] == [
+        "validating",
+        "preparing run",
+        "building command",
+        "running inference",
+        "exporting parquet",
+        "computing QC",
+        "generating overlay",
+        "complete",
+    ]
+    assert all(run_dir == result.run_dir for _stage, run_dir in progress[1:])
     assert export_calls == [
         {
             "pose_slp_path": result.pose_slp_path,
