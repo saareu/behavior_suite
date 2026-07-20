@@ -2,8 +2,8 @@
 #
 # This Conda layer is intentionally minimal and reproducible. The installer
 # recreates the dedicated environment from this file, then performs the
-# editable local package install separately with:
-#   python -m pip install -e .
+# editable local package install with S2 runtime dependencies separately:
+#   python -m pip install -e ".[s2]"
 name: behavior_suite_gui
 channels:
   - conda-forge

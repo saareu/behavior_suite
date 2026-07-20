@@ -153,6 +153,15 @@ order: an explicit CLI/profile path, a `sleap-nn.exe` or `sleap-nn` sibling of
 the active Python executable, then PATH. Its absolute path and queried version
 are recorded in run metadata and logs.
 
+Inference execution and artifact post-processing have separate dependency
+boundaries. The resolved external `sleap-nn` 0.3.x executable performs model
+inference and writes `pose.slp`. Parquet export and effective provenance
+extraction run in the Behavior Suite GUI Python process, which therefore
+provides the pinned `sleap-io` 0.8.0 runtime dependency. The resulting table is
+then consumed by the shared technical-QC and overlay artifact pipeline. The
+Windows one-click installer installs the repository's `s2` optional dependency
+and validates these imports before reporting a usable GUI runtime.
+
 ```text
 SLEAP_EXECUTABLE predict --data_path PREPARED_VIDEO --model_paths BOTTOMUP_MODEL \
   --output_path POSE_SLP --output_format slp --device cuda --batch_size 4 \

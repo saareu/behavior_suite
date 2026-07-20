@@ -1,4 +1,5 @@
 import importlib.util
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,6 +40,12 @@ def test_environment_gui_is_minimal_pinned_conda_runtime() -> None:
     )
 
 
+def test_s2_optional_dependency_pins_sleap_io() -> None:
+    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+
+    assert project["project"]["optional-dependencies"]["s2"] == ["sleap-io==0.8.0"]
+
+
 def test_windows_installer_recreates_dedicated_environment_without_pip_uninstall() -> None:
     text = Path("scripts/install_windows_gui.bat").read_text(encoding="utf-8")
     conda_lines = _active_conda_lines("scripts/install_windows_gui.bat")
@@ -51,7 +58,7 @@ def test_windows_installer_recreates_dedicated_environment_without_pip_uninstall
     assert 'call conda env create -f "%ENV_FILE%" -y' in text
     assert "conda env update" not in text
     assert "pip uninstall" not in text
-    assert "call conda run -n %ENV_NAME% python -m pip install -e ." in text
+    assert 'call conda run -n %ENV_NAME% python -m pip install -e ".[s2]"' in text
     assert '".[gui]"' not in text
     assert "python scripts\\validate_windows_gui_runtime.py" in text
     assert "python -m pip check" in text
@@ -64,14 +71,14 @@ def test_windows_installer_recreates_dedicated_environment_without_pip_uninstall
     assert 'cd /d "%REPO_ROOT%"' in text
     assert "if errorlevel 1" in text.lower()
     assert "broken pip metadata" in text
-    assert "clean environment with Conda-forge PySide6 6.11.1" in text
+    assert "Conda-forge PySide6 6.11.1 and sleap-io 0.8.0" in text
     assert "rmdir /s" not in text.lower()
     assert "del /s" not in text.lower()
     pip_install_lines = [
         line for line in text.splitlines() if "python -m pip install" in line
     ]
     assert pip_install_lines == [
-        "call conda run -n %ENV_NAME% python -m pip install -e ."
+        'call conda run -n %ENV_NAME% python -m pip install -e ".[s2]"'
     ]
     assert all("pyside" not in line.lower() for line in pip_install_lines)
     assert "python -m pip install -U PySide6" not in text
@@ -80,9 +87,9 @@ def test_windows_installer_recreates_dedicated_environment_without_pip_uninstall
         'conda env create -f "%ENV_FILE%"'
     )
     assert text.index('conda env create -f "%ENV_FILE%"') < text.index(
-        "python -m pip install -e ."
+        'python -m pip install -e ".[s2]"'
     )
-    assert text.index("python -m pip install -e .") < text.index(
+    assert text.index('python -m pip install -e ".[s2]"') < text.index(
         "Python startup: ok"
     )
     assert text.index("Python startup: ok") < text.index(
@@ -108,7 +115,8 @@ def test_windows_runtime_validator_imports_full_application_surface(
 
     def fake_import(name: str):
         imported.append(name)
-        return SimpleNamespace(__version__="6.11.1" if name == "PySide6" else None)
+        versions = {"PySide6": "6.11.1", "sleap_io": "0.8.0"}
+        return SimpleNamespace(__version__=versions.get(name))
 
     monkeypatch.setattr(module.importlib, "import_module", fake_import)
 
@@ -116,11 +124,59 @@ def test_windows_runtime_validator_imports_full_application_surface(
     assert imported == [
         *module.DEPENDENCY_MODULES,
         *module.QT_MODULES,
+        *module.S2_DEPENDENCY_MODULES,
+        *module.S2_ARTIFACT_MODULES,
         *module.APPLICATION_MODULES,
     ]
     output = capsys.readouterr().out
     assert "PySide6 import/version: ok (6.11.1)" in output
+    assert "sleap-io import/version: ok (0.8.0)" in output
     assert "Application dependency imports: ok" in output
+    assert "S2 artifact module imports: ok" in output
+
+
+def test_windows_runtime_validator_fails_when_sleap_io_is_missing(
+    monkeypatch,
+    capsys,
+) -> None:
+    path = Path("scripts/validate_windows_gui_runtime.py")
+    spec = importlib.util.spec_from_file_location("validate_windows_gui_runtime", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    def fake_import(name: str):
+        if name == "sleap_io":
+            raise ModuleNotFoundError("No module named 'sleap_io'")
+        return SimpleNamespace(__version__="6.11.1" if name == "PySide6" else None)
+
+    monkeypatch.setattr(module.importlib, "import_module", fake_import)
+
+    assert module.main() == 1
+    output = capsys.readouterr().out
+    assert "Windows GUI runtime validation failed:" in output
+    assert "sleap_io: ModuleNotFoundError: No module named 'sleap_io'" in output
+
+
+def test_windows_runtime_validator_rejects_incompatible_sleap_io_version(
+    monkeypatch,
+    capsys,
+) -> None:
+    path = Path("scripts/validate_windows_gui_runtime.py")
+    spec = importlib.util.spec_from_file_location("validate_windows_gui_runtime", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    def fake_import(name: str):
+        versions = {"PySide6": "6.11.1", "sleap_io": "0.9.0"}
+        return SimpleNamespace(__version__=versions.get(name))
+
+    monkeypatch.setattr(module.importlib, "import_module", fake_import)
+
+    assert module.main() == 1
+    output = capsys.readouterr().out
+    assert "sleap-io version mismatch: expected 0.8.0, found 0.9.0" in output
 
 
 def test_windows_launcher_checks_environment_doctor_then_gui() -> None:

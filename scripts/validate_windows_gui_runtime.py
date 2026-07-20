@@ -6,6 +6,7 @@ import importlib
 import sys
 
 EXPECTED_PYSIDE_VERSION = "6.11.1"
+EXPECTED_SLEAP_IO_VERSION = "0.8.0"
 
 DEPENDENCY_MODULES = (
     "numpy",
@@ -29,6 +30,16 @@ QT_MODULES = (
     "PySide6.QtWidgets",
 )
 
+S2_DEPENDENCY_MODULES = (
+    "sleap_io",
+)
+
+S2_ARTIFACT_MODULES = (
+    "pose_inference.parquet_export",
+    "pose_inference.pose_qc",
+    "pose_inference.overlay",
+)
+
 APPLICATION_MODULES = (
     "cli.preprocess",
     "preprocess.service",
@@ -43,7 +54,14 @@ def main() -> int:
     print(f"Python executable: {sys.executable}")
     failures: list[str] = []
     imported: dict[str, object] = {}
-    for module_name in (*DEPENDENCY_MODULES, *QT_MODULES, *APPLICATION_MODULES):
+    runtime_modules = (
+        *DEPENDENCY_MODULES,
+        *QT_MODULES,
+        *S2_DEPENDENCY_MODULES,
+        *S2_ARTIFACT_MODULES,
+        *APPLICATION_MODULES,
+    )
+    for module_name in runtime_modules:
         try:
             imported[module_name] = importlib.import_module(module_name)
         except Exception as exc:
@@ -57,6 +75,15 @@ def main() -> int:
             f"expected {EXPECTED_PYSIDE_VERSION}, found {observed_version or 'unknown'}"
         )
 
+    sleap_io = imported.get("sleap_io")
+    observed_sleap_io_version = getattr(sleap_io, "__version__", None)
+    if sleap_io is not None and observed_sleap_io_version != EXPECTED_SLEAP_IO_VERSION:
+        failures.append(
+            "sleap-io version mismatch: "
+            f"expected {EXPECTED_SLEAP_IO_VERSION}, "
+            f"found {observed_sleap_io_version or 'unknown'}"
+        )
+
     if failures:
         print("Windows GUI runtime validation failed:")
         for failure in failures:
@@ -64,7 +91,9 @@ def main() -> int:
         return 1
 
     print(f"PySide6 import/version: ok ({observed_version})")
+    print(f"sleap-io import/version: ok ({observed_sleap_io_version})")
     print(f"Application dependency imports: ok ({len(DEPENDENCY_MODULES)} modules)")
+    print(f"S2 artifact module imports: ok ({len(S2_ARTIFACT_MODULES)} modules)")
     print(f"Application module imports: ok ({len(APPLICATION_MODULES)} modules)")
     return 0
 

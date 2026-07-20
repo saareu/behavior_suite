@@ -32,9 +32,16 @@ scripts\launch_windows_gui.bat
 
 The installer recreates the dedicated `behavior_suite_gui` Conda environment
 with Python 3.12, FFmpeg 7.1.1 from conda-forge, PySide6 6.11.1 from
-conda-forge, and this repository installed in editable mode. It does not
+conda-forge, and this repository installed in editable mode with its S2 runtime
+dependencies. It does not
 require PowerShell activation/profile setup and does not modify the user's base
 environment.
+
+S2 uses two deliberately separate runtime components. The resolved external
+`sleap-nn` 0.3.x executable performs model inference and writes `pose.slp`.
+The Behavior Suite GUI Python environment provides `sleap-io` 0.8.0, which is
+required to read that file for Parquet export and provenance extraction before
+the shared QC and overlay artifact pipeline completes.
 
 The installer reconciles this dedicated environment by recreating it from the
 pinned Conda definition before installing the checkout. This intentionally
@@ -43,7 +50,7 @@ including installations whose pip `RECORD` metadata is missing, recover
 automatically on the next installer run. Project/session data is outside this
 dedicated environment and is not removed. Post-install checks start Python,
 import the pinned PySide6 runtime and application dependencies, run `pip check`,
-and run `behavior-suite doctor`.
+validate `sleap-io` and the S2 artifact modules, and run `behavior-suite doctor`.
 
 Manual runtime check:
 

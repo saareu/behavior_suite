@@ -46,7 +46,7 @@ if errorlevel 1 (
 )
 
 set "STEP=installing behavior_suite editable package"
-call conda run -n %ENV_NAME% python -m pip install -e .
+call conda run -n %ENV_NAME% python -m pip install -e ".[s2]"
 if errorlevel 1 (
     echo Failed to install the current checkout into %ENV_NAME%.
     goto fail
@@ -66,11 +66,11 @@ if errorlevel 1 (
     goto fail
 )
 
-set "STEP=validating PySide6 and application dependency imports"
+set "STEP=validating PySide6, S2, and application dependency imports"
 call conda run -n %ENV_NAME% python scripts\validate_windows_gui_runtime.py
 if errorlevel 1 (
-    echo PySide6 or an application dependency failed to import in %ENV_NAME%.
-    echo The supported runtime is a clean environment with Conda-forge PySide6 6.11.1.
+    echo PySide6, S2, or an application dependency failed validation in %ENV_NAME%.
+    echo The supported runtime uses Conda-forge PySide6 6.11.1 and sleap-io 0.8.0.
     goto fail
 )
 
