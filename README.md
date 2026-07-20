@@ -3,25 +3,26 @@
 Scientific behavioral-video processing suite for preparing mouse behavior
 videos for SLEAP pose estimation and future downstream behavioral analysis.
 
-The current completed subsystem is **Subsystem 01 — Video Preprocessing**. It
-prepares raw videos into validated, SLEAP-compatible prepared videos while
-preserving raw decode-order frame identity, timing traceability, accepted
-spatial geometry, and processing provenance.
+**Subsystem 01 — Video Preprocessing** is functionally closed and in
+maintenance. It prepares raw videos into validated, SLEAP-compatible prepared
+videos while preserving raw decode-order frame identity, timing traceability,
+accepted spatial geometry, and processing provenance.
 
-Subsystem 01 is functionally closed and entering maintenance.
+**Subsystem 02 — Pose Inference and Technical QC** is finalized at MVP scope.
+Its accepted PySide6 workflow covers S1-to-S2 navigation, bottom-up and
+top-down centroid plus centered-instance inference, the standardized pose
+artifact set, preserved S1 frame/timing mapping, technical QC, run discovery,
+completed-run selection, and S3 handoff selection. Both inference modes ran on
+a real GPU with SLEAP-NN 0.3.0 and `sleap-io` 0.8.0 and produced QC outcome
+`pass`. The one-click Windows installation was also validated after the S2
+runtime dependency fix.
 
-**Subsystem 02 — SLEAP-NN Inference and Review** has completed MVP
-implementation and its first full real-GPU acceptance workflow. The accepted
-PySide6 workflow covers S1-to-S2 navigation, bottom-up and top-down inference,
-the standardized pose artifact set, technical QC and run discovery, completed
-run selection, and handoff of the selected run to S3. Both inference modes ran
-with SLEAP-NN 0.3.0 and `sleap-io` 0.8.0 and produced QC outcome `pass`.
-
-This status does not mean that S2 is a complete scientific-analysis pipeline.
-Final identity correctness, tracking usability, and scientific-usability
-assessment remain S3 responsibilities. Safe cancellation, live subprocess-log
-streaming, UI-assisted parameter optimization, expanded pose-quality review
-tools, and richer QC visualization remain non-blocking future enhancements.
+This closure does not make S2 a complete scientific-analysis pipeline. An
+elaborate pose-review workspace, model-optimization UI, active learning, pose
+correction, identity verification, tracking correction, and final pose
+processing are not part of the MVP. They remain future or downstream
+responsibilities; S3 owns identity/tracking correctness and final scientific
+usability.
 
 ---
 
@@ -121,8 +122,8 @@ Current active documentation:
   evidence, and future roadmap items
 - `docs/subsystem_01/design/geometry_modes.md` — active future-facing spatial
   geometry design reference
-- `docs/subsystem_02/mvp_scope_and_roadmap.md` — current Subsystem 02 MVP
-  scope, status, and roadmap
+- `docs/subsystem_02/mvp_scope_and_roadmap.md` — finalized Subsystem 02 MVP
+  scope, completion status, and post-MVP roadmap
 - `docs/subsystem_02/sleap_inference_specification.md` — Subsystem 02 backend
   pose inference contract
 - `docs/subsystem_02/acceptance_test_specification.md` — Subsystem 02 backend
@@ -145,14 +146,13 @@ It does not validate pose quality, SLEAP model accuracy, tracking quality,
 instance counts, confidence scores, coordinate exports, inference results, or
 SLEAP output-row structure.
 
-Subsystem 02 is the pose-inference and technical-review subsystem. Its MVP
-implementation and first full GPU-machine acceptance are complete for both the
-bottom-up path and the top-down centroid plus centered-instance bundle under
-the same minimal artifact contract. The validated workflow includes S1
-integration, UI-based inference, standardized artifacts, provenance, technical
-QC, overlay generation, run discovery, completed-run selection, and the S3
-handoff interface. Progress/cancellation improvements are optional post-MVP
-work, not missing MVP acceptance requirements.
+Subsystem 02 is the pose-inference and technical-QC subsystem. Its MVP is
+finalized for both the bottom-up path and the top-down centroid plus
+centered-instance bundle under the same minimal artifact contract. The
+validated workflow includes S1 integration, UI-based inference, standardized
+artifacts, provenance, technical QC, overlay generation, run discovery,
+completed-run selection, and S3 handoff selection. Post-MVP enhancements are
+not missing MVP acceptance requirements.
 
 Final biological identity assignment, tracking verification, implanted/partner
 mouse assignment, identity-switch correction, imputation, pose

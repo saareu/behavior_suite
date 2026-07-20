@@ -15,6 +15,14 @@ The external SLEAP-NN executable performed inference. The Behavior Suite GUI
 Python environment provided `sleap-io` for Parquet export and SLEAP provenance
 extraction in the shared artifact pipeline.
 
+## Installation Closure
+
+After the S2 runtime dependency fix, the supported one-click Windows installer
+successfully recreated the GUI environment, installed the repository with its
+S2 dependency set, and passed the Python, PySide6, `sleap-io`, application
+dependency, `pip check`, and Behavior Suite doctor validations. No manual
+machine repair is part of the supported installation workflow.
+
 ## Validated Workflow
 
 The real-GPU acceptance exercised the integrated user workflow:
@@ -36,8 +44,8 @@ workflow also verified downstream handoff from a selected completed run.
 
 ## Scope Boundary
 
-This evidence establishes S2 MVP technical acceptance. S2 provides UI-based
-pose inference, bottom-up and top-down model support, S1 integration,
+This evidence is the acceptance basis for the finalized S2 MVP. S2 provides
+UI-based pose inference, bottom-up and top-down model support, S1 integration,
 standardized pose artifacts, metadata/provenance, technical QC, overlay
 generation, run discovery, and an S3 handoff interface.
 

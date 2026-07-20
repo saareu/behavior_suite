@@ -1,5 +1,7 @@
 # Subsystem 02 — Backend Inference Acceptance-Test Specification
 
+**Status:** Final Subsystem 02 MVP acceptance passed.
+
 ## 1. Purpose
 
 This document defines acceptance evidence for the Subsystem 02 backend
@@ -28,8 +30,9 @@ Subsystem 02.
 
 For UI-only inspection of existing pass and top-down runs without launching
 inference, open the prepared development test session at
-`bsuite/test_cases/A_clear_separation`. This fixture is manual-test support
-only; production behavior must not depend on that repository-relative path.
+`<repository-root>/test_cases/A_clear_separation`. This fixture is manual-test
+support only; production behavior must not depend on that repository-relative
+path.
 
 Automated UI/controller acceptance covers:
 
@@ -70,7 +73,8 @@ Backend acceptance tests must prove that the Subsystem 02 backend can:
 - store SLEAP/SLEAP-NN tracking inside `pose.slp` when tracking is enabled;
 - export `pose.parquet` with pose, frame indices, S1 timing, and frame-level
   metadata;
-- generate `overlay.mp4` from `pose.slp`;
+- generate `overlay.mp4` from normalized `pose.parquet` rows over the prepared
+  video;
 - write `pose_meta.json`, `settings_used.yaml`, `job_manifest.yaml`, and
   `processing_log.txt`;
 - report technical pose-inference QC without claiming final biological identity
@@ -278,7 +282,8 @@ scientific-usability assessment.
 
 ## 10. Overlay Acceptance Criteria
 
-`overlay.mp4` must be generated from `pose.slp`.
+`overlay.mp4` must be rendered over the prepared video from normalized
+`pose.parquet` rows exported from `pose.slp`.
 
 If tracks are present, the overlay may color by track. Track coloring must be
 treated as provisional SLEAP/SLEAP-NN tracking, not final biological identity.
@@ -296,11 +301,12 @@ Overlay validation should check:
 
 Before subprocess submission, acceptance tests must cover missing or unreadable
 S1 inputs, invalid S1 timing-array lengths or prepared-frame mappings,
-prepared-video/S1 frame-count disagreement, missing model/profile inputs, and
-an output location that cannot be created or written. Top-down cases must also
-cover incomplete bundles, duplicate component paths, structurally incompatible
-model roles, and profile/mode conflicts. A valid S1 handoff must
-still permit normal command execution and dry-run behavior.
+prepared-video/S1 frame-count disagreement, and missing model/profile/runtime
+inputs. Top-down cases must also cover incomplete bundles, duplicate component
+paths, structurally incompatible model roles, and profile/mode conflicts. A
+valid S1 handoff must still permit normal command execution and dry-run
+behavior. Run execution must report an output location that cannot be created
+or written before launching the inference subprocess.
 
 Post-run tests must cover subprocess failure, missing/unreadable required S2
 artifacts, prediction/S1 frame mismatch, invalid exported frame/timing mapping,
@@ -313,9 +319,10 @@ outputs are post-run failures, not preflight failures.
 
 `job_manifest.yaml` must record:
 
-- input artifact paths and fingerprints;
-- output artifact paths and fingerprints;
-- model identity and model artifact fingerprints;
+- S1 input artifact paths, the `prepare_meta.json` fingerprint, and the current
+  reserved hash fields for the prepared video and sync artifact;
+- output artifact paths and generation statuses;
+- model identity and model path information;
 - runtime profile;
 - invocation provenance;
 - final run status.
@@ -345,7 +352,22 @@ including completed-run selection and S3 handoff. UI-assisted model/parameter
 optimization, expanded pose-quality review tools, and richer QC visualization
 remain optional future work rather than acceptance requirements.
 
-## 14. Acceptance Summary
+## 14. Final MVP Acceptance Verdict
+
+| Acceptance area | Final status | Accepted evidence |
+| --- | --- | --- |
+| Preprocessing handoff | Accepted | S1 artifacts were validated and consumed without modification. |
+| Inference execution | Accepted | Bottom-up and top-down centroid plus centered-instance inference completed with SLEAP-NN 0.3.0 on a real GPU. |
+| Artifact generation | Accepted | Both modes generated `pose.slp`, `pose.parquet`, `overlay.mp4`, and all required metadata/provenance artifacts. |
+| Timing preservation | Accepted | S1 prepared-frame mapping and timing propagated into pose outputs. |
+| Technical QC | Accepted | QC completed for both modes with outcome `pass`; failure and non-blocking review behavior are covered by automated tests. |
+| UI workflow | Accepted | S1-to-S2 navigation, configuration, validation, inference, discovery, selection, and technical inspection completed. |
+| S3 handoff selection | Accepted | A technically complete selected run was handed to the downstream S3 interface without making an identity or usability decision. |
+
+The supported Windows one-click installation was also validated after the S2
+`sleap-io` dependency fix. These results finalize the S2 MVP.
+
+## 15. Acceptance Summary
 
 The reusable backend acceptance suite passes when:
 

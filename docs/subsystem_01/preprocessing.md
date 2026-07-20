@@ -8,7 +8,11 @@ Subsystem 01 transforms raw behavioral videos into validated prepared videos whi
 
 It validates prepared-video compatibility and frame-domain integrity.
 
-It does not validate pose quality, SLEAP model accuracy, tracking quality, instance counts, confidence scores, coordinate exports, inference results, or SLEAP output-row structure. Those belong to the future SLEAP subsystem.
+It does not validate pose quality, SLEAP model accuracy, tracking quality,
+instance counts, confidence scores, coordinate exports, inference results, or
+SLEAP output-row structure. Pose inference and technical pose QC belong to the
+finalized Subsystem 02 MVP; identity, tracking correctness, and scientific
+usability belong downstream.
 
 ---
 

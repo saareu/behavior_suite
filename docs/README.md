@@ -8,9 +8,9 @@
 - [Issue Logs](subsystem_01/issue_logs/)
 - [Historical Archive](subsystem_01/archive/)
 
-## Subsystem 02 — SLEAP-NN Inference
+## Subsystem 02 — SLEAP-NN Inference (MVP Finalized)
 
-- [Current MVP Scope and Roadmap][s2-mvp]
+- [Final MVP Scope, Completion Status, and Roadmap][s2-mvp]
 - [Minimal Pose Inference Contract][s2-minimal-contract]
 - [Backend Pose Inference Contract][s2-backend-contract]
 - [Backend Inference Acceptance-Test Specification][s2-backend-acceptance]

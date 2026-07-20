@@ -140,7 +140,9 @@ This is intentionally narrow. It does not include validating:
 - identity assignment;
 - downstream behavioral features.
 
-Those belong to future SLEAP and analysis subsystems.
+Pose inference and technical pose QC belong to the finalized Subsystem 02 MVP.
+Identity, tracking correctness, and scientific usability belong to downstream
+analysis subsystems.
 
 ---
 

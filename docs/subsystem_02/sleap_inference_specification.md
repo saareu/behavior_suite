@@ -1,5 +1,7 @@
 # Subsystem 02 — Backend Pose Inference Contract
 
+**Status:** Frozen contract for the finalized Subsystem 02 MVP.
+
 ## 1. Purpose
 
 This document defines the backend pose inference contract for Subsystem 02. It
@@ -7,7 +9,8 @@ covers how the backend consumes completed Subsystem 01 outputs, runs
 SLEAP/SLEAP-NN inference, and writes the locked pose inference artifact set.
 
 This document is not the full Subsystem 02 MVP scope. The PySide6 application
-now provides the UI-based inference/review workflow, existing-run review,
+provides the UI-based inference and technical-run inspection workflow,
+existing-run browsing,
 Subsystem 01 completion-to-Subsystem 02 transition, and main UI integration.
 See
 [`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md).
@@ -39,7 +42,8 @@ The backend pose inference contract is responsible for:
   enables tracking;
 - writing native `pose.slp`;
 - exporting `pose.parquet`;
-- generating `overlay.mp4` from `pose.slp`;
+- generating `overlay.mp4` from normalized `pose.parquet` rows over the
+  prepared video;
 - writing run metadata, settings, manifest, and logs;
 - reporting technical pose-inference QC and non-blocking review recommendations.
 
@@ -309,7 +313,8 @@ The exact Parquet schema should be versioned in metadata as
 
 ### `overlay.mp4`
 
-`overlay.mp4` is generated from `pose.slp` and the prepared video.
+`overlay.mp4` is rendered over the prepared video from normalized
+`pose.parquet` rows exported from `pose.slp`.
 
 The overlay is a visual review aid. If tracks are present in `pose.slp`, the
 overlay may color by track. Track colors must not imply final biological
@@ -355,10 +360,11 @@ checkpoint models. Effective prediction-stage settings should be read from
 
 `job_manifest.yaml` records the input/output contract and provenance:
 
-- Subsystem 01 input artifact paths and fingerprints;
-- output artifact paths and fingerprints;
-- model path or separate top-down component paths and model metadata
-  fingerprints;
+- Subsystem 01 input artifact paths, with a content fingerprint for
+  `prepare_meta.json` and reserved null hash fields for the prepared video and
+  sync artifact;
+- output artifact paths and generation statuses;
+- model identity and path, or separate top-down component identities and paths;
 - command or structured invocation record;
 - effective SLEAP inference and tracking provenance copied from `pose.slp`
   `labels.provenance` when available;
@@ -533,10 +539,11 @@ when OpenCV reports a positive header frame count, reconciles that header count
 with authoritative S1 metadata. S2 does not repeat S1's sequential full-video
 decode. Preflight also validates model-bundle completeness, readability,
 distinct top-down component paths, structurally identifiable model roles, and
-profile/mode agreement, then confirms that the output run directory can be
-created. These are preflight failures. Missing S2 outputs are
-not called preflight failures because they are expected to be absent before
-inference.
+profile/mode agreement, and constructs the prospective output paths and command
+without creating a run directory. Run execution creates the output directory
+before subprocess launch and reports an actionable failure if it cannot be
+created. Missing S2 outputs are not called preflight failures because they are
+expected to be absent before inference.
 
 Authoritative S1 contract parsing and validation currently occurs in more than
 one S2 layer and may be centralized in a later refactor.

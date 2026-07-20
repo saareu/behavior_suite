@@ -1,4 +1,7 @@
-# Subsystem 02 — MVP Scope and Roadmap
+# Subsystem 02 — Final MVP Scope, Closure Status, and Roadmap
+
+**Status:** MVP finalized and closed to scope expansion. Future changes require
+a separately scoped post-MVP task.
 
 ## MVP Definition
 
@@ -8,40 +11,56 @@ and determines whether the technical output can be passed to Subsystem 03.
 Final tracking/identity correctness and final session usability are Subsystem
 03 responsibilities.
 
-The MVP must support both bottom-up and top-down SLEAP/SLEAP-NN models. It must
-be reachable from the main UI launch point and must support both new inference
-runs and review of existing completed Subsystem 02 runs.
+The finalized MVP supports both bottom-up and top-down SLEAP/SLEAP-NN models.
+It is reachable from the main UI launch point and supports both new inference
+runs and technical inspection of existing completed Subsystem 02 runs.
 
-## Current Status
+## Subsystem 02 MVP Completion Status
 
-Subsystem 02 MVP implementation and its first full real-GPU acceptance workflow
-are complete. Through the PySide6 application, the accepted workflow consumed a
-completed S1 handoff, ran bottom-up inference, ran top-down inference with a
-centroid plus centered-instance bundle, generated the complete locked artifact
-set, verified SLEAP provenance and S1 timing propagation, computed technical
-QC, discovered and selected the completed runs, and handed the selected run to
-S3. Both modes used SLEAP-NN 0.3.0 with `sleap-io` 0.8.0 and produced QC outcome
-`pass`.
+Subsystem 02 MVP implementation and acceptance are complete. The validation
+environment was the supported Windows PySide6 application, an external
+SLEAP-NN 0.3.0 GPU inference runtime, and `sleap-io` 0.8.0 in the Behavior Suite
+GUI Python environment. No machine-specific path is part of the contract.
+
+Closure evidence confirms:
+
+- GPU acceptance completed;
+- bottom-up acceptance completed;
+- top-down centroid plus centered-instance acceptance completed;
+- the one-click Windows installation completed successfully after the S2
+  `sleap-io` dependency fix;
+- `pose.slp`, `pose.parquet`, `overlay.mp4`, and all required
+  metadata/provenance artifacts were generated successfully;
+- S1 frame/timing propagation, technical QC, run discovery, UI run selection,
+  and S3 handoff selection completed successfully.
+
+Both accepted inference modes produced QC outcome `pass`.
 
 See
 [`evidence/gpu_mvp_acceptance_v030.md`](evidence/gpu_mvp_acceptance_v030.md)
-for the recorded acceptance evidence. This MVP status is limited to inference,
-artifact integrity, technical review, and downstream handoff; it is not a claim
-of final tracking, identity, or scientific usability.
+for the recorded acceptance evidence. This finalized status is limited to
+inference, artifact integrity, technical QC, and downstream handoff selection;
+it is not a claim of final tracking, identity, or scientific usability.
 
-Implemented backend pieces:
+Finalized MVP scope:
 
-- bottom-up backend inference path;
-- top-down centroid plus centered-instance model-bundle path;
-- minimal artifact generation;
-- `pose.parquet` export;
-- `overlay.mp4` generation;
-- technical pose-inference QC summary;
-- Subsystem 01 timing/frame metadata preservation;
+- S1-to-S2 workflow integration;
+- UI-based pose inference workflow;
+- bottom-up SLEAP-NN inference;
+- top-down centroid plus centered-instance inference;
+- SLEAP-NN 0.3.x execution-interface support;
+- generation of `pose.slp`, `pose.parquet`, `overlay.mp4`, and the required
+  metadata/provenance artifacts;
+- preservation of the S1 timing and frame mapping in pose outputs;
+- technical pose QC;
+- run discovery;
+- S3 handoff selection.
+
+Supporting implementation details include:
+
 - effective SLEAP provenance capture from `pose.slp` `labels.provenance`;
 - pre-submission validation of the S1 frame/sync contract;
 - post-run technical-QC outcomes and bounded review intervals;
-- existing-run discovery;
 - main-application S1/S2 navigation with preserved session context;
 - automatic transition to the same-session S2 screen after successful S1
   completion, without automatic inference submission;
@@ -68,7 +87,7 @@ Deferred non-blocking enhancements:
 The broader future-feature list below records additional post-MVP improvements.
 None are missing MVP requirements.
 
-## Required MVP Workflow
+## Finalized MVP Workflow
 
 Subsystem 02 MVP combines UI-based inference and technical pose-inference QC.
 It does not create a persistent user-review decision or final-usability record.
@@ -76,16 +95,15 @@ The implemented UI exposes run metadata, review intervals, and overlay/folder
 actions for technical inspection; expanded pose-review tooling and richer QC
 visualization are deferred and are not MVP requirements.
 
-The workflow has two required entry modes:
+The workflow has two supported entry modes:
 
 1. Continue from a newly completed Subsystem 01 preprocessing run.
 2. Open an existing project or session that already contains completed
-   Subsystem 02 inference runs for review, reuse, rerun, or downstream
-   selection.
+   Subsystem 02 inference runs for technical inspection, reuse, rerun, or
+   downstream selection.
 
-The main UI must expose Subsystem 02 from the same launch/navigation surface as
-Subsystem 01. Subsystem 02 should not be a separate hidden command-line-only
-workflow for the MVP.
+The main UI exposes Subsystem 02 from the same launch/navigation surface as
+Subsystem 01; S2 is not a hidden command-line-only workflow.
 
 The implemented desktop workspace uses run discovery metadata only for listing
 and selection; it does not load `pose.slp` or `pose.parquet`. It shows S1
@@ -134,8 +152,11 @@ Raw stdout/stderr is diagnostic only. Subsystem 02 metadata should use
 
 Preflight validation occurs before inference submission and validates the
 readable S1 handoff, the prepared-video frame count, authoritative sync arrays
-and prepared-frame mapping, model/profile inputs, and writable output
-location. Missing S2 outputs are post-run failures, not preflight failures.
+and prepared-frame mapping, model/profile inputs, runtime compatibility, and
+prospective command. It creates no run directory. Run execution creates the
+output directory and reports an output-location failure before launching the
+inference subprocess. Missing S2 outputs are post-run failures, not preflight
+failures.
 
 Post-run technical validation is distinct from pose-quality review warnings.
 Technical failures, including zero represented prepared frames containing at
@@ -161,6 +182,13 @@ tracking validation, identity verification, or scientific-usability assessment.
 The following are downstream responsibilities, not Subsystem 02 MVP blockers or
 limitations:
 
+- elaborate pose-review workspace;
+- model-optimization UI;
+- active learning;
+- pose correction;
+- identity verification;
+- tracking correction;
+- final pose processing;
 - final biological identity assignment;
 - final tracking verification;
 - implanted/partner mouse assignment;
