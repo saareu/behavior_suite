@@ -10,13 +10,18 @@ spatial geometry, and processing provenance.
 
 Subsystem 01 is functionally closed and entering maintenance.
 
-**Subsystem 02 — SLEAP-NN Inference and Review** is under active MVP
-development. The bottom-up backend inference path is GPU-validated and the
-top-down centroid plus centered-instance path has passed a SLEAP-NN 0.3.0 GPU
-smoke test. The PySide6 desktop application now includes S1-to-S2 navigation,
-existing-run technical review, bottom-up/top-down submission, and transient S3
-input selection. Final field acceptance, safe cancellation, and live
-subprocess-log streaming remain future work.
+**Subsystem 02 — SLEAP-NN Inference and Review** has completed MVP
+implementation and its first full real-GPU acceptance workflow. The accepted
+PySide6 workflow covers S1-to-S2 navigation, bottom-up and top-down inference,
+the standardized pose artifact set, technical QC and run discovery, completed
+run selection, and handoff of the selected run to S3. Both inference modes ran
+with SLEAP-NN 0.3.0 and `sleap-io` 0.8.0 and produced QC outcome `pass`.
+
+This status does not mean that S2 is a complete scientific-analysis pipeline.
+Final identity correctness, tracking usability, and scientific-usability
+assessment remain S3 responsibilities. Safe cancellation, live subprocess-log
+streaming, UI-assisted parameter optimization, expanded pose-quality review
+tools, and richer QC visualization remain non-blocking future enhancements.
 
 ---
 
@@ -100,7 +105,8 @@ worker, so the UI stays responsive and displays honest indeterminate activity.
 Both QC `pass` and non-blocking `review_recommended` runs that are technically
 complete can be selected as intended S3 input. This selection is not identity
 approval or a final scientific-usability judgment; S3 is currently represented
-by a clear placeholder only.
+by a clear downstream handoff interface. The full GPU acceptance workflow
+verified this S3 handoff from a selected completed run.
 
 ---
 
@@ -121,6 +127,8 @@ Current active documentation:
   pose inference contract
 - `docs/subsystem_02/acceptance_test_specification.md` — Subsystem 02 backend
   inference acceptance-test specification
+- `docs/subsystem_02/evidence/gpu_mvp_acceptance_v030.md` — recorded full S2
+  MVP GPU acceptance evidence for both inference modes and S3 handoff
 - `docs/general/development/ai_coding_guide.md` — repository-wide AI-assisted
   development guidance
 
@@ -137,17 +145,21 @@ It does not validate pose quality, SLEAP model accuracy, tracking quality,
 instance counts, confidence scores, coordinate exports, inference results, or
 SLEAP output-row structure.
 
-Subsystem 02 is the active pose-inference and review subsystem. Its current
-validated implementation covers the bottom-up backend inference path and the
-GPU-smoke-tested top-down model-bundle path under the same minimal artifact
-contract. Its MVP desktop workflow and main-application navigation are now
-implemented. Full MVP release status still depends on field acceptance and any
-later backend progress/cancellation work chosen for release.
+Subsystem 02 is the pose-inference and technical-review subsystem. Its MVP
+implementation and first full GPU-machine acceptance are complete for both the
+bottom-up path and the top-down centroid plus centered-instance bundle under
+the same minimal artifact contract. The validated workflow includes S1
+integration, UI-based inference, standardized artifacts, provenance, technical
+QC, overlay generation, run discovery, completed-run selection, and the S3
+handoff interface. Progress/cancellation improvements are optional post-MVP
+work, not missing MVP acceptance requirements.
 
 Final biological identity assignment, tracking verification, implanted/partner
 mouse assignment, identity-switch correction, imputation, pose
 smoothing/finalization, behavior-ready feature extraction, and final
-trajectory generation are downstream responsibilities.
+trajectory generation are downstream responsibilities. S2 technical QC does
+not replace tracking validation, identity verification, or final scientific-
+usability assessment.
 
 ---
 

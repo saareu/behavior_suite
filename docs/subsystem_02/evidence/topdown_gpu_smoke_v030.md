@@ -16,3 +16,7 @@ The test exercised the shared S1 timing, Parquet, technical-QC, overlay, and
 run-discovery pipeline. SLEAP-NN 0.3.x `predict` is the currently supported
 Behavior Suite execution interface. Machine-specific model and user paths are
 intentionally omitted from this general repository evidence note.
+
+This focused smoke test was followed by the full integrated GPU MVP acceptance
+for both inference modes, including S3 handoff. See
+[`gpu_mvp_acceptance_v030.md`](gpu_mvp_acceptance_v030.md).

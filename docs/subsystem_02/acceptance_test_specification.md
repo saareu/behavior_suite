@@ -6,14 +6,20 @@ This document defines acceptance evidence for the Subsystem 02 backend
 SLEAP/SLEAP-NN inference implementation.
 
 Acceptance focuses on reproducible inference, the minimal artifact contract,
-pose coverage, pose-quality QC, overlay generation, Parquet export, and
-preservation of the Subsystem 01 timing/frame contract.
+pose coverage, technical pose-inference QC, overlay generation, Parquet export,
+and preservation of the Subsystem 01 timing/frame contract.
 
 This document retains backend acceptance as its primary scope. The repository
 also contains headless controller and offscreen PySide6 tests for UI-based
 inference/review, main UI integration, existing-run review, and transient
 downstream run selection. See
 [`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md).
+
+The first full integrated S2 MVP acceptance workflow has now completed on a
+real GPU machine. It verified the S1 handoff, UI-based bottom-up and top-down
+inference, the complete artifact contract, provenance extraction, S1 timing
+propagation, technical QC, run discovery and selection, and S3 handoff. See
+[`evidence/gpu_mvp_acceptance_v030.md`](evidence/gpu_mvp_acceptance_v030.md).
 
 Identity-stable final tracking is not a blocking acceptance criterion for
 Subsystem 02.
@@ -70,16 +76,18 @@ Backend acceptance tests must prove that the Subsystem 02 backend can:
 - report technical pose-inference QC without claiming final biological identity
   continuity or final session usability.
 
-The current provisional SLEAP tracking settings are accepted as good enough for
-Subsystem 02 development. Parameter optimization is postponed to a later guided
-workflow.
+The current provisional SLEAP tracking settings are accepted for the Subsystem
+02 MVP technical pipeline. Parameter optimization is postponed to a later
+guided workflow.
 
 The backend supports bottom-up inference from one model and top-down inference
-from a centroid plus centered-instance bundle. Bottom-up has real GPU smoke
-evidence. A SLEAP-NN 0.3.0 top-down smoke also completed inference, Parquet
-export, technical QC, overlay generation, and run discovery with a successful
-`complete_reviewable` result and QC outcome `pass`.
-See [`evidence/topdown_gpu_smoke_v030.md`](evidence/topdown_gpu_smoke_v030.md).
+from a centroid plus centered-instance bundle. Both modes completed the full
+integrated GPU acceptance workflow using SLEAP-NN 0.3.0 and `sleap-io` 0.8.0.
+Each produced `pose.slp`, `pose.parquet`, `overlay.mp4`, and the metadata
+artifacts with QC outcome `pass`. The integrated workflow also verified run
+discovery, completed-run selection in the UI, and S3 handoff. Earlier focused
+top-down evidence remains at
+[`evidence/topdown_gpu_smoke_v030.md`](evidence/topdown_gpu_smoke_v030.md).
 
 Acceptance exercises these public command forms (with optional `--profile` and
 `--dry-run` as appropriate):
@@ -185,7 +193,7 @@ Each A-D clip must check:
 - S1 timing columns are joined when available;
 - frame references remain inside the prepared-video frame range;
 - required overlay generation succeeds and writes a readable artifact;
-- pose-quality QC is written to `pose_meta.json`;
+- technical pose-inference QC is written to `pose_meta.json`;
 - `settings_used.yaml`, `job_manifest.yaml`, and `processing_log.txt` are
   written.
 
@@ -198,7 +206,7 @@ The full-session integration case must check:
 - long-run logs are written;
 - `pose.slp` and `pose.parquet` validate for the full processed frame range;
 - S1 frame identity and timing are preserved through the export;
-- pose-quality QC summarizes the full run;
+- technical pose-inference QC summarizes the full run;
 - no generated outputs are written into `preprocess/`;
 - no separate tracking artifacts are required.
 
@@ -223,8 +231,8 @@ must remain missing rather than being interpolated.
 
 ## 9. Technical Pose-Inference QC Acceptance Criteria
 
-`pose_meta.json` must include a pose-quality QC summary covering, when
-available:
+`pose_meta.json` must include a technical pose-inference QC summary covering,
+when available:
 
 - animal count coverage;
 - frames with zero animals;
@@ -237,9 +245,10 @@ available:
 - implausible geometry flags;
 - tracked and untracked instance counts when tracks are present.
 
-This QC section must not include pipeline success/provenance as pose-quality
-metrics. Pipeline success and provenance belong in `job_manifest.yaml` and
-`processing_log.txt`.
+This QC validates inference execution and artifact integrity, detects extreme
+abnormal failures, and may recommend review. It must not include pipeline
+success/provenance as pose-quality metrics; pipeline success and provenance
+belong in `job_manifest.yaml` and `processing_log.txt`.
 
 QC retains `status: computed` and separately records outcome `pass`,
 `review_recommended`, or `failed`. Acceptance must prove that:
@@ -264,6 +273,8 @@ low-confidence periods, unexpected animal-count distributions, identity
 switches, or tracking continuity. Final biological identity, tracking
 correctness, and final session usability are S3 responsibilities. No persistent
 S2 user-review/final-usability record or elaborate S2 review screen is required.
+Technical QC does not replace tracking validation, identity verification, or
+scientific-usability assessment.
 
 ## 10. Overlay Acceptance Criteria
 
@@ -321,7 +332,7 @@ Before merging implementation changes, the existing Subsystem 01 tests and GUI
 launch path must remain valid. SLEAP/SLEAP-NN dependencies must not be required
 to launch or use Subsystem 01 preprocessing.
 
-Full Subsystem 02 MVP acceptance additionally requires:
+Full Subsystem 02 MVP acceptance includes:
 
 - UI-based inference and review;
 - main UI launch/navigation integration;
@@ -329,15 +340,28 @@ Full Subsystem 02 MVP acceptance additionally requires:
   downstream selection;
 - a Subsystem 01 completion-to-Subsystem 02 transition.
 
-## 14. Pass/Fail Summary
+The recorded real-GPU workflow verified all four integration requirements,
+including completed-run selection and S3 handoff. UI-assisted model/parameter
+optimization, expanded pose-quality review tools, and richer QC visualization
+remain optional future work rather than acceptance requirements.
 
-Subsystem 02 passes initial acceptance when:
+## 14. Acceptance Summary
+
+The reusable backend acceptance suite passes when:
 
 1. A-D short frozen clips produce valid minimal artifacts.
 2. E full-session integration produces valid minimal artifacts.
 3. `pose.parquet` preserves S1 frame/timing contract.
-4. `pose_meta.json` reports pose-quality QC.
+4. `pose_meta.json` reports technical pose-inference QC.
 5. Required `overlay.mp4` is created and readable.
 6. Tracking, when enabled, is stored inside `pose.slp`.
 7. No separate tracking artifacts are required.
 8. Identity-stable final tracking is not treated as a blocker.
+
+The first full GPU-machine MVP acceptance has passed for both bottom-up and
+top-down modes. The integrated workflow produced the locked artifacts and
+metadata, preserved S1 timing, extracted SLEAP provenance, computed technical
+QC with outcome `pass`, discovered and selected completed runs in the S2 UI,
+and successfully handed a selected run to S3. This result confirms technical
+MVP acceptance only; S3 remains responsible for identity correctness, tracking
+usability, and final scientific-usability assessment.

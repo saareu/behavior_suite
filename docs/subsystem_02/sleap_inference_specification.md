@@ -13,11 +13,13 @@ See
 [`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md).
 
 The backend supports bottom-up SLEAP/SLEAP-NN inference and a top-down bundle
-containing centroid and centered-instance checkpoints. Bottom-up has passed a
-real GPU smoke test. Top-down has also passed a SLEAP-NN 0.3.0 GPU smoke test
-using a centroid plus centered-instance bundle; pose, Parquet, technical QC,
-overlay, and discovery completed successfully.
-See [`evidence/topdown_gpu_smoke_v030.md`](evidence/topdown_gpu_smoke_v030.md).
+containing centroid and centered-instance checkpoints. Both modes completed the
+first full real-GPU S2 MVP acceptance workflow using SLEAP-NN 0.3.0 and
+`sleap-io` 0.8.0. The complete artifact set, provenance extraction, S1 timing
+propagation, technical QC, discovery, UI selection, and S3 handoff were
+verified with QC outcome `pass`.
+See
+[`evidence/gpu_mvp_acceptance_v030.md`](evidence/gpu_mvp_acceptance_v030.md).
 
 The backend creates one native pose result, one analysis-ready pose table, one
 visual overlay, and the minimal metadata/provenance needed to reproduce and
@@ -69,7 +71,9 @@ rows and the technical-details panel without opening large pose artifacts. A
 selected technically complete run with QC outcome `pass` or
 `review_recommended` may be represented as a transient S3 input containing the
 session/run and locked artifact paths. This is navigation input selection, not
-identity correctness or final usability approval.
+identity correctness or final usability approval. The real-GPU MVP acceptance
+workflow verified this handoff from a selected completed S2 run into the S3
+interface.
 
 New runs use the typed `PoseInferenceRequest` and `PoseInferenceModelSpec` APIs.
 Only basic mode/field presence is checked in the UI; backend preflight remains
@@ -316,16 +320,16 @@ is a post-run technical failure under the locked artifact contract.
 
 ### `pose_meta.json`
 
-`pose_meta.json` contains machine-readable run metadata and pose-quality QC
-summary.
+`pose_meta.json` contains machine-readable run metadata and a technical
+pose-inference QC summary.
 
 It records `inference_mode`. Bottom-up retains the legacy `model_id` and
 `model_path`; top-down retains a stable bundle id plus separate centroid and
 centered-instance ids and paths.
 
-The pose-quality QC section is limited to pose inference quality. Pipeline
-success, dispatch provenance, and file provenance belong in
-`job_manifest.yaml` and `processing_log.txt`.
+The technical QC section is limited to inference/artifact integrity and
+conservative review indicators. Pipeline success, dispatch provenance, and file
+provenance belong in `job_manifest.yaml` and `processing_log.txt`.
 
 When available, `pose_meta.json` should also include compact effective SLEAP
 provenance copied from `pose.slp` `labels.provenance`.
@@ -510,10 +514,14 @@ number of represented prepared frames containing at least one finite x/y pose po
 ```
 
 The required Subsystem 02 QC does not decide final biological identity,
-tracking correctness, or final session usability. Those are S3 responsibilities.
+tracking correctness, or final session usability. It validates inference
+execution and artifact integrity, detects extreme abnormal failures, and may
+recommend review; it does not replace tracking validation, identity
+verification, or scientific-usability assessment. Those are S3
+responsibilities.
 
-Pipeline success/provenance fields are not part of pose-quality QC. They belong
-in `job_manifest.yaml` and `processing_log.txt`.
+Pipeline success/provenance fields are not part of technical pose-inference QC.
+They belong in `job_manifest.yaml` and `processing_log.txt`.
 
 ## 11. Validation Requirements
 
@@ -555,8 +563,15 @@ A Subsystem 02 run is complete when:
 2. `pose.slp` is produced and can be loaded.
 3. `pose.parquet` is produced and validates against `pose.slp` and S1 frame
    identity.
-4. `pose_meta.json` contains pose-quality QC.
+4. `pose_meta.json` contains technical pose-inference QC.
 5. `settings_used.yaml` records actual inference parameters.
 6. `job_manifest.yaml` records input/output provenance.
 7. `processing_log.txt` records runtime logs.
 8. Required `overlay.mp4` is produced and readable.
+
+The integrated S2 MVP workflow additionally requires UI-based submission and
+review, run discovery and selection, and a downstream S3 handoff interface.
+These were verified for both bottom-up and top-down runs in the recorded full
+GPU acceptance. UI-assisted model/parameter optimization, expanded pose-quality
+review tools, and richer QC visualization remain future enhancements, not
+completion requirements for this contract.

@@ -1,5 +1,19 @@
 # Subsystem 02 Minimal Pose Inference Contract
 
+## MVP Acceptance Status
+
+The S2 MVP implementation has completed its first full real-GPU acceptance
+workflow. Bottom-up inference and top-down inference with a centroid plus
+centered-instance bundle both ran through the UI using SLEAP-NN 0.3.0 and
+`sleap-io` 0.8.0. Both modes generated the complete locked artifact set,
+preserved S1 timing, extracted SLEAP provenance, computed technical QC with
+outcome `pass`, and were discovered in S2. Completed runs were selected in the
+UI, and a selected completed run was handed to S3. See
+[`evidence/gpu_mvp_acceptance_v030.md`](evidence/gpu_mvp_acceptance_v030.md).
+
+This is technical MVP acceptance, not a determination of final identity,
+tracking usability, or scientific usability.
+
 ## Inputs
 
 Subsystem 02 consumes the completed Subsystem 01 prepared outputs:
@@ -45,6 +59,10 @@ pose_inference/{model-id}__{timestamp}/
   are present.
 - `pose_meta.json` contains technical pose-inference QC, including a separate
   `pass`, `review_recommended`, or `failed` outcome, not pipeline provenance.
+- Technical QC validates inference execution and artifact integrity, detects
+  extreme abnormal failures, and may recommend review. It does not replace
+  tracking validation, identity verification, or scientific-usability
+  assessment.
 - `settings_used.yaml` records actual inference parameters.
 - Model metadata records `inference_mode`; top-down metadata retains separate
   centroid and centered-instance paths and stable component identifiers.
@@ -60,6 +78,7 @@ pose_inference/{model-id}__{timestamp}/
 - Separate tracked `.slp` files.
 - Tracking reports, tracking QC CSVs, or identity maps as standard outputs.
 - Parameter optimization and guided profile tuning.
+- Expanded pose-quality review tools and richer QC visualization.
 - Any change to Subsystem 01 preprocessing behavior.
 
 Subsystem 02 decides technical completion and S3 handoff eligibility. A
