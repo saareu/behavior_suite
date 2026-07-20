@@ -1,7 +1,8 @@
 # Windows GUI runtime for behavior_suite.
 #
 # This Conda layer is intentionally minimal and reproducible. The installer
-# script performs the editable local package install separately with:
+# recreates the dedicated environment from this file, then performs the
+# editable local package install separately with:
 #   python -m pip install -e .
 name: behavior_suite_gui
 channels:

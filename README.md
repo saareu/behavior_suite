@@ -30,11 +30,20 @@ scripts\install_windows_gui.bat
 scripts\launch_windows_gui.bat
 ```
 
-The installer creates or updates the `behavior_suite_gui` Conda environment
+The installer recreates the dedicated `behavior_suite_gui` Conda environment
 with Python 3.12, FFmpeg 7.1.1 from conda-forge, PySide6 6.11.1 from
 conda-forge, and this repository installed in editable mode. It does not
 require PowerShell activation/profile setup and does not modify the user's base
 environment.
+
+The installer reconciles this dedicated environment by recreating it from the
+pinned Conda definition before installing the checkout. This intentionally
+avoids `pip uninstall` for Qt packages: mixed or damaged PySide6 installations,
+including installations whose pip `RECORD` metadata is missing, recover
+automatically on the next installer run. Project/session data is outside this
+dedicated environment and is not removed. Post-install checks start Python,
+import the pinned PySide6 runtime and application dependencies, run `pip check`,
+and run `behavior-suite doctor`.
 
 Manual runtime check:
 

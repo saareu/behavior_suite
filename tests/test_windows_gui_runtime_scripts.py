@@ -1,4 +1,6 @@
+import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
@@ -37,25 +39,22 @@ def test_environment_gui_is_minimal_pinned_conda_runtime() -> None:
     )
 
 
-def test_windows_installer_uses_conda_run_and_doctor_without_powershell() -> None:
+def test_windows_installer_recreates_dedicated_environment_without_pip_uninstall() -> None:
     text = Path("scripts/install_windows_gui.bat").read_text(encoding="utf-8")
     conda_lines = _active_conda_lines("scripts/install_windows_gui.bat")
 
     assert "powershell" not in text.lower()
     assert "conda activate" not in text.lower()
     assert all(line.lower().startswith("call conda ") for line in conda_lines)
-    assert "call conda env update -f" in text
-    assert (
-        "call conda run -n %ENV_NAME% python -m pip uninstall -y "
-        "PySide6 PySide6_Addons PySide6_Essentials shiboken6"
-    ) in text
-    assert (
-        'call conda install -n %ENV_NAME% -c conda-forge --force-reinstall '
-        '"pyside6=6.11.1" -y'
-    ) in text
+    assert "call conda env list" in text
+    assert "call conda env remove -n %ENV_NAME% -y" in text
+    assert 'call conda env create -f "%ENV_FILE%" -y' in text
+    assert "conda env update" not in text
+    assert "pip uninstall" not in text
     assert "call conda run -n %ENV_NAME% python -m pip install -e ." in text
     assert '".[gui]"' not in text
-    assert "from PySide6.QtWidgets import QApplication" in text
+    assert "python scripts\\validate_windows_gui_runtime.py" in text
+    assert "python -m pip check" in text
     assert "call conda run -n %ENV_NAME% behavior-suite doctor" in text
     assert "import cli.preprocess as p" in text
     assert "repo=Path.cwd().resolve()" in text
@@ -64,9 +63,8 @@ def test_windows_installer_uses_conda_run_and_doctor_without_powershell() -> Non
     assert "REPO_ROOT=%SCRIPT_DIR%.." in text
     assert 'cd /d "%REPO_ROOT%"' in text
     assert "if errorlevel 1" in text.lower()
-    assert "Failed to force-reinstall Conda-forge PySide6 6.11.1" in text
-    assert "remove stale pip-managed PySide6 packages" in text
-    assert "The environment remains unable to load QtWidgets." in text
+    assert "broken pip metadata" in text
+    assert "clean environment with Conda-forge PySide6 6.11.1" in text
     assert "rmdir /s" not in text.lower()
     assert "del /s" not in text.lower()
     pip_install_lines = [
@@ -78,24 +76,51 @@ def test_windows_installer_uses_conda_run_and_doctor_without_powershell() -> Non
     assert all("pyside" not in line.lower() for line in pip_install_lines)
     assert "python -m pip install -U PySide6" not in text
     assert "python -m pip install PySide6" not in text
-    assert text.index("python -m pip uninstall -y PySide6") < text.index(
-        '--force-reinstall "pyside6=6.11.1"'
+    assert text.index("conda env remove -n %ENV_NAME%") < text.index(
+        'conda env create -f "%ENV_FILE%"'
     )
-    assert text.index('--force-reinstall "pyside6=6.11.1"') < text.index(
+    assert text.index('conda env create -f "%ENV_FILE%"') < text.index(
         "python -m pip install -e ."
     )
-    force_reinstall_section = text[
-        text.index('--force-reinstall "pyside6=6.11.1"') : text.index(
-            "python -m pip install -e ."
-        )
-    ]
-    assert "if errorlevel 1" in force_reinstall_section.lower()
     assert text.index("python -m pip install -e .") < text.index(
-        "from PySide6.QtWidgets import QApplication"
+        "Python startup: ok"
     )
-    assert text.index("from PySide6.QtWidgets import QApplication") < text.index(
-        "behavior-suite doctor"
+    assert text.index("Python startup: ok") < text.index(
+        "python scripts\\validate_windows_gui_runtime.py"
     )
+    assert text.index("python scripts\\validate_windows_gui_runtime.py") < text.index(
+        "python -m pip check"
+    )
+    assert text.index("python -m pip check") < text.index("behavior-suite doctor")
+
+
+def test_windows_runtime_validator_imports_full_application_surface(
+    monkeypatch,
+    capsys,
+) -> None:
+    path = Path("scripts/validate_windows_gui_runtime.py")
+    spec = importlib.util.spec_from_file_location("validate_windows_gui_runtime", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    imported: list[str] = []
+
+    def fake_import(name: str):
+        imported.append(name)
+        return SimpleNamespace(__version__="6.11.1" if name == "PySide6" else None)
+
+    monkeypatch.setattr(module.importlib, "import_module", fake_import)
+
+    assert module.main() == 0
+    assert imported == [
+        *module.DEPENDENCY_MODULES,
+        *module.QT_MODULES,
+        *module.APPLICATION_MODULES,
+    ]
+    output = capsys.readouterr().out
+    assert "PySide6 import/version: ok (6.11.1)" in output
+    assert "Application dependency imports: ok" in output
 
 
 def test_windows_launcher_checks_environment_doctor_then_gui() -> None:

@@ -24,24 +24,24 @@ if not exist "%ENV_FILE%" (
     goto fail
 )
 
-set "STEP=creating or updating %ENV_NAME% Conda environment"
-call conda env update -f "%ENV_FILE%" --prune
-if errorlevel 1 (
-    echo Failed to create or update the %ENV_NAME% Conda environment.
-    goto fail
+set "STEP=checking for an existing %ENV_NAME% Conda environment"
+call conda env list | %SystemRoot%\System32\findstr.exe /B /I /C:"%ENV_NAME% " >nul
+if not errorlevel 1 (
+    set "STEP=recreating the dedicated %ENV_NAME% Conda environment"
+    echo Recreating the dedicated %ENV_NAME% environment from environment-gui.yml.
+    echo This automatically removes stale pip/Conda packages and broken pip metadata.
+    call conda env remove -n %ENV_NAME% -y
+    if errorlevel 1 (
+        echo Failed to remove the existing dedicated %ENV_NAME% environment.
+        echo Close programs using that environment and run this installer again.
+        goto fail
+    )
 )
 
-set "STEP=removing stale pip-managed PySide6 packages from %ENV_NAME%"
-call conda run -n %ENV_NAME% python -m pip uninstall -y PySide6 PySide6_Addons PySide6_Essentials shiboken6
+set "STEP=creating clean %ENV_NAME% Conda environment"
+call conda env create -f "%ENV_FILE%" -y
 if errorlevel 1 (
-    echo Failed to remove stale pip-managed PySide6 packages from %ENV_NAME%.
-    goto fail
-)
-
-set "STEP=reinstalling Conda-forge PySide6 runtime"
-call conda install -n %ENV_NAME% -c conda-forge --force-reinstall "pyside6=6.11.1" -y
-if errorlevel 1 (
-    echo Failed to force-reinstall Conda-forge PySide6 6.11.1 in %ENV_NAME%.
+    echo Failed to create the clean %ENV_NAME% Conda environment.
     goto fail
 )
 
@@ -59,13 +59,25 @@ if errorlevel 1 (
     goto fail
 )
 
-set "STEP=verifying Conda-forge PySide6 Qt runtime"
-call conda run -n %ENV_NAME% python -c "from PySide6.QtWidgets import QApplication; print('PySide6 QtWidgets import: ok')"
+set "STEP=verifying Python starts after installation"
+call conda run -n %ENV_NAME% python -c "import sys; print('Python startup: ok (' + sys.version.split()[0] + ')')"
 if errorlevel 1 (
-    echo PySide6/QtWidgets import failed in %ENV_NAME%.
-    echo The supported Windows GUI runtime uses Conda-forge PySide6.
-    echo The installer attempted to remove stale pip-managed PySide6 packages and reinstall Conda-forge PySide6.
-    echo The environment remains unable to load QtWidgets.
+    echo Python failed to start in %ENV_NAME% after installation.
+    goto fail
+)
+
+set "STEP=validating PySide6 and application dependency imports"
+call conda run -n %ENV_NAME% python scripts\validate_windows_gui_runtime.py
+if errorlevel 1 (
+    echo PySide6 or an application dependency failed to import in %ENV_NAME%.
+    echo The supported runtime is a clean environment with Conda-forge PySide6 6.11.1.
+    goto fail
+)
+
+set "STEP=checking installed Python dependency consistency"
+call conda run -n %ENV_NAME% python -m pip check
+if errorlevel 1 (
+    echo Python package dependency consistency checks failed in %ENV_NAME%.
     goto fail
 )
 
