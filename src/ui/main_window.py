@@ -181,26 +181,32 @@ class MainWindow(QMainWindow):
     def _show_s3_from_s2(self, handoff: object) -> None:
         if self.pose_page.has_running_task:
             self.statusBar().showMessage(
-                "Cannot continue to Subsystem 3 while a Subsystem 2 task is active."
+                "Cannot continue to Subsystem 3 while a background task is active."
             )
             return
         if not isinstance(handoff, S3PoseInput):
             self._show_unexpected_error("Unexpected Subsystem 3 handoff type.")
             return
         self._session_root = handoff.session_root
+        s3_run = handoff.existing_s3_run_dir
+        if s3_run is None:
+            self.s3_message.setText(
+                "S2 handoff received, but no completed Subsystem 3 run is available yet.\n\n"
+                f"Project: {handoff.session_root}\n"
+                f"S2 run: {handoff.selected_run_dir}"
+            )
+            self.open_tracking_review()
+            return
         self.s3_message.setText(
-            "S2 handoff received. Run automatic tracking correction on the selected "
-            "S2 run, then open this project/session to review completed S3 output.\n\n"
+            "Opened Subsystem 3 from the selected S2 run.\n\n"
             f"Project: {handoff.session_root}\n"
             f"S2 run: {handoff.selected_run_dir}\n"
+            f"S3 run: {s3_run}\n"
             f"Mode: {handoff.inference_mode or 'unknown'}\n"
-            f"QC: {handoff.qc_outcome or 'unknown'}\n\n"
-            "CLI: python -m tracking_correction run --s2-run <s2_run_dir>\n"
-            "Review (project): open the session root in this workspace\n"
-            "Review (direct): python -m tracking_correction review --s3-run <s3_run_dir>"
+            f"QC: {handoff.qc_outcome or 'unknown'}"
         )
         self.open_tracking_review()
-
+        self.review_page.open_run(s3_run)
     def _browse_s3_project(self) -> None:
         start = str(self._session_root) if self._session_root is not None else ""
         chosen = QFileDialog.getExistingDirectory(

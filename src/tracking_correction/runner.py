@@ -121,6 +121,16 @@ def selected_profile_id() -> str:
     return CURRENT_PROFILE_ID
 
 
+def validate_s2_handoff(s2_run_dir: Path | str) -> Path:
+    """Validate an S2 run for Subsystem 3 using the same checks as the CLI runner.
+
+    Returns the resolved S2 run directory. Raises ``TrackingCorrectionError`` when
+    the run is incomplete, missing pose data, or cannot resolve S1 inputs.
+    """
+
+    return _validate_handoff(Path(s2_run_dir)).s2_run_dir
+
+
 def run_tracking_correction(request: TrackingCorrectionRequest) -> TrackingCorrectionResult:
     """Validate a completed S2 run, then run the current-lab corrector unless dry-run.
 

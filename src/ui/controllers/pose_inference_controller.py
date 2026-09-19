@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from pose_inference.run_discovery import (
-    COMPLETE_REVIEWABLE,
     PoseInferenceProjectSummary,
     PoseInferenceRunSummary,
     summarize_pose_inference_project,
@@ -33,6 +32,13 @@ from pose_inference.runner import (
     run_pose_inference,
     validate_s1_handoff,
 )
+from tracking_correction.contracts import (
+    TrackingCorrectionError,
+    TrackingCorrectionRequest,
+    TrackingCorrectionResult,
+)
+from tracking_correction.run_discovery import find_reviewable_s3_run_for_s2
+from tracking_correction.runner import run_tracking_correction, validate_s2_handoff
 from ui.controllers.run_preprocess_controller import open_folder_in_platform_explorer
 
 
@@ -59,7 +65,7 @@ class S1UiStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class S3PoseInput:
-    """Narrow navigation handoff for a future Subsystem 03 screen."""
+    """S2 → S3 handoff: always carries the S2 run directory, never parquet alone."""
 
     session_root: Path
     selected_run_dir: Path
@@ -68,6 +74,7 @@ class S3PoseInput:
     overlay_path: Path
     inference_mode: str | None
     qc_outcome: str | None
+    existing_s3_run_dir: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +119,7 @@ class PoseInferenceUiState:
     active_run_dir: Path | None = None
     unexpected_error_detail: str | None = None
     s3_handoff: S3PoseInput | None = None
+    last_s3_result: TrackingCorrectionResult | None = None
     profile_summary: ProfileSummary | None = None
     last_preflight: PoseInferencePreflightResult | None = None
     preflight_report: str | None = None
@@ -132,6 +140,9 @@ class SettingsStore(Protocol):
 DiscoveryFunction = Callable[[Path | str], PoseInferenceProjectSummary]
 RunnerFunction = Callable[[PoseInferenceRequest], PoseInferenceResult]
 PreflightFunction = Callable[[PoseInferenceRequest], PoseInferencePreflightResult]
+S3ValidatorFunction = Callable[[Path], Path]
+S3FinderFunction = Callable[[Path, Path], Path | None]
+S3RunnerFunction = Callable[[TrackingCorrectionRequest], TrackingCorrectionResult]
 PathOpener = Callable[[Path], bool]
 ProgressCallback = Callable[[str, Path | None], None]
 
@@ -183,6 +194,9 @@ class PoseInferenceController:
         discovery: DiscoveryFunction = summarize_pose_inference_project,
         runner: RunnerFunction = run_pose_inference,
         preflight: PreflightFunction = preflight_pose_inference,
+        s3_validator: S3ValidatorFunction = validate_s2_handoff,
+        s3_finder: S3FinderFunction = find_reviewable_s3_run_for_s2,
+        s3_runner: S3RunnerFunction = run_tracking_correction,
         settings: SettingsStore | None = None,
         folder_opener: PathOpener = open_folder_in_platform_explorer,
         file_opener: PathOpener = open_file_in_default_application,
@@ -191,9 +205,13 @@ class PoseInferenceController:
         self._discovery = discovery
         self._runner = runner
         self._preflight = preflight
+        self._s3_validator = s3_validator
+        self._s3_finder = s3_finder
+        self._s3_runner = s3_runner
         self._settings = settings
         self._folder_opener = folder_opener
         self._file_opener = file_opener
+        self._s3_eligibility_cache: tuple[str, str, str | None, Path | None] | None = None
         self.state.bottomup_profile_path = str(self.default_profile_path(InferenceMode.BOTTOMUP))
         self.state.topdown_profile_path = str(self.default_profile_path(InferenceMode.TOPDOWN))
         self.load_persisted_paths()
@@ -201,9 +219,10 @@ class PoseInferenceController:
 
     def _ensure_idle(self, action: str) -> None:
         if self.state.task_running:
-            raise PoseInferenceUiError(
-                f"Cannot {action} while a Subsystem 2 task is active."
-            )
+            raise PoseInferenceUiError(f"Cannot {action} while a background task is active.")
+
+    def _clear_s3_eligibility_cache(self) -> None:
+        self._s3_eligibility_cache = None
 
     @staticmethod
     def default_profile_path(mode: InferenceMode | str) -> Path:
@@ -254,12 +273,15 @@ class PoseInferenceController:
         self.state.session_root = root
         self.state.selected_run_id = None
         self.state.s3_handoff = None
+        self.state.last_s3_result = None
+        self._clear_s3_eligibility_cache()
         return self.refresh_discovery()
 
     def refresh_discovery(self) -> PoseInferenceProjectSummary | None:
         """Refresh only compact S1/S2 metadata and retain a valid run selection."""
 
         self._ensure_idle("refresh run discovery")
+        self._clear_s3_eligibility_cache()
         root = self.state.session_root
         if root is None:
             self._clear_session("Select a project/session.")
@@ -289,9 +311,7 @@ class PoseInferenceController:
         else:
             self._inspect_s1_metadata(root)
         run_ids = {run.run_id for run in summary.runs}
-        self.state.selected_run_id = (
-            previous_selection if previous_selection in run_ids else None
-        )
+        self.state.selected_run_id = previous_selection if previous_selection in run_ids else None
         return summary
 
     def _inspect_s1_metadata(self, root: Path) -> None:
@@ -432,9 +452,7 @@ class PoseInferenceController:
             if not self.state.centroid_model_path.strip():
                 raise PoseInferenceUiError("Select a top-down centroid model path.")
             if not self.state.centered_instance_model_path.strip():
-                raise PoseInferenceUiError(
-                    "Select a top-down centered-instance model path."
-                )
+                raise PoseInferenceUiError("Select a top-down centered-instance model path.")
 
     def build_request(self) -> PoseInferenceRequest:
         """Build the exact typed request passed to the authoritative backend."""
@@ -566,8 +584,10 @@ class PoseInferenceController:
         self.state.last_result = result
         self.state.active_run_dir = result.run_dir
         self.state.run_stage = "Complete" if result.success else "Failed"
-        self.state.run_error = None if result.success else (
-            f"Pose inference failed with status '{result.status}'. See processing_log.txt."
+        self.state.run_error = (
+            None
+            if result.success
+            else (f"Pose inference failed with status '{result.status}'. See processing_log.txt.")
         )
         if not had_active_task:
             self.refresh_discovery()
@@ -600,7 +620,7 @@ class PoseInferenceController:
             return False
         had_active_task = self.state.task_running
         self.state.run_stage = "Failed"
-        if isinstance(exc, (PoseInferenceError, OSError, ValueError)):
+        if isinstance(exc, (PoseInferenceError, TrackingCorrectionError, OSError, ValueError)):
             self.state.run_error = str(exc)
         else:
             self.state.run_error = "An unexpected error occurred while running pose inference."
@@ -639,6 +659,7 @@ class PoseInferenceController:
         """Select a discovered run without opening pose or parquet artifacts."""
 
         self._ensure_idle("change the selected run")
+        self._clear_s3_eligibility_cache()
         if run_id is None:
             self.state.selected_run_id = None
             return None
@@ -648,48 +669,189 @@ class PoseInferenceController:
         self.state.selected_run_id = run_id
         return selected
 
-    def selected_run_can_feed_s3(self) -> bool:
-        """Allow technical pass and review-recommended runs, never incomplete runs."""
+    def _s3_eligibility_snapshot(
+        self,
+    ) -> tuple[str | None, Path | None]:
+        """Return (unavailable_reason, existing_s3_run_dir) for the selected S2 run."""
 
         run = self.selected_run
-        return bool(
-            run is not None
-            and run.classification == COMPLETE_REVIEWABLE
-            and run.pose_qc_outcome in {"pass", "review_recommended"}
-            and all(
-                run.artifact_presence.get(key, False)
-                for key in ("pose_slp", "pose_parquet", "overlay_mp4")
+        if run is None:
+            return ("Select an S2 run.", None)
+        run_key = str(run.run_dir.resolve(strict=False))
+        cache = self._s3_eligibility_cache
+        if cache is not None and cache[0] == run.run_id and cache[1] == run_key:
+            return (cache[2], cache[3])
+
+        reason: str | None
+        existing: Path | None = None
+        try:
+            resolved = self._s3_validator(run.run_dir)
+            reason = None
+        except TrackingCorrectionError as exc:
+            reason = str(exc)
+            resolved = run.run_dir.resolve(strict=False)
+        except OSError as exc:
+            reason = f"Could not validate the selected S2 run: {exc}"
+            resolved = run.run_dir.resolve(strict=False)
+        else:
+            root = self.state.session_root
+            if root is not None:
+                try:
+                    existing = self._s3_finder(root, resolved)
+                except OSError:
+                    existing = None
+
+        self._s3_eligibility_cache = (run.run_id, run_key, reason, existing)
+        return (reason, existing)
+
+    def selected_run_s3_unavailable_reason(self) -> str | None:
+        """Explain why the selected S2 run cannot continue to Subsystem 3."""
+
+        reason, _existing = self._s3_eligibility_snapshot()
+        return reason
+
+    def selected_run_can_feed_s3(self) -> bool:
+        """Enable S3 when authoritative tracking-correction handoff validation passes."""
+
+        return self.selected_run_s3_unavailable_reason() is None
+
+    def selected_s3_action_label(self) -> str:
+        """Return a dynamic S3 action label for the current selection."""
+
+        if not self.selected_run_can_feed_s3():
+            return "Run Subsystem 3"
+        _reason, existing = self._s3_eligibility_snapshot()
+        return "Open Subsystem 3" if existing is not None else "Run Subsystem 3"
+
+    def existing_s3_run_for_selected(self) -> Path | None:
+        """Return a completed S3 run for the selected S2 run, when one already exists."""
+
+        if not self.selected_run_can_feed_s3():
+            return None
+        _reason, existing = self._s3_eligibility_snapshot()
+        return existing
+
+    def build_s3_handoff(self) -> S3PoseInput:
+        """Build an S2→S3 handoff using the S2 run directory and CLI validation."""
+
+        self._ensure_idle("continue to Subsystem 3")
+        cached_run = self.selected_run
+        root = self.state.session_root
+        if root is None or cached_run is None:
+            raise PoseInferenceUiError(
+                "Select a completed S2 run before continuing to Subsystem 3."
             )
+        selected_id = cached_run.run_id
+        selected_dir = cached_run.run_dir.resolve(strict=False)
+        self.refresh_discovery()
+        run = next(
+            (
+                candidate
+                for candidate in self.runs
+                if candidate.run_id == selected_id
+                and candidate.run_dir.resolve(strict=False) == selected_dir
+            ),
+            None,
         )
-
-    @staticmethod
-    def _validate_readable_file(path: Path, label: str) -> None:
-        if not path.is_file():
+        if run is None:
             raise PoseInferenceUiError(
-                f"The selected run is stale or incomplete: {label} is missing."
+                "The selected run was deleted or changed. Refresh and select an available run."
             )
+        self.state.selected_run_id = run.run_id
+        self._clear_s3_eligibility_cache()
         try:
-            with path.open("rb") as stream:
-                stream.read(1)
+            resolved_s2 = self._s3_validator(run.run_dir)
+        except TrackingCorrectionError as exc:
+            raise PoseInferenceUiError(str(exc)) from exc
         except OSError as exc:
-            raise PoseInferenceUiError(
-                f"The selected run cannot continue to S3 because {label} is unreadable: {exc}"
-            ) from exc
+            raise PoseInferenceUiError(f"Could not validate the selected S2 run: {exc}") from exc
 
-    def _validate_s3_artifacts(self, run: PoseInferenceRunSummary) -> None:
-        run_dir = run.run_dir
-        if not run_dir.is_dir():
-            raise PoseInferenceUiError(
-                "The selected run directory was deleted or is unavailable."
-            )
+        existing: Path | None = None
         try:
-            next(run_dir.iterdir(), None)
-        except OSError as exc:
-            raise PoseInferenceUiError(
-                f"The selected run directory is unreadable: {exc}"
-            ) from exc
-        for filename in ("pose.slp", "pose.parquet", "overlay.mp4"):
-            self._validate_readable_file(run_dir / filename, filename)
+            existing = self._s3_finder(root, resolved_s2)
+        except OSError:
+            existing = None
+
+        handoff = S3PoseInput(
+            session_root=root,
+            selected_run_dir=resolved_s2,
+            pose_slp_path=resolved_s2 / "pose.slp",
+            pose_parquet_path=resolved_s2 / "pose.parquet",
+            overlay_path=resolved_s2 / "overlay.mp4",
+            inference_mode=run.inference_mode,
+            qc_outcome=run.pose_qc_outcome,
+            existing_s3_run_dir=existing,
+        )
+        self.state.s3_handoff = handoff
+        self._s3_eligibility_cache = (
+            run.run_id,
+            str(run.run_dir.resolve(strict=False)),
+            None,
+            existing,
+        )
+        return handoff
+
+    def begin_s3_correction(
+        self,
+        s2_run_dir: Path | None = None,
+    ) -> TrackingCorrectionRequest:
+        """Mark one asynchronous Subsystem 3 run active for the given S2 directory."""
+
+        self._ensure_idle("start Subsystem 3")
+        if s2_run_dir is None:
+            handoff = self.build_s3_handoff()
+            if handoff.existing_s3_run_dir is not None:
+                raise PoseInferenceUiError(
+                    "A completed Subsystem 3 run already exists for this S2 run."
+                )
+            s2_run_dir = handoff.selected_run_dir
+        request = TrackingCorrectionRequest(
+            s2_run_dir=Path(s2_run_dir),
+            dry_run=False,
+            run_purpose=self.state.run_purpose.strip() or "development",
+        )
+        self._begin_task("Running automatic tracking correction…")
+        return request
+
+    def execute_s3_correction(
+        self,
+        request: TrackingCorrectionRequest,
+    ) -> TrackingCorrectionResult:
+        """Execute tracking correction in a worker; does not mutate UI state."""
+
+        return self._s3_runner(request)
+
+    def apply_s3_result(
+        self,
+        result: TrackingCorrectionResult,
+        *,
+        token: int | None = None,
+    ) -> bool:
+        """Store a completed S3 worker result and attach it to the current handoff."""
+
+        if not self._accepts_task_token(token):
+            return False
+        if not isinstance(result, TrackingCorrectionResult):
+            raise TypeError("Tracking correction worker returned an unexpected result type.")
+        self.state.last_s3_result = result
+        self.state.run_stage = "S3 complete" if result.success else "S3 failed"
+        self.state.run_error = (
+            None if result.success else (f"Subsystem 3 failed with status '{result.status}'.")
+        )
+        previous = self.state.s3_handoff
+        if previous is not None and result.success:
+            self.state.s3_handoff = S3PoseInput(
+                session_root=previous.session_root,
+                selected_run_dir=previous.selected_run_dir,
+                pose_slp_path=previous.pose_slp_path,
+                pose_parquet_path=previous.pose_parquet_path,
+                overlay_path=previous.overlay_path,
+                inference_mode=previous.inference_mode,
+                qc_outcome=previous.qc_outcome,
+                existing_s3_run_dir=result.run_dir,
+            )
+            self._clear_s3_eligibility_cache()
+        return True
 
     @staticmethod
     def _local_path_unavailable(path_text: str, *, require_file: bool) -> bool:
@@ -752,9 +914,9 @@ class PoseInferenceController:
         if not _is_network_path_text(effective_profile):
             try:
                 profile = load_inference_profile(Path(effective_profile))
-                configured_mode = str(
-                    profile.get("inference_mode", "bottomup")
-                ).strip().lower().replace("-", "")
+                configured_mode = (
+                    str(profile.get("inference_mode", "bottomup")).strip().lower().replace("-", "")
+                )
             except (PoseInferenceError, OSError, ValueError) as exc:
                 return f"The copied inference profile is invalid: {exc}"
             if configured_mode != mode.value:
@@ -844,8 +1006,7 @@ class PoseInferenceController:
         if not stages:
             return "- Stage details were not provided by the preflight implementation."
         return "\n".join(
-            f"- {stage.name}: {stage.status}"
-            + (f" — {stage.detail}" if stage.detail else "")
+            f"- {stage.name}: {stage.status}" + (f" — {stage.detail}" if stage.detail else "")
             for stage in stages
         )
 
@@ -870,54 +1031,6 @@ class PoseInferenceController:
             f"{heading}{executable}\n\nValidation stages:\n{stages}\n\n"
             f"Full actionable error: {report.error}"
         )
-
-    def build_s3_handoff(self) -> S3PoseInput:
-        """Build a transient S3 navigation input without scientific approval semantics."""
-
-        self._ensure_idle("continue to Subsystem 3")
-        cached_run = self.selected_run
-        root = self.state.session_root
-        if root is None or cached_run is None:
-            raise PoseInferenceUiError(
-                "Select a technically complete S2 run before continuing to S3."
-            )
-        selected_id = cached_run.run_id
-        selected_dir = cached_run.run_dir.resolve(strict=False)
-        self.refresh_discovery()
-        run = next(
-            (
-                candidate
-                for candidate in self.runs
-                if candidate.run_id == selected_id
-                and candidate.run_dir.resolve(strict=False) == selected_dir
-            ),
-            None,
-        )
-        if run is None:
-            raise PoseInferenceUiError(
-                "The selected run was deleted or changed. Refresh and select an available run."
-            )
-        self.state.selected_run_id = run.run_id
-        if run.classification != COMPLETE_REVIEWABLE:
-            raise PoseInferenceUiError(
-                "The selected run is not technically complete and reviewable."
-            )
-        if run.pose_qc_outcome not in {"pass", "review_recommended"}:
-            raise PoseInferenceUiError(
-                "The selected run has failed, missing, or contradictory pose QC metadata."
-            )
-        self._validate_s3_artifacts(run)
-        handoff = S3PoseInput(
-            session_root=root,
-            selected_run_dir=run.run_dir,
-            pose_slp_path=run.run_dir / "pose.slp",
-            pose_parquet_path=run.run_dir / "pose.parquet",
-            overlay_path=run.run_dir / "overlay.mp4",
-            inference_mode=run.inference_mode,
-            qc_outcome=run.pose_qc_outcome,
-        )
-        self.state.s3_handoff = handoff
-        return handoff
 
     def copy_selected_run_settings(self) -> None:
         """Copy discoverable paths only; backend preflight validates their current roles."""
@@ -1024,13 +1137,9 @@ class PoseInferenceController:
                 "outcome": selected.pose_qc_outcome,
                 "thresholds": selected.qc_thresholds,
                 "diagnostic_findings": list(selected.diagnostic_findings),
-                "review_recommendation_reasons": list(
-                    selected.review_recommendation_reasons
-                ),
+                "review_recommendation_reasons": list(selected.review_recommendation_reasons),
                 "flagged_intervals": intervals,
-                "flagged_interval_labels": list(
-                    self.flagged_interval_display_lines(selected)
-                ),
+                "flagged_interval_labels": list(self.flagged_interval_display_lines(selected)),
             },
             "artifact_paths": {
                 key: str(selected.run_dir / filename)
@@ -1090,9 +1199,7 @@ class PoseInferenceController:
             if _is_network_path_text(raw):
                 setattr(self.state, attribute, raw)
                 self.state.unverified_network_paths.add(raw)
-                self.state.notices.append(
-                    f"Saved network path is loaded but unverified: {raw}"
-                )
+                self.state.notices.append(f"Saved network path is loaded but unverified: {raw}")
                 continue
             path = Path(raw).expanduser()
             valid = path.is_file() if require_file else path.exists()

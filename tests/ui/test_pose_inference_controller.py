@@ -17,6 +17,7 @@ from pose_inference.runner import (
     PoseInferenceError,
     PoseInferenceResult,
 )
+from tracking_correction.contracts import TrackingCorrectionError
 from ui.controllers.pose_inference_controller import (
     InferenceMode,
     PoseInferenceController,
@@ -302,22 +303,26 @@ def test_backend_preflight_error_is_preserved_as_actionable_failure(
     assert "install 0.3.x" in (controller.state.run_error or "")
 
 
-@pytest.mark.parametrize("qc_outcome", ["pass", "review_recommended"])
-def test_complete_pass_and_review_runs_can_feed_s3(
-    tmp_path: Path, qc_outcome: str
+@pytest.mark.parametrize("qc_outcome", ["pass", "review_recommended", None, "failed"])
+def test_complete_runs_can_feed_s3_when_validator_accepts(
+    tmp_path: Path, qc_outcome: str | None
 ) -> None:
     _write_s1(tmp_path)
-    run = _run(tmp_path, "run-1", qc_outcome=qc_outcome)
+    run = replace(_run(tmp_path, "run-1", qc_outcome=qc_outcome or "pass"), pose_qc_outcome=qc_outcome)
     controller = PoseInferenceController(
-        discovery=lambda _root: _summary(tmp_path, (run,))
+        discovery=lambda _root: _summary(tmp_path, (run,)),
+        s3_validator=lambda path: Path(path).resolve(strict=False),
+        s3_finder=lambda _root, _s2: None,
     )
     controller.set_session(tmp_path)
     controller.select_run(run.run_id)
 
+    assert controller.selected_run_can_feed_s3() is True
     handoff = controller.build_s3_handoff()
 
-    assert handoff.pose_slp_path == run.run_dir / "pose.slp"
-    assert handoff.pose_parquet_path == run.run_dir / "pose.parquet"
+    assert handoff.selected_run_dir == run.run_dir.resolve(strict=False)
+    assert handoff.pose_parquet_path == handoff.selected_run_dir / "pose.parquet"
+    assert handoff.existing_s3_run_dir is None
     assert handoff.qc_outcome == qc_outcome
 
 
@@ -338,14 +343,24 @@ def test_incomplete_runs_cannot_feed_s3(tmp_path: Path, run: str) -> None:
         ),
         overlay=run != "missing_overlay",
     )
+
+    def reject(_path: Path) -> Path:
+        raise TrackingCorrectionError(
+            "S2 run is not a completed pose-inference run: status=failed, dry_run=False."
+        )
+
     controller = PoseInferenceController(
-        discovery=lambda _root: _summary(tmp_path, (selected,))
+        discovery=lambda _root: _summary(tmp_path, (selected,)),
+        s3_validator=reject,
     )
     controller.set_session(tmp_path)
     controller.select_run(selected.run_id)
 
     assert controller.selected_run_can_feed_s3() is False
-    with pytest.raises(PoseInferenceUiError, match="technically complete"):
+    reason = controller.selected_run_s3_unavailable_reason()
+    assert reason is not None
+    assert "not a completed" in reason
+    with pytest.raises(PoseInferenceUiError, match="not a completed"):
         controller.build_s3_handoff()
 
 
@@ -422,39 +437,62 @@ def test_technical_details_include_flagged_intervals_and_runtime(tmp_path: Path)
 def test_s3_revalidates_deleted_artifacts_at_action_time(tmp_path: Path) -> None:
     _write_s1(tmp_path)
     run = _run(tmp_path, "deleted-before-s3")
+
+    def validate(path: Path) -> Path:
+        parquet = Path(path) / "pose.parquet"
+        if not parquet.is_file():
+            raise TrackingCorrectionError(f"pose.parquet does not exist: {parquet}")
+        return Path(path).resolve(strict=False)
+
     controller = PoseInferenceController(
-        discovery=lambda _root: _summary(tmp_path, (run,))
+        discovery=lambda _root: _summary(tmp_path, (run,)),
+        s3_validator=validate,
     )
     controller.set_session(tmp_path)
     controller.select_run(run.run_id)
     (run.run_dir / "pose.parquet").unlink()
+    controller._clear_s3_eligibility_cache()
 
-    with pytest.raises(PoseInferenceUiError, match="pose.parquet is missing"):
+    assert controller.selected_run_can_feed_s3() is False
+    with pytest.raises(PoseInferenceUiError, match="pose.parquet does not exist"):
         controller.build_s3_handoff()
 
 
-@pytest.mark.parametrize("qc_outcome", ["failed", None])
-def test_s3_rejects_contradictory_or_failed_qc(
-    tmp_path: Path,
-    qc_outcome: str | None,
-) -> None:
+def test_s3_opens_existing_result_without_rerunning(tmp_path: Path) -> None:
     _write_s1(tmp_path)
-    run = replace(_run(tmp_path, "bad-qc"), pose_qc_outcome=qc_outcome)
+    run = _run(tmp_path, "with-s3")
+    existing = tmp_path / "tracking_correction" / "existing-s3"
+    existing.mkdir(parents=True)
+    calls = {"runner": 0}
+
+    def finder(_root: Path, _s2: Path) -> Path | None:
+        return existing
+
+    def runner(_request):
+        calls["runner"] += 1
+        raise AssertionError("should not rerun")
+
     controller = PoseInferenceController(
-        discovery=lambda _root: _summary(tmp_path, (run,))
+        discovery=lambda _root: _summary(tmp_path, (run,)),
+        s3_validator=lambda path: Path(path).resolve(strict=False),
+        s3_finder=finder,
+        s3_runner=runner,
     )
     controller.set_session(tmp_path)
     controller.select_run(run.run_id)
 
-    with pytest.raises(PoseInferenceUiError, match="pose QC metadata"):
-        controller.build_s3_handoff()
+    assert controller.selected_s3_action_label() == "Open Subsystem 3"
+    handoff = controller.build_s3_handoff()
+    assert handoff.existing_s3_run_dir == existing
+    assert calls["runner"] == 0
 
 
 def test_active_task_rejects_s3_and_run_selection_actions(tmp_path: Path) -> None:
     _write_s1(tmp_path)
     run = _run(tmp_path, "selected")
     controller = PoseInferenceController(
-        discovery=lambda _root: _summary(tmp_path, (run,))
+        discovery=lambda _root: _summary(tmp_path, (run,)),
+        s3_validator=lambda path: Path(path).resolve(strict=False),
     )
     controller.set_session(tmp_path)
     controller.select_run(run.run_id)
@@ -462,9 +500,9 @@ def test_active_task_rejects_s3_and_run_selection_actions(tmp_path: Path) -> Non
     controller.begin_run()
     token = controller.active_task_token
 
-    with pytest.raises(PoseInferenceUiError, match="task is active"):
+    with pytest.raises(PoseInferenceUiError, match="background task is active"):
         controller.build_s3_handoff()
-    with pytest.raises(PoseInferenceUiError, match="task is active"):
+    with pytest.raises(PoseInferenceUiError, match="background task is active"):
         controller.select_run(run.run_id)
 
     controller.finish_run(token=token)

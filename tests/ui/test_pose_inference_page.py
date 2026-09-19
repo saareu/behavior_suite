@@ -211,7 +211,7 @@ def test_invalid_handoff_disables_run_and_malformed_run_does_not_crash(
     page.close()
 
 
-def test_review_intervals_are_displayed_and_missing_overlay_disables_action(
+def test_review_intervals_are_displayed_and_missing_overlay_disables_overlay_action(
     tmp_path: Path,
 ) -> None:
     _write_s1(tmp_path)
@@ -223,7 +223,8 @@ def test_review_intervals_are_displayed_and_missing_overlay_disables_action(
         classification="missing_required_artifacts",
     )
     controller = PoseInferenceController(
-        discovery=lambda _root: _summary(tmp_path, (review,))
+        discovery=lambda _root: _summary(tmp_path, (review,)),
+        s3_validator=lambda path: Path(path).resolve(strict=False),
     )
     controller.set_session(tmp_path)
     controller.select_run(review.run_id)
@@ -233,7 +234,8 @@ def test_review_intervals_are_displayed_and_missing_overlay_disables_action(
     assert "Flagged intervals: 1" in page.selected_summary.text()
     assert '"start_frame": 4' in page.technical_details.toPlainText()
     assert page.open_overlay_button.isEnabled() is False
-    assert page.continue_s3_button.isEnabled() is False
+    # Overlay is not required for authoritative S3 handoff validation.
+    assert page.continue_s3_button.isEnabled() is True
     page.close()
 
 

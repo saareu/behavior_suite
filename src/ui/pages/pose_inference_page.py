@@ -35,6 +35,7 @@ from pose_inference.run_discovery import (
     PoseInferenceRunSummary,
 )
 from pose_inference.runner import PoseInferencePreflightResult, PoseInferenceResult
+from tracking_correction.contracts import TrackingCorrectionError, TrackingCorrectionResult
 from ui.controllers.pose_inference_controller import (
     InferenceMode,
     PoseInferenceController,
@@ -63,6 +64,7 @@ class PoseInferencePage(QWidget):
         self._started_at: float | None = None
         self._active_token: int | None = None
         self._last_running_state: bool | None = None
+        self._pending_s3_handoff: S3PoseInput | None = None
         self.backend_progress.connect(self._backend_progress_changed)
         self._build_ui()
         self.elapsed_timer = QTimer(self)
@@ -120,9 +122,7 @@ class PoseInferencePage(QWidget):
                 "Artifacts",
             )
         )
-        self.runs_table.setSelectionBehavior(
-            QTableWidget.SelectionBehavior.SelectRows
-        )
+        self.runs_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.runs_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.runs_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.runs_table.verticalHeader().setVisible(False)
@@ -135,8 +135,7 @@ class PoseInferencePage(QWidget):
         self.refresh_runs_button.clicked.connect(self._refresh_discovery)
         runs_layout.addWidget(self.runs_table)
         self.empty_runs_label = QLabel(
-            "No Subsystem 2 runs were found for this session. Configure a new "
-            "inference run below."
+            "No Subsystem 2 runs were found for this session. Configure a new inference run below."
         )
         self.empty_runs_label.setWordWrap(True)
         self.empty_runs_label.setStyleSheet("color: #555;")
@@ -157,7 +156,7 @@ class PoseInferencePage(QWidget):
         self.open_run_folder_button.clicked.connect(self._open_run_folder)
         self.copy_settings_button = QPushButton("Rerun with copied settings")
         self.copy_settings_button.clicked.connect(self._copy_selected_settings)
-        self.continue_s3_button = QPushButton("Select for Subsystem 3")
+        self.continue_s3_button = QPushButton("Run Subsystem 3")
         self.continue_s3_button.clicked.connect(self._continue_to_s3)
         for button in (
             self.open_overlay_button,
@@ -167,6 +166,16 @@ class PoseInferencePage(QWidget):
         ):
             action_row.addWidget(button)
         action_row.addStretch(1)
+        # Indeterminate busy row beside S3; mirrors task_running like self.progress.
+        self.s3_progress = QProgressBar()
+        self.s3_progress.setRange(0, 0)
+        self.s3_progress.setVisible(False)
+        self.s3_stage_label = QLabel()
+        self.s3_stage_label.setWordWrap(True)
+        self.s3_stage_label.setVisible(False)
+        s3_busy_row = QHBoxLayout()
+        s3_busy_row.addWidget(self.s3_progress)
+        s3_busy_row.addWidget(self.s3_stage_label, 1)
         self.technical_details = QPlainTextEdit()
         self.technical_details.setReadOnly(True)
         self.technical_details.setPlaceholderText(
@@ -177,6 +186,7 @@ class PoseInferencePage(QWidget):
         self.technical_details.setMaximumHeight(220)
         selected_layout.addWidget(self.selected_summary)
         selected_layout.addLayout(action_row)
+        selected_layout.addLayout(s3_busy_row)
         selected_layout.addWidget(self.technical_details)
 
         config_group = QGroupBox("New inference configuration")
@@ -218,9 +228,7 @@ class PoseInferencePage(QWidget):
         self.centered_model = QLineEdit()
         self.centered_browse_button = QPushButton("Browse…")
         self.centered_browse_button.clicked.connect(
-            lambda: self._browse_model(
-                self.centered_model, "Choose centered-instance model"
-            )
+            lambda: self._browse_model(self.centered_model, "Choose centered-instance model")
         )
         centered_layout.addWidget(self.centered_model, 1)
         centered_layout.addWidget(self.centered_browse_button)
@@ -352,14 +360,10 @@ class PoseInferencePage(QWidget):
             f"{state.s1_status.value.replace('_', ' ').title()}: {state.s1_message}"
         )
         self.s1_status_label.setStyleSheet(
-            "color: #176b2c;"
-            if state.s1_status is S1UiStatus.READY
-            else "color: #b00020;"
+            "color: #176b2c;" if state.s1_status is S1UiStatus.READY else "color: #b00020;"
         )
         self.frame_count_label.setText(
-            f"{state.prepared_frame_count:,}"
-            if state.prepared_frame_count is not None
-            else "—"
+            f"{state.prepared_frame_count:,}" if state.prepared_frame_count is not None else "—"
         )
         self.timing_label.setText(state.timing_status or "—")
         mode_index = self.mode_combo.findData(state.inference_mode.value)
@@ -384,6 +388,9 @@ class PoseInferencePage(QWidget):
         self._render_selected_run()
         running = state.task_running
         self.progress.setVisible(running)
+        self.s3_progress.setVisible(running)
+        self.s3_stage_label.setVisible(running)
+        self.s3_stage_label.setText(state.run_stage if running else "")
         self.run_button.setEnabled(self.controller.can_submit)
         self.validate_button.setEnabled(self.controller.can_submit)
         self.back_to_s1_button.setEnabled(not running)
@@ -405,11 +412,7 @@ class PoseInferencePage(QWidget):
 
     def _populate_runs(self) -> None:
         selected_id = self.controller.state.selected_run_id
-        if (
-            selected_id is None
-            and self.controller.runs
-            and not self.controller.state.task_running
-        ):
+        if selected_id is None and self.controller.runs and not self.controller.state.task_running:
             selected_id = self.controller.runs[0].run_id
             self.controller.select_run(selected_id)
         self.runs_table.blockSignals(True)
@@ -427,11 +430,7 @@ class PoseInferencePage(QWidget):
                     ("META", "pose_meta"),
                 )
             )
-            review = (
-                "optional review"
-                if run.pose_qc_outcome == "review_recommended"
-                else "—"
-            )
+            review = "optional review" if run.pose_qc_outcome == "review_recommended" else "—"
             values = (
                 run.run_id,
                 run.inference_mode or "—",
@@ -477,9 +476,7 @@ class PoseInferencePage(QWidget):
         run = self.controller.selected_run
         if run is None:
             self.selected_summary.setText("Select a run.")
-            self.technical_details.setPlainText(
-                self.controller.technical_details()
-            )
+            self.technical_details.setPlainText(self.controller.technical_details())
             for button in (
                 self.open_overlay_button,
                 self.open_run_folder_button,
@@ -487,6 +484,8 @@ class PoseInferencePage(QWidget):
                 self.continue_s3_button,
             ):
                 button.setEnabled(False)
+            self.continue_s3_button.setText("Run Subsystem 3")
+            self.continue_s3_button.setToolTip("")
             self.technical_details.setMaximumHeight(100)
             return
         self.technical_details.setMaximumHeight(220)
@@ -499,15 +498,22 @@ class PoseInferencePage(QWidget):
             if run.pose_qc_outcome == "review_recommended"
             else ""
         )
+        s3_reason = self.controller.selected_run_s3_unavailable_reason()
+        s3_note = (
+            f"Subsystem 3 unavailable: {s3_reason}"
+            if s3_reason is not None
+            else (
+                "Subsystem 3: open existing result."
+                if self.controller.existing_s3_run_for_selected() is not None
+                else "Subsystem 3: ready to run automatic correction."
+            )
+        )
         self.selected_summary.setText(
             f"{run.run_id} — {run.classification}; QC: {run.pose_qc_outcome or 'unknown'}. "
             f"Review reasons: {reasons}. Flagged intervals: {interval_count}. {review_note}"
             + (f"\n{interval_lines[0]}" if interval_lines else "")
-            + (
-                f"\nMetadata diagnostic: {interval_diagnostics[0]}"
-                if interval_diagnostics
-                else ""
-            )
+            + (f"\nMetadata diagnostic: {interval_diagnostics[0]}" if interval_diagnostics else "")
+            + f"\n{s3_note}"
         )
         self.technical_details.setPlainText(self.controller.technical_details(run))
         self.open_overlay_button.setEnabled(
@@ -520,10 +526,10 @@ class PoseInferencePage(QWidget):
         rerun_reason = self.controller.rerun_unavailable_reason(run)
         self.copy_settings_button.setEnabled(rerun_reason is None)
         self.copy_settings_button.setToolTip(rerun_reason or "")
-        self.continue_s3_button.setEnabled(
-            self.controller.selected_run_can_feed_s3()
-            and not self.controller.state.task_running
-        )
+        can_s3 = s3_reason is None and not self.controller.state.task_running
+        self.continue_s3_button.setEnabled(can_s3)
+        self.continue_s3_button.setText(self.controller.selected_s3_action_label())
+        self.continue_s3_button.setToolTip(s3_reason or "")
 
     def _render_mode_fields(self) -> None:
         topdown = self.controller.state.inference_mode is InferenceMode.TOPDOWN
@@ -546,9 +552,7 @@ class PoseInferencePage(QWidget):
             f"tracking={'enabled' if summary.tracking_enabled else 'disabled'}"
         )
         matches = summary.inference_mode == self.controller.state.inference_mode.value
-        self.profile_settings.setStyleSheet(
-            "color: #176b2c;" if matches else "color: #b00020;"
-        )
+        self.profile_settings.setStyleSheet("color: #176b2c;" if matches else "color: #b00020;")
 
     def _set_configuration_enabled(self, enabled: bool) -> None:
         for widget in (
@@ -627,9 +631,7 @@ class PoseInferencePage(QWidget):
     def _use_default_profile(self) -> None:
         if not self._guard_idle("change the inference profile"):
             return
-        path = str(
-            self.controller.default_profile_path(self.controller.state.inference_mode)
-        )
+        path = str(self.controller.default_profile_path(self.controller.state.inference_mode))
         self.controller.set_active_profile_path(
             path,
             explicitly_selected_default=True,
@@ -737,9 +739,16 @@ class PoseInferencePage(QWidget):
         self._active_token = None
         self.elapsed_timer.stop()
         self.progress.setVisible(False)
+        self.s3_progress.setVisible(False)
+        self.s3_stage_label.clear()
+        self.s3_stage_label.setVisible(False)
         self.refresh_from_state()
         self.status_message.emit(self.controller.state.run_stage)
         self.task_finished.emit()
+        pending = self._pending_s3_handoff
+        self._pending_s3_handoff = None
+        if pending is not None and pending.existing_s3_run_dir is not None:
+            self.s3_handoff_requested.emit(pending)
 
     def _validate_configuration(self) -> None:
         if not self._guard_idle("validate another configuration"):
@@ -807,10 +816,9 @@ class PoseInferencePage(QWidget):
         path = run_dir if isinstance(run_dir, Path) else None
         if self.controller.apply_progress(stage, path, token=token):
             self.stage_label.setText(stage)
+            self.s3_stage_label.setText(stage)
             active_path = self.controller.state.active_run_dir
-            self.active_run_dir_label.setText(
-                str(active_path) if active_path is not None else "—"
-            )
+            self.active_run_dir_label.setText(str(active_path) if active_path is not None else "—")
             self._refresh_active_log(path)
 
     def _refresh_active_log(self, run_dir: Path | None) -> None:
@@ -862,15 +870,59 @@ class PoseInferencePage(QWidget):
             self.error_label.setText(str(exc))
             self.refresh_from_state()
             return
+        self.error_label.clear()
+        if handoff.existing_s3_run_dir is not None:
+            self.refresh_from_state()
+            self.s3_handoff_requested.emit(handoff)
+            return
+        token: int | None = None
+        try:
+            request = self.controller.begin_s3_correction(handoff.selected_run_dir)
+            token = self.controller.active_task_token
+            self._active_token = token
+            self._started_at = time.perf_counter()
+            self.log_excerpt.clear()
+            self.elapsed_timer.start()
+            self.refresh_from_state()
+            self.status_message.emit(self.controller.state.run_stage)
+            self.task_runner.start(
+                lambda: self.controller.execute_s3_correction(request),
+                task_name="tracking correction",
+                on_success=lambda value: self._s3_succeeded(value, token),
+                on_error=lambda exc: self._run_failed(exc, token),
+                on_finished=lambda: self._run_finished(token),
+            )
+        except PoseInferenceUiError as exc:
+            self.error_label.setText(str(exc))
+            self.refresh_from_state()
+        except TaskAlreadyRunningError as exc:
+            if token is not None:
+                self.controller.abort_task_submission(token, str(exc))
+                self._active_token = None
+            self.error_label.setText(str(exc))
+            self.refresh_from_state()
+
+    def _s3_succeeded(self, value: object, token: int) -> None:
+        try:
+            if not isinstance(value, TrackingCorrectionResult):
+                raise TypeError("Tracking correction worker returned an unexpected result.")
+            if self.controller.apply_s3_result(value, token=token):
+                handoff = self.controller.state.s3_handoff
+                if handoff is not None and handoff.existing_s3_run_dir is not None:
+                    self._pending_s3_handoff = handoff
+        except BaseException as exc:
+            self._pending_s3_handoff = None
+            self.controller.apply_error(exc, token=token)
+            if not isinstance(
+                exc, (PoseInferenceUiError, TrackingCorrectionError, ValueError, OSError)
+            ):
+                self.unexpected_error.emit(str(exc))
         self.refresh_from_state()
-        self.s3_handoff_requested.emit(handoff)
 
     def _guard_idle(self, action: str) -> bool:
         if not self.has_running_task:
             return True
-        self.error_label.setText(
-            f"Cannot {action} while a Subsystem 2 task is active."
-        )
+        self.error_label.setText(f"Cannot {action} while a Subsystem 2 task is active.")
         return False
 
     @property

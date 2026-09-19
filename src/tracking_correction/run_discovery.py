@@ -92,6 +92,31 @@ def is_completed_s3_run_dir(path: Path | str) -> bool:
     return summary.classification == COMPLETE_REVIEWABLE
 
 
+def find_reviewable_s3_run_for_s2(
+    session_root: Path | str,
+    s2_run_dir: Path | str,
+) -> Path | None:
+    """Return the newest completed S3 run produced from ``s2_run_dir``, if any."""
+
+    target = Path(s2_run_dir).expanduser().resolve()
+    summary = summarize_tracking_correction_project(session_root)
+    for run in summary.reviewable_runs:
+        meta = _load_json_mapping(run.run_dir / RUN_META_FILENAME, [])
+        input_block = meta.get("input")
+        if not isinstance(input_block, Mapping):
+            continue
+        recorded = _optional_text(input_block.get("s2_run_dir"))
+        if recorded is None:
+            continue
+        try:
+            recorded_path = Path(recorded).expanduser().resolve()
+        except OSError:
+            continue
+        if recorded_path == target:
+            return run.run_dir
+    return None
+
+
 def _discover_runs(run_root: Path) -> list[TrackingCorrectionRunSummary]:
     if not run_root.is_dir():
         return []
