@@ -18,6 +18,9 @@ SETTINGS_SCHEMA_VERSION = "tracking_correction_settings_v1"
 WORKING_TRACKED_POSE_FILENAME = "working_tracked_pose.parquet"
 MACHINE_CORRECTIONS_FILENAME = "machine_corrections.json"
 FINAL_TRACKED_POSE_FILENAME = "tracked_pose.parquet"
+RUN_META_FILENAME = "run_meta.json"
+SETTINGS_USED_FILENAME = "settings_used.yaml"
+PROCESSING_LOG_FILENAME = "processing_log.txt"
 
 # S2 pose.parquet is the authoritative numeric handoff. These are the columns
 # the current corrector needs; they are not a new S3 output schema.
@@ -36,6 +39,10 @@ BACKEND_STATUS_COMPLETED = "completed"
 BACKEND_STATUS_FAILED = "failed"
 
 ACCEPTANCE_NOT_ACCEPTED = "not_accepted"
+ACCEPTANCE_ACCEPTED = "accepted"
+
+POSE_SOURCE_CORRECTED = "corrected"
+POSE_SOURCE_PROVISIONAL = "provisional"
 
 
 class TrackingCorrectionError(RuntimeError):

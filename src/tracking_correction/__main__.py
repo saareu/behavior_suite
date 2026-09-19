@@ -24,6 +24,7 @@ def doctor() -> None:
     typer.echo("tracking-correction shell: available")
     typer.echo("backend: current_lab_corrector")
     typer.echo("profile: current_lab_two_mouse_headstage_v1")
+    typer.echo("review workspace: available")
 
 
 @app.command("run")
@@ -82,6 +83,72 @@ def run(
     typer.echo(f"Log: {result.processing_log_path}")
     if not result.success:
         raise typer.Exit(code=1)
+
+
+@app.command("review")
+def review(
+    s3_run: Annotated[
+        Path,
+        typer.Option(
+            "--s3-run",
+            help="Completed automatic Subsystem 03 run directory to open for review.",
+        ),
+    ],
+) -> None:
+    """Open the video-centered tracking review workspace for one S3 run."""
+
+    from ui.tracking_review_app import (  # noqa: I001
+        GUI_INSTALL_GUIDANCE,
+        GuiDependencyError,
+        launch_tracking_review,
+    )
+
+    try:
+        exit_code = launch_tracking_review(s3_run)
+    except GuiDependencyError:
+        typer.echo(GUI_INSTALL_GUIDANCE, err=True)
+        raise typer.Exit(code=1) from None
+    except TrackingCorrectionError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+    except Exception as exc:
+        typer.echo(f"Internal error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    if exit_code != 0:
+        raise typer.Exit(code=exit_code)
+
+
+@app.command("accept")
+def accept(
+    s3_run: Annotated[
+        Path,
+        typer.Option(
+            "--s3-run",
+            help="Completed automatic Subsystem 03 run directory to accept.",
+        ),
+    ],
+) -> None:
+    """Accept the working corrected pose without opening the GUI."""
+
+    from tracking_correction.review import load_review_session
+
+    try:
+        session = load_review_session(s3_run)
+        result = session.accept_tracking()
+    except TrackingCorrectionError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+    except Exception as exc:
+        typer.echo(f"Internal error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    if result.already_accepted:
+        typer.echo("Status: already_accepted")
+    else:
+        typer.echo("Status: accepted")
+    typer.echo(f"tracked_pose.parquet: {result.tracked_pose_path}")
+    typer.echo(f"Accepted at: {result.accepted_at}")
+    typer.echo(f"Working sha256: {result.working_sha256}")
 
 
 if __name__ == "__main__":
