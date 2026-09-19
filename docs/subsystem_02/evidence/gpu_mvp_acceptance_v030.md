@@ -53,7 +53,10 @@ S2 technical QC validates inference execution and artifact integrity, detects
 extreme abnormal failures, and may recommend review. It does not determine
 final scientific usability and does not replace tracking validation or identity
 verification. Identity correctness, tracking usability, and final scientific-
-usability assessment remain S3 responsibilities.
+usability assessment remain S3 responsibilities. At the time of this S2
+evidence record, S2 acceptance verified handoff selection into the S3
+interface; Subsystem 03 MVP has since been implemented / validated — see
+[`../../subsystem_03/mvp_scope_and_roadmap.md`](../../subsystem_03/mvp_scope_and_roadmap.md).
 
 UI-assisted model/parameter optimization, expanded pose-quality review tools,
 and richer QC visualization remain non-blocking future enhancements rather than

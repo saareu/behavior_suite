@@ -9,7 +9,8 @@ Subsystem 02 is the pose-inference and technical-QC subsystem. It integrates
 with completed Subsystem 01 preprocessing, runs SLEAP/SLEAP-NN pose inference,
 and determines whether the technical output can be passed to Subsystem 03.
 Final tracking/identity correctness and final session usability are Subsystem
-03 responsibilities.
+03 responsibilities. Subsystem 03 MVP is implemented / validated; see
+[`../subsystem_03/mvp_scope_and_roadmap.md`](../subsystem_03/mvp_scope_and_roadmap.md).
 
 The finalized MVP supports both bottom-up and top-down SLEAP/SLEAP-NN models.
 It is reachable from the main UI launch point and supports both new inference
@@ -185,10 +186,10 @@ limitations:
 - elaborate pose-review workspace;
 - model-optimization UI;
 - active learning;
-- pose correction;
-- identity verification;
-- tracking correction;
-- final pose processing;
+- elaborate pose-correction tooling beyond the S3 MVP;
+- identity verification beyond the S3 current-lab profile;
+- tracking correction beyond the implemented S3 MVP (see Subsystem 03);
+- final pose processing (interpolation/smoothing after accepted tracked pose);
 - final biological identity assignment;
 - final tracking verification;
 - implanted/partner mouse assignment;

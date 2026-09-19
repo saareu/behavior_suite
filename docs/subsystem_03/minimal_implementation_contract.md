@@ -1,12 +1,17 @@
 # Subsystem 03 — Minimal MVP Implementation Contract
 
-**Status:** Gate 4 review draft  
+**Status:** MVP implemented / validated. See
+[`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md) for the authoritative
+closure summary, filenames, and stage boundary. This document remains the Gate 4
+implementation-boundary design record; where status or filenames conflict, the
+MVP closure document wins.
+
 **Scope level:** MVP implementation boundary and integration contract  
 **Primary objective:** Deliver an end-to-end usable S3 quickly by integrating the current validated corrector with minimal behavioral modification.
 
 ## 1. Implementation strategy
 
-For the MVP, S3 will **not** begin with a major rewrite of the existing tracking corrector.
+For the MVP, S3 did **not** begin with a major rewrite of the existing tracking corrector.
 
 The current corrector is treated as the first validated S3 tracking backend. The MVP priority is to make the complete S3 workflow operational around it:
 
@@ -64,6 +69,12 @@ S3 may read supporting S2/S1 artifacts when needed for validation, timing preser
 
 The implementation must preserve the S1/S2 frame and timing domain. S3 does not reconstruct timing independently.
 
+Default outputs are project-root-aware under:
+
+```text
+<session_root>/tracking_correction/<profile_id>__<timestamp>/
+```
+
 ## 4. Primary output
 
 The intended primary S3 pose artifact remains:
@@ -72,9 +83,9 @@ The intended primary S3 pose artifact remains:
 tracked_pose.parquet
 ```
 
-For the MVP, `tracked_pose.parquet` represents the current accepted S3 working result after automatic correction and any user-applied manual corrections.
-
-The exact final schema may reuse proven fields from the historical tracking output where useful, especially source/raw pose values and correction flags. Gate 4 does not require a complete schema redesign before implementation begins.
+For the MVP, `tracked_pose.parquet` is written only on explicit Accept Tracking.
+It is not created by automatic correction alone. The automatic/manual working
+state lives in `working_tracked_pose.parquet`.
 
 ## 5. Supporting MVP information
 
@@ -82,13 +93,23 @@ S3 must retain enough information to support:
 
 - correction provenance;
 - automatic correction review;
-- suspicious-region review;
 - manual correction provenance;
 - user acceptance state;
-- future debugging and regression validation;
-- user-marked future training candidates.
+- future debugging and regression validation.
 
-These information categories may initially be stored using a minimal practical artifact set. The MVP should avoid unnecessary proliferation of files.
+Implemented supporting artifacts:
+
+```text
+working_tracked_pose.parquet
+automatic_tracked_pose.parquet   # immutable baseline created on first manual edit
+machine_corrections.json
+manual_corrections.json
+run_meta.json
+settings_used.yaml
+processing_log.txt
+```
+
+Training-candidate marking remains a deferred post-MVP item.
 
 ## 6. Automatic correction execution
 
@@ -133,27 +154,27 @@ The review workspace must support:
 
 - normal video navigation and frame stepping;
 - viewing corrected identity-colored pose;
-- navigation to suspicious regions when available;
-- inspection of selected automatic correction events when desired;
-- optional denial/reversal/modification of a selected correction event;
+- comparing S2 provisional vs S3 corrected overlay;
+- lightweight prev/next navigation of automatic machine-correction episodes;
+- a visible list of manual user corrections from `manual_corrections.json`;
 - manual tracking/pose correction where necessary;
-- marking useful frames or intervals for future SLEAP training;
+- undo/reset of manual edits;
 - final acceptance of the tracked result.
 
 The accepted object is the complete tracked pose result, not the correction log.
+The main visible list is the manual-correction list, not the raw machine log.
 
 ## 9. Manual-edit contract
 
 The MVP review workspace should support sufficiently powerful manual intervention to repair remaining tracking problems.
 
-Permitted conceptual operations may include:
+Implemented MVP operations:
 
-- swapping identities;
-- reassigning pose/track ownership;
-- blanking an invalid node or detection;
-- restoring/reassigning an observed node;
-- editing node position when required to restore tracking correctness;
-- undoing or revising a prior manual change.
+- swapping identities over a frame interval;
+- swapping one node between tracks at a frame;
+- blanking an invalid node on a track at a frame;
+- undoing the last manual change;
+- resetting all manual edits to the automatic baseline.
 
 The workspace is not intended to become a general-purpose SLEAP labeling environment.
 
@@ -161,7 +182,7 @@ The workspace is not intended to become a general-purpose SLEAP labeling environ
 
 The current corrector can identify situations where a failure may have occurred but no automatic correction is applied.
 
-S3 should preserve and expose these as review aids.
+S3 should preserve and expose these as review aids where available.
 
 They should be treated as:
 
@@ -232,3 +253,6 @@ Gate 4 is approved when the team agrees that:
 6. manual correction is supported without turning S3 into a full labeling application;
 7. suspicious unresolved cases are preserved for review;
 8. later backend refactoring remains possible without blocking the MVP.
+
+These Gate 4 criteria were satisfied by the implemented MVP; see
+[`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md).

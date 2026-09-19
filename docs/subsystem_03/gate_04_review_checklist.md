@@ -1,5 +1,9 @@
 # Subsystem 03 — Gate 4 Review Checklist
 
+**Document role:** Design-history checklist for Gate 4 integration approval.  
+**Implementation status:** MVP implemented / validated — see
+[`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md).
+
 Use this checklist to approve the MVP integration architecture before implementation begins.
 
 ## A. MVP strategy

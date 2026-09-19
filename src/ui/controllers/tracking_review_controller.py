@@ -14,6 +14,7 @@ import numpy as np
 from preprocess.exceptions import VideoProbeError
 from preprocess.video_probe import read_raw_frame_at_index
 from tracking_correction.contracts import TrackingCorrectionError
+from tracking_correction.manual_edits import ManualEditResult
 from tracking_correction.overlay_draw import draw_pose_overlay
 from tracking_correction.review import (
     AcceptanceResult,
@@ -45,6 +46,8 @@ class ReviewFrameView:
     pose_points: tuple[PoseNodePoint, ...]
     skeleton_edges: tuple[tuple[str, str], ...]
     image_bgr: np.ndarray
+    manual_edit_count: int = 0
+    available_nodes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,9 +133,18 @@ class TrackingReviewController:
             self._last_error = str(exc)
             raise
         self._last_error = None
-        if self.session.session_root is not None:
+        # Prefer the project that actually contains this S3 run. Provenance
+        # session_root may still point at a historical drive/NAS path.
+        project_root: Path | None = None
+        if self.session.run_dir.parent.name == "tracking_correction":
+            candidate = self.session.run_dir.parent.parent
+            if candidate.is_dir():
+                project_root = candidate
+        if project_root is None:
+            project_root = self.session.session_root
+        if project_root is not None:
             with suppress(OSError):
-                self.project = summarize_tracking_correction_project(self.session.session_root)
+                self.project = summarize_tracking_correction_project(project_root)
         return self.session
 
     def require_session(self) -> TrackingReviewSession:
@@ -150,6 +162,9 @@ class TrackingReviewController:
     def step_backward(self) -> int:
         self.stop_playback()
         return self.require_session().step_backward()
+
+    def jump_to_episode(self, episode: CorrectionEpisode) -> int:
+        return self.require_session().jump_to_episode(episode)
 
     def next_correction_frame(self) -> int | None:
         return self.require_session().next_correction_frame()
@@ -223,6 +238,26 @@ class TrackingReviewController:
     def accept_tracking(self) -> AcceptanceResult:
         return self.require_session().accept_tracking()
 
+    def swap_identities(self, start_frame: int, end_frame: int) -> ManualEditResult:
+        return self.require_session().swap_identities(start_frame, end_frame)
+
+    def swap_node(self, node: str, frame_idx: int | None = None) -> ManualEditResult:
+        return self.require_session().swap_node(node, frame_idx=frame_idx)
+
+    def blank_node(
+        self,
+        node: str,
+        track: int,
+        frame_idx: int | None = None,
+    ) -> ManualEditResult:
+        return self.require_session().blank_node(node, track, frame_idx=frame_idx)
+
+    def undo_last_manual_edit(self) -> ManualEditResult:
+        return self.require_session().undo_last_manual_edit()
+
+    def reset_manual_edits(self) -> ManualEditResult:
+        return self.require_session().reset_manual_edits()
+
     def current_view(self) -> ReviewFrameView:
         """Decode the current prepared frame and compose the pose overlay."""
 
@@ -243,6 +278,8 @@ class TrackingReviewController:
             pose_points=points,
             skeleton_edges=session.skeleton_edges,
             image_bgr=image,
+            manual_edit_count=session.manual_edit_count,
+            available_nodes=session.available_node_names,
         )
 
     def _read_frame(self, video_path: Path, frame_idx: int) -> np.ndarray:

@@ -1,6 +1,8 @@
 # Subsystem 03 — Current Correction Rule Catalog
 
-**Status:** Gate 3 review draft  
+**Status:** Gate 3 design history (rule catalog).  
+**Implementation status:** MVP implemented / validated with behavior-preserving
+backend integration — see [`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md).  
 **Purpose:** Catalog the rule families and mutation semantics of the current-lab corrector before refactoring.
 
 This document intentionally catalogs rule **families** rather than assigning permanent S3 rule IDs. Stable rule IDs belong to the later implementation contract.

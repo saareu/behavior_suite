@@ -12,7 +12,8 @@ It does not validate pose quality, SLEAP model accuracy, tracking quality,
 instance counts, confidence scores, coordinate exports, inference results, or
 SLEAP output-row structure. Pose inference and technical pose QC belong to the
 finalized Subsystem 02 MVP; identity, tracking correctness, and scientific
-usability belong downstream.
+usability belong to Subsystem 03 (MVP implemented / validated) and later
+pose-finalization.
 
 ---
 

@@ -1,6 +1,8 @@
 # Subsystem 03 — Current Corrector Behavioral Inventory
 
-**Status:** Gate 3 review draft  
+**Status:** Gate 3 design history (behavioral inventory).  
+**Implementation status:** Current-lab backend integrated behind the S3 adapter;
+MVP implemented / validated — see [`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md).  
 **Purpose:** Capture the behavior that must be understood and regression-protected before refactoring the current tracking corrector.
 
 ## 1. Scope

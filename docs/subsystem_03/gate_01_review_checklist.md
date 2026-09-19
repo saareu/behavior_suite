@@ -1,5 +1,9 @@
 # Subsystem 03 — Gate 1 Review Checklist
 
+**Document role:** Design-history checklist for Gate 1 product-vision approval.  
+**Implementation status:** MVP implemented / validated — see
+[`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md).
+
 Use this checklist to approve or revise the S3 product vision before workflow, UI, schema, or implementation design begins.
 
 ## A. Subsystem identity

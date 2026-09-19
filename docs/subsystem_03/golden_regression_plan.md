@@ -1,6 +1,12 @@
 # Subsystem 03 — Golden Regression Plan
 
-**Status:** Gate 3 review draft  
+**Status:** Gate 3 design history.  
+**Implementation note:** Gate 3 golden baseline was reproduced with zero
+pose/tracking divergence in the implemented MVP; see
+[`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md). Legacy example filenames
+such as `tracks.parquet` / `corrections.json` are historical golden references;
+live S3 artifacts use `working_tracked_pose.parquet` / `machine_corrections.json`
+(and accepted `tracked_pose.parquet`).  
 **Purpose:** Define the evidence needed to prove that the first S3 rewrite preserves current-lab correction behavior before algorithmic improvements begin.
 
 ## 1. Principle

@@ -17,12 +17,16 @@ a real GPU with SLEAP-NN 0.3.0 and `sleap-io` 0.8.0 and produced QC outcome
 `pass`. The one-click Windows installation was also validated after the S2
 runtime dependency fix.
 
-This closure does not make S2 a complete scientific-analysis pipeline. An
-elaborate pose-review workspace, model-optimization UI, active learning, pose
-correction, identity verification, tracking correction, and final pose
-processing are not part of the MVP. They remain future or downstream
-responsibilities; S3 owns identity/tracking correctness and final scientific
-usability.
+**Subsystem 03 — Tracking Correction and Verification** is MVP implemented /
+validated. From a completed S2 run, the GUI can run automatic current-lab
+tracking correction, open video-centered review with optional manual
+corrections, and explicitly accept `tracked_pose.parquet`. S3 owns tracking
+identity correction and acceptance; later pose-finalization owns interpolation,
+imputation, resampling, and smoothing. S3 does not train the pose model.
+
+S2 closure does not make the suite a complete scientific-analysis pipeline.
+Elaborate model-optimization UI, active learning, and final pose processing
+remain future or downstream responsibilities beyond the S2/S3 MVP boundary.
 
 ---
 
@@ -105,9 +109,9 @@ worker, so the UI stays responsive and displays honest indeterminate activity.
 
 Both QC `pass` and non-blocking `review_recommended` runs that are technically
 complete can be selected as intended S3 input. This selection is not identity
-approval or a final scientific-usability judgment; S3 is currently represented
-by a clear downstream handoff interface. The full GPU acceptance workflow
-verified this S3 handoff from a selected completed run.
+approval or a final scientific-usability judgment. From a selected completed S2
+run, the GUI can launch Subsystem 3 (automatic correction → review → optional
+manual edits → explicit acceptance).
 
 ---
 
@@ -130,12 +134,17 @@ Current active documentation:
   inference acceptance-test specification
 - `docs/subsystem_02/evidence/gpu_mvp_acceptance_v030.md` — recorded full S2
   MVP GPU acceptance evidence for both inference modes and S3 handoff
+- `docs/subsystem_03/mvp_scope_and_roadmap.md` — finalized Subsystem 03 MVP
+  scope, completion status, artifact contract, and stage boundary
+- `docs/subsystem_03/minimal_implementation_contract.md` — S3 MVP implementation
+  boundary (design history with implemented-status note)
 - `docs/general/development/ai_coding_guide.md` — repository-wide AI-assisted
   development guidance
 
 Historical plans, audits, release snapshots, and superseded design drafts are
-preserved under `docs/subsystem_01/archive/`. They are retained for
-traceability but are not the current source of truth.
+preserved under `docs/subsystem_01/archive/`. Gate 1–4 S3 design documents under
+`docs/subsystem_03/` are retained as design history; the S3 MVP closure document
+is authoritative for implemented status and filenames.
 
 ---
 
@@ -154,12 +163,13 @@ artifacts, provenance, technical QC, overlay generation, run discovery,
 completed-run selection, and S3 handoff selection. Post-MVP enhancements are
 not missing MVP acceptance requirements.
 
-Final biological identity assignment, tracking verification, implanted/partner
-mouse assignment, identity-switch correction, imputation, pose
-smoothing/finalization, behavior-ready feature extraction, and final
-trajectory generation are downstream responsibilities. S2 technical QC does
-not replace tracking validation, identity verification, or final scientific-
-usability assessment.
+Subsystem 03 is the tracking-correction and verification subsystem. Its MVP is
+implemented and validated for automatic current-lab correction, video review,
+manual correction, and explicit acceptance of `tracked_pose.parquet`. Final
+pose processing (interpolation, imputation, resampling, smoothing), behavior-
+ready feature extraction, and final trajectory generation remain downstream
+responsibilities beyond S3. S2 technical QC does not replace tracking
+validation, identity verification, or final scientific-usability assessment.
 
 ---
 
@@ -175,6 +185,8 @@ Before making repository changes, read the applicable documentation:
   changing or implementing the Subsystem 02 backend
 - `docs/subsystem_02/acceptance_test_specification.md` — required when
   changing backend inference acceptance behavior
+- `docs/subsystem_03/mvp_scope_and_roadmap.md` — required when changing or
+  implementing Subsystem 03
 - `docs/general/development/ai_coding_guide.md`
 
 Keep changes scoped, preserve scientific invariants, and update tests for any

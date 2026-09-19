@@ -13,7 +13,9 @@ completed run was handed to S3. See
 [`evidence/gpu_mvp_acceptance_v030.md`](evidence/gpu_mvp_acceptance_v030.md).
 
 This is technical MVP acceptance, not a determination of final identity,
-tracking usability, or scientific usability.
+tracking usability, or scientific usability. Those remain Subsystem 03
+responsibilities; S3 MVP is implemented / validated — see
+[`../subsystem_03/mvp_scope_and_roadmap.md`](../subsystem_03/mvp_scope_and_roadmap.md).
 
 ## Inputs
 

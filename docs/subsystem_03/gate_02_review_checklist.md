@@ -1,5 +1,9 @@
 # Subsystem 03 — Gate 2 Review Checklist
 
+**Document role:** Design-history checklist for Gate 2 workflow approval.  
+**Implementation status:** MVP implemented / validated — see
+[`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md).
+
 Use this checklist to approve or revise the S3 workflow and review philosophy before the current corrector is audited and refactored.
 
 ## A. Processing order

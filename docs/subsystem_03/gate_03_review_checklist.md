@@ -1,5 +1,10 @@
 # Subsystem 03 — Gate 3 Review Checklist
 
+**Document role:** Design-history checklist for Gate 3 regression approval.  
+**Implementation status:** MVP implemented / validated — Gate 3 golden baseline
+reproduced with zero pose/tracking divergence; see
+[`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md).
+
 ## Behavioral inventory
 
 - [ ] The current corrector is accurately described as sequential and stateful.

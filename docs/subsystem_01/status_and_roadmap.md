@@ -141,8 +141,9 @@ This is intentionally narrow. It does not include validating:
 - downstream behavioral features.
 
 Pose inference and technical pose QC belong to the finalized Subsystem 02 MVP.
-Identity, tracking correctness, and scientific usability belong to downstream
-analysis subsystems.
+Identity, tracking correctness, and scientific usability belong to Subsystem 03
+(MVP implemented / validated) and later pose-finalization; see
+`docs/subsystem_03/mvp_scope_and_roadmap.md`.
 
 ---
 

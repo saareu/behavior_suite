@@ -1,6 +1,8 @@
 # Subsystem 03 — Assumptions and Current-Profile Constraints
 
-**Status:** Gate 2 review draft  
+**Status:** Active profile-constraint companion for the implemented MVP.  
+**Implementation status:** MVP implemented / validated — see
+[`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md).  
 **Purpose:** Make current MVP assumptions explicit so that they do not silently become permanent S3 architecture.
 
 ## 1. Scope of this document

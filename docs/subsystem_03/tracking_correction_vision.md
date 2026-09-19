@@ -1,6 +1,9 @@
 # Subsystem 03 — Tracking Correction and Verification
 
-**Status:** Gate 1 review draft  
+**Status:** Gate 1 product-vision design history.  
+**Implementation status:** MVP implemented / validated — see
+[`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md) for current workflow,
+filenames, and closure evidence.  
 **Scope level:** Product vision and subsystem boundary  
 **Primary intended output:** `tracked_pose.parquet`  
 

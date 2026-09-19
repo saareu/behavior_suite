@@ -805,10 +805,16 @@ class PoseInferenceController:
                     "A completed Subsystem 3 run already exists for this S2 run."
                 )
             s2_run_dir = handoff.selected_run_dir
+        # Bind new S3 artifacts to the currently opened project, not historical
+        # provenance session_root paths recovered from S2 metadata.
+        output_root: Path | None = None
+        if self.state.session_root is not None:
+            output_root = Path(self.state.session_root) / "tracking_correction"
         request = TrackingCorrectionRequest(
             s2_run_dir=Path(s2_run_dir),
             dry_run=False,
             run_purpose=self.state.run_purpose.strip() or "development",
+            output_root=output_root,
         )
         self._begin_task("Running automatic tracking correction…")
         return request

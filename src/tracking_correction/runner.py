@@ -146,8 +146,10 @@ def run_tracking_correction(request: TrackingCorrectionRequest) -> TrackingCorre
     timestamp = _sanitize_timestamp(request.timestamp or _now_timestamp())
     profile_id = selected_profile_id()
     run_id = f"{profile_id}__{timestamp}"
+    # Output placement follows the active S2 run layout (or explicit --output-root),
+    # never historical provenance session_root paths that may point at another drive.
     paths = _resolve_run_paths(
-        session_root=handoff.session_root,
+        session_root=_output_session_root(handoff),
         run_id=run_id,
         output_root=request.output_root,
     )
@@ -735,6 +737,28 @@ def _reject_duplicate_pose_keys(
         raise TrackingCorrectionError(
             "pose.parquet contains duplicate (frame_idx, track, node) rows."
         )
+
+
+def project_root_from_s2_run_dir(s2_run_dir: Path) -> Path | None:
+    """Derive the project/session root from the selected S2 run path layout.
+
+    Expects ``…/<session_root>/pose_inference/<run_id>``. Returns ``None`` when
+    the selected path is not under that layout.
+    """
+
+    run_dir = Path(s2_run_dir).expanduser().resolve()
+    if run_dir.parent.name != "pose_inference":
+        return None
+    return run_dir.parent.parent
+
+
+def _output_session_root(handoff: _ResolvedHandoff) -> Path:
+    """Session root used only for default S3 output placement."""
+
+    layout_root = project_root_from_s2_run_dir(handoff.s2_run_dir)
+    if layout_root is not None:
+        return layout_root
+    return handoff.session_root
 
 
 def _resolve_run_paths(

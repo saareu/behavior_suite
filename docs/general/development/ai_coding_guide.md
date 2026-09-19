@@ -9,7 +9,19 @@ Before modifying code, the coding assistant shall read:
 ```text
 docs/subsystem_01/preprocessing.md
 docs/subsystem_01/status_and_roadmap.md
-docs/development/ai_coding_guide.md
+docs/general/development/ai_coding_guide.md
+```
+
+When changing Subsystem 02, also read:
+
+```text
+docs/subsystem_02/mvp_scope_and_roadmap.md
+```
+
+When changing Subsystem 03, also read:
+
+```text
+docs/subsystem_03/mvp_scope_and_roadmap.md
 ```
 
 When documents conflict, priority is:
@@ -17,7 +29,8 @@ When documents conflict, priority is:
 ```text
 1. subsystem_01/preprocessing.md
 2. subsystem_01/status_and_roadmap.md
-3. ai_coding_guide.md
+3. subsystem MVP closure docs (S2/S3 as applicable)
+4. ai_coding_guide.md
 ```
 
 Do not change the specification or implementation plan silently to justify a code change.
@@ -34,6 +47,8 @@ Use this package structure:
 src/
 ├── project/
 ├── preprocess/
+├── pose_inference/
+├── tracking_correction/
 ├── cli/
 └── ui/
 ```

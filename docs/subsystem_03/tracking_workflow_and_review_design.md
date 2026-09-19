@@ -1,6 +1,11 @@
 # Subsystem 03 — Tracking Workflow and Review Design
 
-**Status:** Gate 2 review draft  
+**Status:** Gate 2 design history.  
+**Implementation status:** MVP implemented / validated — see
+[`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md). The implemented review
+list is the manual-correction list from `manual_corrections.json`; automatic
+machine episodes remain available via lightweight prev/next navigation, not as
+the main visible list. Training-candidate marking is deferred post-MVP.  
 **Scope level:** User workflow, review philosophy, and correction-workspace behavior  
 **Depends on:** Approved Gate 1 S3 product vision  
 

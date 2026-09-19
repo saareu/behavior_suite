@@ -1,6 +1,11 @@
 # Subsystem 03 — Legacy Corrector Integration Architecture
 
-**Status:** Gate 4 review draft  
+**Status:** Gate 4 design history.  
+**Implementation status:** MVP implemented / validated — see
+[`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md) for the live package
+layout and artifact filenames (`working_tracked_pose.parquet`,
+`machine_corrections.json`, `manual_corrections.json`, `tracked_pose.parquet`,
+etc.).  
 **Purpose:** Define the minimum architecture needed to integrate the current corrector safely without first rewriting it.
 
 ## 1. Architecture objective

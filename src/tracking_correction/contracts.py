@@ -16,7 +16,9 @@ RUN_META_SCHEMA_VERSION = "tracking_correction_run_meta_v1"
 SETTINGS_SCHEMA_VERSION = "tracking_correction_settings_v1"
 
 WORKING_TRACKED_POSE_FILENAME = "working_tracked_pose.parquet"
+AUTOMATIC_TRACKED_POSE_FILENAME = "automatic_tracked_pose.parquet"
 MACHINE_CORRECTIONS_FILENAME = "machine_corrections.json"
+MANUAL_CORRECTIONS_FILENAME = "manual_corrections.json"
 FINAL_TRACKED_POSE_FILENAME = "tracked_pose.parquet"
 RUN_META_FILENAME = "run_meta.json"
 SETTINGS_USED_FILENAME = "settings_used.yaml"
@@ -40,6 +42,18 @@ BACKEND_STATUS_FAILED = "failed"
 
 ACCEPTANCE_NOT_ACCEPTED = "not_accepted"
 ACCEPTANCE_ACCEPTED = "accepted"
+ACCEPTANCE_SUPERSEDED = "superseded"
+
+MANUAL_ACTION_SWAP_IDENTITIES = "swap_identities"
+MANUAL_ACTION_SWAP_NODE = "swap_node"
+MANUAL_ACTION_BLANK_NODE = "blank_node"
+
+
+def is_currently_accepted(acceptance_state: object) -> bool:
+    """Return True only for an active acceptance, never for superseded/stale files."""
+
+    return acceptance_state == ACCEPTANCE_ACCEPTED
+
 
 POSE_SOURCE_CORRECTED = "corrected"
 POSE_SOURCE_PROVISIONAL = "provisional"
