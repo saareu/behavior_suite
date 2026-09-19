@@ -1,0 +1,57 @@
+# TODO: Review and document track ID correction and smoothing parameters after validating tracking quality.
+# configs/track_ids.yaml
+# Pipeline 20: Track ID Correction
+# =====================================================================
+# NOTE: Smoothing (interpolation + Savitzky-Golay) has moved to pipeline 22.
+#       This config is for ID correction and optional headstage constraints only.
+
+# =====================================================================
+## Minimal Intervention Corrector settings
+
+show_progress: true
+
+### Jump detection & proximity
+proximity_threshold: 30
+overlap_dist: 6
+spine_overlap_dist: 15
+overlap_jump_dist: 10
+medium_proximity_threshold: 12
+jump_threshold: 30
+frame_window: 10
+proximate_jump_thresh: 1
+orientation_cosine_threshold: 0.866
+minimum_separation_distance: 23
+orientation_flip_threshold: 1.57
+
+### Skeleton plausibility
+# Plausibility radii (px) for skeleton edges used during ID correction
+plausibility_radius:
+  headstage_nose: 95
+  nose_neck: 95
+  neck_spine: 95
+  spine_tail: 105
+  headstage_neck: 95
+  neck_tail: 140
+
+### Headstage ownership (minimal corrector)
+headstage_node: "headstage"
+
+# =====================================================================
+## Optional headstage anatomical constraint enforcement
+# (applied AFTER ID correction; can be disabled)
+
+enforce_headstage: false
+implanted_track: 0
+neck_node: "neck"
+headstage_neck_max_distance: 95
+
+# =====================================================================
+## Overlay video export (optional)
+
+export_overlay_video: true
+overlay_max_frames: null  # null = all frames
+overlay_num_workers: null  # null = auto-detect
+overlay_show_progress: true
+fps: 120
+
+

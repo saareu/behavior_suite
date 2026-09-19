@@ -81,6 +81,7 @@ include = [
 "project*",
 "preprocess*",
 "pose_inference*",
+"tracking_correction*",
 "cli*",
 "ui*",
 ]
@@ -119,6 +120,7 @@ source = [
 "project",
 "preprocess",
 "pose_inference",
+"tracking_correction",
 "cli",
 ]
 
@@ -131,6 +133,11 @@ exclude_lines = [
 "raise NotImplementedError",
 ]
 
+[tool.setuptools.package-data]
+tracking_correction = [
+  "backends/current_lab/*.yaml",
+]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100
@@ -140,6 +147,7 @@ src = [
 ]
 exclude = [
   "legacy",
+  "src/tracking_correction/backends/current_lab",
 ]
 
 [tool.ruff.lint]
@@ -160,6 +168,7 @@ known-first-party = [
 "project",
 "preprocess",
 "pose_inference",
+"tracking_correction",
 "cli",
 "ui",
 ]
@@ -171,6 +180,7 @@ packages = [
 "project",
 "preprocess",
 "pose_inference",
+"tracking_correction",
 "cli",
 ]
 check_untyped_defs = true
@@ -190,3 +200,9 @@ module = [
 "h5py",
 ]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+"tracking_correction.backends.current_lab.*",
+]
+ignore_errors = true
