@@ -1,4 +1,4 @@
-"""Subsystem 04 pose finalization (Sprint 1: contracts, accepted-S3, timing)."""
+"""Subsystem 04 pose finalization (Sprint 1–2: timing, dense pose, gap fill)."""
 
 from pose_finalization.accepted_s3 import (
     AcceptedS3Run,
@@ -9,9 +9,32 @@ from pose_finalization.accepted_s3 import (
 )
 from pose_finalization.contracts import (
     FINAL_POSE_FILENAME,
+    GAP_KALMAN_MAX_FRAMES_DEFAULT,
+    GAP_LINEAR_MAX_FRAMES_DEFAULT,
+    HEADSTAGE_NODE_NAME,
+    PROVENANCE_IDENTITY_CORRECTED,
+    PROVENANCE_KALMAN_GAP_FILL,
+    PROVENANCE_LINEAR_GAP_FILL,
+    PROVENANCE_MISSING,
+    PROVENANCE_NAMES,
+    PROVENANCE_ORIGINAL,
+    PROVENANCE_PROTECTED_MANUAL_BLANK,
+    PROVENANCE_TEMPORAL_RESAMPLE,
     TARGET_FPS_DEFAULT,
     PoseFinalizationError,
 )
+from pose_finalization.dense_pose import (
+    DensePoseResult,
+    ManualBlankInterval,
+    ManualCorrectionsEffects,
+    ManualIdentitySwapInterval,
+    ManualIdentitySwapNode,
+    construct_dense_pose,
+    load_manual_blank_intervals,
+    load_manual_corrections_effects,
+    load_tracked_pose_table,
+)
+from pose_finalization.gap_fill import GapFillConfig, fill_coordinate_gaps
 from pose_finalization.timing import (
     SourceTiming,
     TimingMap,
@@ -23,16 +46,38 @@ from pose_finalization.timing import (
 
 __all__ = [
     "AcceptedS3Run",
+    "DensePoseResult",
     "FINAL_POSE_FILENAME",
+    "GAP_KALMAN_MAX_FRAMES_DEFAULT",
+    "GAP_LINEAR_MAX_FRAMES_DEFAULT",
+    "GapFillConfig",
+    "HEADSTAGE_NODE_NAME",
+    "ManualBlankInterval",
+    "ManualCorrectionsEffects",
+    "ManualIdentitySwapInterval",
+    "ManualIdentitySwapNode",
+    "PROVENANCE_IDENTITY_CORRECTED",
+    "PROVENANCE_KALMAN_GAP_FILL",
+    "PROVENANCE_LINEAR_GAP_FILL",
+    "PROVENANCE_MISSING",
+    "PROVENANCE_NAMES",
+    "PROVENANCE_ORIGINAL",
+    "PROVENANCE_PROTECTED_MANUAL_BLANK",
+    "PROVENANCE_TEMPORAL_RESAMPLE",
     "PoseFinalizationError",
     "SourceTiming",
     "TARGET_FPS_DEFAULT",
     "TimingMap",
     "build_timing_map_from_prepared_sync",
     "build_uniform_target_timeline",
+    "construct_dense_pose",
+    "fill_coordinate_gaps",
     "find_latest_accepted_s3_run",
     "list_accepted_s3_runs",
+    "load_manual_blank_intervals",
+    "load_manual_corrections_effects",
     "load_source_timing",
+    "load_tracked_pose_table",
     "map_target_to_source",
     "resolve_accepted_s3_run",
     "validate_accepted_s3_run",

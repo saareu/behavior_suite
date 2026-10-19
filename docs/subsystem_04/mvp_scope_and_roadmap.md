@@ -1,7 +1,8 @@
 # Subsystem 04 — Pose Finalization MVP Scope and Roadmap
 
-**Status:** Sprint 1 implemented (contracts, accepted-S3 discovery, timing map).
-Full MVP processing, export, and GUI are not yet implemented.
+**Status:** Sprint 2 implemented (dense 120 Hz construction, manual-blank
+protection, configurable gap fill, provenance). Final export, SavGol smoothing,
+QC, runner, and GUI are not yet implemented.
 
 ## Agreed S4 boundary
 
@@ -46,7 +47,18 @@ Authoritative timing source:
 using `prepared_time_sec` and `prepared_frame_idx` (not FPS-nearest video
 indexing, and not Pipeline 30-style mapping).
 
-## Output contract (agreed; not written in Sprint 1)
+Manual blank protection source (Sprint 2):
+
+```text
+<session_root>/tracking_correction/<s3_run_id>/manual_corrections.json
+```
+
+Only records with `action == "blank_node"` are protected. The S3 parquet flag
+`was_node_blanked` is **not** treated as manual protection because automatic
+correction also sets it (explicit blanked-node tracking and implicit
+raw-finite / final-NaN detection).
+
+## Output contract (agreed; not written in Sprint 1–2)
 
 ```text
 <session_root>/pose_finalization/<run_id>/
@@ -63,6 +75,7 @@ Parquet is the only final pose format for the MVP. No optional NPZ outputs.
 ```text
 Accepted S3 tracked_pose.parquet
     + S1 prepared_sync.npz
+    + manual_corrections.json (blank_node only)
     ↓
 Validate acceptance / SHA / paths
     ↓
@@ -70,12 +83,14 @@ Build uniform 120 Hz target timeline from S1 prepared times
     ↓
 Map each target sample → left/right source frames + weights
     ↓
-(later) Dense pose / gap fill / refinement / smoothing / QC
+Construct dense (sample, track, node) coordinates
     ↓
-Write final_pose.parquet + run metadata/log
+Propagate protected manual blanks; temporal resample; gap fill
+    ↓
+(later) SavGol / refinement / QC / final_pose.parquet export
 ```
 
-Sprint 1 implements through the timing-mapping step only.
+Sprint 2 implements dense construction through gap fill in memory only.
 
 ## Completion semantics
 
@@ -96,21 +111,69 @@ Sprint 1 implements through the timing-mapping step only.
   flags.
 - Focused unit tests under `tests/pose_finalization/`.
 
+## Sprint 2 scope and status
+
+**Implemented**
+
+- `src/pose_finalization/dense_pose.py` — load accepted tracked pose; build dense
+  `(sample, track, node)` arrays from the Sprint 1 `TimingMap`; preserve track
+  IDs and SLEAP node names; map with actual S1 timestamps; retain unresolved
+  samples as NaN; never extrapolate beyond observed source times; never mutate
+  upstream files.
+- Temporal resampling provenance:
+  - exact source transfer → `original` or `identity_corrected`;
+  - derived sample between two valid endpoints → `temporal_resample`;
+  - missing / non-interpolable → `missing`.
+  Missing source observations are never used as interpolation endpoints.
+  Temporally resampled samples do **not** receive fabricated SLEAP confidence.
+- Identity-corrected provenance combines:
+  - automatic S3 `was_track_swapped` on the accepted pose row; and
+  - active manual stack records in `manual_corrections.json`
+    (`swap_identities` over an interval; `swap_node` for one node on both
+    tracks at one frame).
+  S3 undo/reset rewrite that file to the current stack only, so undone edits
+  are ignored. Overlapping manual identity swaps use parity (even coverage
+  cancels). Coordinates and track labels are never rewritten by S4.
+- Manual blank protection:
+  - authoritative intervals from `manual_corrections.json` `blank_node` records;
+  - mask built on the prepared-frame domain and propagated conservatively to
+    120 Hz (any contributing left/right source blank protects the target);
+  - protected samples remain NaN through temporal resampling and gap fill;
+  - `was_node_blanked` alone does not protect.
+- `src/pose_finalization/gap_fill.py` — configurable internal gap fill:
+
+  | Gap length at 120 Hz | Method |
+  | --- | --- |
+  | 1–20 frames | Linear interpolation |
+  | 21–140 frames | Constant-velocity Kalman + RTS |
+  | >140 frames | Remain NaN |
+  | Leading/trailing gaps | Remain NaN |
+  | Protected/manual-blank intervals | Remain NaN |
+
+  Thresholds live in `GapFillConfig` (`linear_max_frames`, `kalman_max_frames`)
+  for future GUI Advanced Settings. Headstage is excluded from imputation.
+  Existing valid coordinates are preserved; no identity reassignment; no
+  implanted-nose special model.
+- In-memory provenance codes and `x_pre_impute` / `y_pre_impute` retained for
+  later SavGol / export stages.
+- Focused unit + schema-fixture tests in `tests/pose_finalization/test_dense_pose.py`.
+
 **Not implemented yet**
 
-- Full S4 runner / CLI / GUI
-- Coordinate interpolation / dense pose construction
-- Gap filling, Kalman/RTS, geometric refinement, Savitzky–Golay
-- Final QC and `final_pose.parquet` export
-- Implanted-nose special imputation
+- Savitzky–Golay smoothing
+- Final `final_pose.parquet` export / QC / completion semantics
+- S4 GUI or runner integration
+- New acceptance workflow
+- Special nose/headstage imputation model
+- Identity correction (owned by S3)
+- NPZ output
+- General plugin/profile architecture
 
 ## Remaining implementation stages
 
-1. **Sprint 2+:** dense pose construction on the mapped 120 Hz timeline, gap
-   handling, and provenance flags.
-2. **Later MVP stages:** refinement, smoothing, QC summaries, runner writing the
-   agreed run directory, then GUI handoff from accepted S3.
-3. **Post-MVP:** additional profiles/backends only if required by lab needs.
+1. **Later MVP stages:** SavGol / geometric refinement, QC summaries, runner
+   writing the agreed run directory, then GUI handoff from accepted S3.
+2. **Post-MVP:** additional profiles/backends only if required by lab needs.
 
 ## Timing notes
 
@@ -121,3 +184,22 @@ Sprint 1 implements through the timing-mapping step only.
 - Valid S1 `prepared_sync` timelines start at time 0 by S1 contract. The mapping
   helpers also accept a nonzero origin for general monotonic arrays; that case
   is not produced by current S1 validation.
+
+## Manual-blanking notes (Sprint 2)
+
+- S3 `apply_blank_node` blanks a single `(frame, track, node)` and appends a
+  `blank_node` record with `start_frame == end_frame`.
+- Automatic corrector blanking also sets `was_node_blanked` and may omit or NaN
+  coordinates without a manual record. S4 treats those as ordinary missing
+  observations (fillable when gap policy allows).
+- Conservative policy: if either timing-map endpoint is a manually blanked
+  source sample, the 120 Hz target is protected and left NaN.
+
+## Provenance limitations (Sprint 2)
+
+- Automatic `was_track_swapped` is frame-granular in S3 finalize: a single-node
+  automatic swap marks every node/track row at that frame.
+- Temporal resamples are always labeled `temporal_resample`, even when one or
+  both source endpoints were identity-corrected.
+- Manual identity provenance follows the accepted active stack + automatic
+  flag only; S4 does not reconstruct undo history beyond what remains on disk.
