@@ -23,11 +23,12 @@ tracking correction, open video-centered review with optional manual
 corrections, and explicitly accept `tracked_pose.parquet`. S3 owns tracking
 identity correction and acceptance. S3 does not train the pose model.
 
-**Subsystem 04 — Pose Finalization** is MVP implemented through Sprint 4. From
-an explicitly accepted S3 result, the GUI discovers the latest eligible accepted
+**Subsystem 04 — Pose Finalization** is MVP complete / validated. From an
+explicitly accepted S3 result, the GUI discovers the latest eligible accepted
 run, runs dense 120 Hz finalization in the background (gap fill, optional
 SavGol, automated QC), and writes `final_pose.parquet` under
-`pose_finalization/<run_id>/`. There is no S4 visual review or acceptance step.
+`pose_finalization/<run_id>/`. A full laboratory session was validated through
+the GUI. There is no S4 visual review or acceptance step.
 
 S2/S3/S4 MVP progress does not make the suite a complete scientific-analysis
 pipeline. Elaborate model-optimization UI and active learning remain future or

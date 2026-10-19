@@ -1,7 +1,8 @@
 # Subsystem 04 — Pose Finalization MVP Scope and Roadmap
 
-**Status:** Sprint 4 implemented (GUI integration, Advanced Settings,
-completed-run discovery, end-to-end validation).
+**Status:** MVP complete / validated (Sprints 1–4). GUI integration, Advanced
+Settings, completed-run discovery, automated tests, and a real laboratory
+session GUI run are done.
 
 ## Agreed S4 boundary
 
@@ -217,7 +218,7 @@ Headstage is excluded from imputation.
 | 1 — Contracts, accepted-S3 discovery, timing map | Done |
 | 2 — Dense pose, blank protection, gap fill | Done |
 | 3 — SavGol, export, QC, runner | Done |
-| 4 — GUI, Advanced Settings, discovery, e2e | Done |
+| 4 — GUI, Advanced Settings, discovery, e2e, lab GUI | Done (MVP closed) |
 
 ### Sprint 4 validation coverage
 
@@ -236,7 +237,24 @@ Focused tests cover:
   SHA corruption detection; NaN confidence on reconstructed rows; exported
   timing/source mapping consistency; output-overlap protection
 
-## Known limitations / remaining MVP risks
+### Laboratory GUI session validation
+
+A full laboratory session derived from
+`test_cases/E_full_session_integration` was exercised through the real
+`MainWindow` → Subsystem 4 page → **Run Finalization** path (sandbox copy only;
+experimental fixture acceptance state left `not_accepted`).
+
+| Item | Result |
+| --- | --- |
+| Source session | E full-session integration (~36 239 prepared frames, 2 tracks, 5 nodes) |
+| GUI path | Auto-selected accepted S3 → background `GuiTaskRunner` → QC panel |
+| Outcome | `completed_with_warnings` |
+| Output | `final_pose.parquet` written under sandbox `pose_finalization/<run_id>/` |
+| QC summary | Missingness ~15%; reconstructed ~6%; SavGol enabled; warnings recorded |
+| Fixture safety | Original `test_cases/` S3 run remained `not_accepted` / no `tracked_pose.parquet` |
+| Defects found | None |
+
+## Known limitations / remaining post-MVP risks
 
 - Geometric refinement is deferred; final coordinates are gap-filled and
   optionally SavGol-smoothed only.
