@@ -21,12 +21,16 @@ runtime dependency fix.
 validated. From a completed S2 run, the GUI can run automatic current-lab
 tracking correction, open video-centered review with optional manual
 corrections, and explicitly accept `tracked_pose.parquet`. S3 owns tracking
-identity correction and acceptance; later pose-finalization owns interpolation,
-imputation, resampling, and smoothing. S3 does not train the pose model.
+identity correction and acceptance. S3 does not train the pose model.
 
-S2 closure does not make the suite a complete scientific-analysis pipeline.
-Elaborate model-optimization UI, active learning, and final pose processing
-remain future or downstream responsibilities beyond the S2/S3 MVP boundary.
+**Subsystem 04 — Pose Finalization** has a Sprint 3 backend that consumes an
+accepted S3 result and writes dense 120 Hz `final_pose.parquet` after timing
+mapping, gap fill, optional SavGol smoothing, and automated QC. S4 GUI
+integration is not implemented yet.
+
+S2/S3/S4 backend progress does not make the suite a complete scientific-analysis
+pipeline. Elaborate model-optimization UI, active learning, and S4 GUI remain
+future or downstream responsibilities.
 
 ---
 

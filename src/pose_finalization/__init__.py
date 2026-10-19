@@ -1,4 +1,4 @@
-"""Subsystem 04 pose finalization (Sprint 1–2: timing, dense pose, gap fill)."""
+"""Subsystem 04 pose finalization (Sprint 1–3: timing through final export)."""
 
 from pose_finalization.accepted_s3 import (
     AcceptedS3Run,
@@ -8,7 +8,9 @@ from pose_finalization.accepted_s3 import (
     validate_accepted_s3_run,
 )
 from pose_finalization.contracts import (
+    FINAL_POSE_COLUMNS,
     FINAL_POSE_FILENAME,
+    FINAL_POSE_SCHEMA_VERSION,
     GAP_KALMAN_MAX_FRAMES_DEFAULT,
     GAP_LINEAR_MAX_FRAMES_DEFAULT,
     HEADSTAGE_NODE_NAME,
@@ -20,6 +22,12 @@ from pose_finalization.contracts import (
     PROVENANCE_ORIGINAL,
     PROVENANCE_PROTECTED_MANUAL_BLANK,
     PROVENANCE_TEMPORAL_RESAMPLE,
+    SAVGOL_ENABLED_DEFAULT,
+    SAVGOL_POLYORDER_DEFAULT,
+    SAVGOL_WINDOW_LENGTH_DEFAULT,
+    STATUS_COMPLETED,
+    STATUS_COMPLETED_WITH_WARNINGS,
+    STATUS_FAILED,
     TARGET_FPS_DEFAULT,
     PoseFinalizationError,
 )
@@ -34,7 +42,21 @@ from pose_finalization.dense_pose import (
     load_manual_corrections_effects,
     load_tracked_pose_table,
 )
+from pose_finalization.export import (
+    build_final_pose_table,
+    load_final_pose_table,
+    write_final_pose_parquet,
+)
 from pose_finalization.gap_fill import GapFillConfig, fill_coordinate_gaps
+from pose_finalization.qc import QcConfig, QcSummary, evaluate_finalization_qc
+from pose_finalization.runner import (
+    PoseFinalizationRequest,
+    PoseFinalizationResult,
+    is_s4_run_eligible_for_downstream,
+    run_pose_finalization,
+    validate_s4_run_for_downstream,
+)
+from pose_finalization.smoothing import SmoothConfig, SmoothResult, apply_savgol_smoothing
 from pose_finalization.timing import (
     SourceTiming,
     TimingMap,
@@ -47,7 +69,9 @@ from pose_finalization.timing import (
 __all__ = [
     "AcceptedS3Run",
     "DensePoseResult",
+    "FINAL_POSE_COLUMNS",
     "FINAL_POSE_FILENAME",
+    "FINAL_POSE_SCHEMA_VERSION",
     "GAP_KALMAN_MAX_FRAMES_DEFAULT",
     "GAP_LINEAR_MAX_FRAMES_DEFAULT",
     "GapFillConfig",
@@ -65,20 +89,40 @@ __all__ = [
     "PROVENANCE_PROTECTED_MANUAL_BLANK",
     "PROVENANCE_TEMPORAL_RESAMPLE",
     "PoseFinalizationError",
+    "PoseFinalizationRequest",
+    "PoseFinalizationResult",
+    "QcConfig",
+    "QcSummary",
+    "SAVGOL_ENABLED_DEFAULT",
+    "SAVGOL_POLYORDER_DEFAULT",
+    "SAVGOL_WINDOW_LENGTH_DEFAULT",
+    "STATUS_COMPLETED",
+    "STATUS_COMPLETED_WITH_WARNINGS",
+    "STATUS_FAILED",
+    "SmoothConfig",
+    "SmoothResult",
     "SourceTiming",
     "TARGET_FPS_DEFAULT",
     "TimingMap",
+    "apply_savgol_smoothing",
+    "build_final_pose_table",
     "build_timing_map_from_prepared_sync",
     "build_uniform_target_timeline",
     "construct_dense_pose",
+    "evaluate_finalization_qc",
     "fill_coordinate_gaps",
     "find_latest_accepted_s3_run",
+    "is_s4_run_eligible_for_downstream",
     "list_accepted_s3_runs",
+    "load_final_pose_table",
     "load_manual_blank_intervals",
     "load_manual_corrections_effects",
     "load_source_timing",
     "load_tracked_pose_table",
     "map_target_to_source",
     "resolve_accepted_s3_run",
+    "run_pose_finalization",
     "validate_accepted_s3_run",
+    "validate_s4_run_for_downstream",
+    "write_final_pose_parquet",
 ]

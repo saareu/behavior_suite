@@ -6,7 +6,8 @@
 | --- | --- | --- |
 | 01 — Video Preprocessing | Functionally closed / maintenance | Hands prepared video + timing to S2 |
 | 02 — Pose Inference and Technical QC | MVP finalized / validated | Hands completed `pose.parquet` run to S3 |
-| 03 — Tracking Correction and Verification | MVP implemented / validated | Hands accepted `tracked_pose.parquet` to later pose-finalization |
+| 03 — Tracking Correction and Verification | MVP implemented / validated | Hands accepted `tracked_pose.parquet` to S4 |
+| 04 — Pose Finalization | Sprint 3 backend implemented (no GUI yet) | Hands `final_pose.parquet` to later analysis |
 
 ## Subsystem 01 — Video Preprocessing
 
@@ -35,6 +36,10 @@
 - [Current Corrector Behavioral Inventory][s3-inventory]
 - [Correction Rule Catalog][s3-rules]
 - [Golden Regression Plan][s3-golden]
+
+## Subsystem 04 — Pose Finalization (Sprint 3 Backend)
+
+- [MVP Scope and Roadmap](subsystem_04/mvp_scope_and_roadmap.md)
 
 ## General
 
