@@ -1,8 +1,7 @@
 # Subsystem 04 — Pose Finalization MVP Scope and Roadmap
 
-**Status:** Sprint 3 implemented (SavGol smoothing, final Parquet export,
-automated QC, end-to-end runner). GUI handoff and manual S4 review remain
-out of scope.
+**Status:** Sprint 4 implemented (GUI integration, Advanced Settings,
+completed-run discovery, end-to-end validation).
 
 ## Agreed S4 boundary
 
@@ -16,9 +15,49 @@ produces an analysis-oriented dense pose timeline on a uniform lab clock.
 | Dense pose construction / gap fill | S3 review or acceptance UX |
 | SavGol smoothing / final QC / export | Mutation of S1/S2/S3 artifacts |
 | Final QC of finalized pose | Behavior classification |
+| Compact GUI run + QC summary | S4 visual review / user acceptance |
 
 S3 `complete_reviewable` means automatic correction finished and review is
 possible. It is **never** equivalent to acceptance for S4.
+
+## GUI workflow
+
+1. Select a project/session (shared navigation with S1–S3, or browse from S4).
+2. S4 automatically selects the latest eligible accepted S3 run; choose another
+   accepted run when several exist.
+3. Optionally open Advanced Settings (defaults are preserved if left closed).
+4. Click **Run Finalization** (background `GuiTaskRunner`; duplicate launches
+   blocked while a run is active).
+5. Inspect processing status (`completed`, `completed_with_warnings`, or
+   `failed`).
+6. View the compact QC summary and open the S4 run folder for
+   `final_pose.parquet`.
+
+There is no S4 visual review workspace and no S4 user-acceptance step.
+After S3 acceptance, the main window can continue to Subsystem 4; S4 still
+requires an eligible accepted S3 result and revalidates before completion.
+
+When no eligible accepted S3 result exists, the GUI explains why (missing
+`tracking_correction/`, unaccepted/superseded runs, SHA mismatch, or missing
+`prepared_sync.npz`). Users never pick Parquet or timing files manually.
+
+## Advanced Settings
+
+Exposed parameters (backend defaults when Advanced Settings are not opened):
+
+| Group | Parameter | Default |
+| --- | --- | --- |
+| Gap filling | Linear maximum gap | 20 frames |
+| Gap filling | Kalman maximum gap | 140 frames |
+| Gap filling | Kalman process / measurement variance | `10.0` / `1.0` |
+| Smoothing | Enabled | yes |
+| Smoothing | SavGol window | 11 frames (odd) |
+| Smoothing | Polynomial order | 2 |
+| Output sampling | Target FPS | 120 Hz (fixed for MVP) |
+
+Settings are validated before execution (incompatible gap thresholds, even
+windows, polyorder ≥ window, non-positive Kalman variances, non-120 Hz target).
+Actual values are written to `settings_used.yaml`.
 
 ## Input contract
 
@@ -67,7 +106,8 @@ correction also sets it.
   processing_log.txt
 ```
 
-Parquet is the only final pose format for the MVP. No NPZ outputs.
+Parquet is the only final pose format for the MVP. No NPZ outputs. Each run
+uses a unique timestamped directory; reruns never overwrite prior S4 results.
 
 ### `final_pose.parquet` schema (`final_pose_v1`)
 
@@ -120,45 +160,9 @@ Revalidate S3 acceptance immediately before completion
 Write final_pose.parquet + run_meta.json + settings_used.yaml + processing_log.txt
 ```
 
-Geometric refinement is **deferred** for the current-lab MVP: no sufficiently
-justified general-purpose method exists in-repo, and the legacy implanted-nose
-model is explicitly out of scope.
+Geometric refinement remains **deferred** for the current-lab MVP.
 
-## Smoothing policy (Savitzky–Golay)
-
-Defaults:
-
-- Enabled
-- Window length: 11 frames
-- Polynomial order: 2
-
-Rules:
-
-1. Applied after temporal resampling and gap filling.
-2. Smooths X and Y independently per track/node.
-3. Processes independent continuous valid segments only.
-4. Never smooths across unresolved NaN gaps, protected manual blanks, or
-   segment discontinuities.
-5. Short segments shorter than the configured window are left unchanged
-   (no invented coordinates).
-6. Pre-smoothing coordinates are retained (`x_pre_smooth` / `y_pre_smooth`).
-7. Source confidence and imputation provenance are preserved unchanged.
-8. Track identities and timing are never altered.
-9. Window length and polynomial order are configurable; smoothing can be
-   disabled.
-
-## QC and completion semantics
-
-QC distinguishes:
-
-- **Structural failures** — prevent successful completion (timing/schema
-  integrity, protected-blank violations, invalid partial coordinates, etc.).
-- **Quality warnings** — recorded in `run_meta.json` without blocking
-  completion (high missing/imputation fractions, implausible jumps, large
-  smoothing displacements). Thresholds are practical defaults, **not**
-  scientifically validated pass/fail claims.
-
-Run statuses:
+## Completion and staleness
 
 | Status | Meaning |
 | --- | --- |
@@ -173,21 +177,16 @@ Rules:
   `final_pose.parquet` is absent/removed.
 - S3 acceptance is revalidated immediately before completion. If the source
   becomes `superseded` or the SHA changes mid-run, the S4 run fails.
-- A previously completed S4 run is **not** eligible for downstream use when
-  its recorded source S3 acceptance is superseded or SHA-mismatched
-  (`is_s4_run_eligible_for_downstream` / `validate_s4_run_for_downstream`).
+- Completed S4 discovery (`summarize_pose_finalization_project`) classifies
+  runs as `eligible` or `stale_source` by rechecking the recorded accepted S3
+  source. Prior S4 directories are never rewritten merely because upstream
+  acceptance later changes.
+- Downstream helpers: `is_s4_run_eligible_for_downstream` /
+  `validate_s4_run_for_downstream`.
 
 QC summary lives inside `run_meta.json` (no separate QC JSON artifact).
 
-## Sprint 1–2 status (retained)
-
-Sprint 1: contracts, accepted-S3 discovery/validation, authoritative timing map.
-
-Sprint 2: dense 120 Hz construction, manual-blank protection, configurable
-linear/Kalman gap fill, provenance codes, identity-corrected provenance from
-automatic + active manual stack.
-
-### Provenance codes
+## Provenance codes
 
 | Code | Name |
 | --- | --- |
@@ -211,39 +210,47 @@ automatic + active manual stack.
 
 Headstage is excluded from imputation.
 
-## Sprint 3 scope and status
+## Sprint status
 
-**Implemented**
+| Sprint | Status |
+| --- | --- |
+| 1 — Contracts, accepted-S3 discovery, timing map | Done |
+| 2 — Dense pose, blank protection, gap fill | Done |
+| 3 — SavGol, export, QC, runner | Done |
+| 4 — GUI, Advanced Settings, discovery, e2e | Done |
 
-- `src/pose_finalization/smoothing.py` — segment-wise SavGol.
-- `src/pose_finalization/export.py` — authoritative long-form
-  `final_pose.parquet`.
-- `src/pose_finalization/qc.py` — structural vs warning QC.
-- `src/pose_finalization/runner.py` — end-to-end backend runner and
-  downstream eligibility helpers.
-- Focused tests under `tests/pose_finalization/`.
+### Sprint 4 validation coverage
 
-**Not implemented (explicit non-scope)**
+Focused tests cover:
 
-- GUI integration
-- Manual S4 review or acceptance
-- Identity correction (owned by S3)
-- Special implanted-nose imputation
-- NPZ export
-- General model-based pose refinement / geometric refinement
-- New plugin/profile frameworks
+- Accepted S3 → S1 timing → dense 120 Hz → gap fill → SavGol → QC →
+  `final_pose.parquet`
+- GUI session/project discovery and automatic accepted-S3 selection
+- Default and modified Advanced Settings persistence in `settings_used.yaml`
+- Missing / unaccepted / superseded S3 rejection with clear GUI messaging
+- S3 superseded during processing → failed run (no completed parquet)
+- Completed S4 becoming stale after upstream supersession / SHA corruption
+  without mutating prior S4 artifacts
+- Multiple completed runs; upstream non-mutation; processing-error recovery
+- Sprint 3 coverage gaps: cross-boundary smoothing independence; downstream
+  SHA corruption detection; NaN confidence on reconstructed rows; exported
+  timing/source mapping consistency; output-overlap protection
 
-## Known limitations
+## Known limitations / remaining MVP risks
 
 - Geometric refinement is deferred; final coordinates are gap-filled and
   optionally SavGol-smoothed only.
 - QC thresholds are operational heuristics for the current lab MVP.
+- Target FPS is fixed at 120 Hz for the authoritative timing contract.
 - Temporal resamples are labeled `temporal_resample` even when endpoints were
   identity-corrected.
 - Automatic `was_track_swapped` remains frame-granular as produced by S3.
 - S4 does not reconstruct S3 undo history beyond the active
   `manual_corrections.json` stack.
-- No CLI/GUI scaffolding in Sprint 3; call `run_pose_finalization` from Python.
+- No NPZ export; no mandatory visual QC; no S4 acceptance step.
+- Pose finalization has no cooperative cancellation hook (same class of
+  limitation as S2 inference): the GUI stays responsive and blocks duplicate
+  launches / navigation while a run is active.
 
 ## Timing notes
 

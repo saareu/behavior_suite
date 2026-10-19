@@ -23,14 +23,15 @@ tracking correction, open video-centered review with optional manual
 corrections, and explicitly accept `tracked_pose.parquet`. S3 owns tracking
 identity correction and acceptance. S3 does not train the pose model.
 
-**Subsystem 04 — Pose Finalization** has a Sprint 3 backend that consumes an
-accepted S3 result and writes dense 120 Hz `final_pose.parquet` after timing
-mapping, gap fill, optional SavGol smoothing, and automated QC. S4 GUI
-integration is not implemented yet.
+**Subsystem 04 — Pose Finalization** is MVP implemented through Sprint 4. From
+an explicitly accepted S3 result, the GUI discovers the latest eligible accepted
+run, runs dense 120 Hz finalization in the background (gap fill, optional
+SavGol, automated QC), and writes `final_pose.parquet` under
+`pose_finalization/<run_id>/`. There is no S4 visual review or acceptance step.
 
-S2/S3/S4 backend progress does not make the suite a complete scientific-analysis
-pipeline. Elaborate model-optimization UI, active learning, and S4 GUI remain
-future or downstream responsibilities.
+S2/S3/S4 MVP progress does not make the suite a complete scientific-analysis
+pipeline. Elaborate model-optimization UI and active learning remain future or
+downstream responsibilities.
 
 ---
 
@@ -117,6 +118,11 @@ approval or a final scientific-usability judgment. From a selected completed S2
 run, the GUI can launch Subsystem 3 (automatic correction → review → optional
 manual edits → explicit acceptance).
 
+After an accepted S3 result, Subsystem 4 finalizes dense pose on the
+authoritative S1 120 Hz clock. Advanced Settings expose gap-fill and SavGol
+parameters; defaults are used when left unchanged. Completed S4 runs are
+discovered as eligible or stale by rechecking the recorded accepted S3 source.
+
 ---
 
 ## Active documentation
@@ -169,11 +175,15 @@ not missing MVP acceptance requirements.
 
 Subsystem 03 is the tracking-correction and verification subsystem. Its MVP is
 implemented and validated for automatic current-lab correction, video review,
-manual correction, and explicit acceptance of `tracked_pose.parquet`. Final
-pose processing (interpolation, imputation, resampling, smoothing), behavior-
-ready feature extraction, and final trajectory generation remain downstream
-responsibilities beyond S3. S2 technical QC does not replace tracking
-validation, identity verification, or final scientific-usability assessment.
+manual correction, and explicit acceptance of `tracked_pose.parquet`. S2
+technical QC does not replace tracking validation, identity verification, or
+final scientific-usability assessment.
+
+Subsystem 04 is the pose-finalization subsystem. Its MVP consumes accepted S3
+`tracked_pose.parquet`, builds dense 120 Hz pose from S1 timing, applies gap
+fill and optional SavGol smoothing, and exports `final_pose.parquet` with
+automated QC. Behavior-ready feature extraction and classification remain
+downstream of S4.
 
 ---
 
@@ -191,6 +201,8 @@ Before making repository changes, read the applicable documentation:
   changing backend inference acceptance behavior
 - `docs/subsystem_03/mvp_scope_and_roadmap.md` — required when changing or
   implementing Subsystem 03
+- `docs/subsystem_04/mvp_scope_and_roadmap.md` — required when changing or
+  implementing Subsystem 04
 - `docs/general/development/ai_coding_guide.md`
 
 Keep changes scoped, preserve scientific invariants, and update tests for any

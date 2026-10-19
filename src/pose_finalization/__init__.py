@@ -1,4 +1,4 @@
-"""Subsystem 04 pose finalization (Sprint 1–3: timing through final export)."""
+"""Subsystem 04 pose finalization (Sprint 1–4: backend through GUI handoff)."""
 
 from pose_finalization.accepted_s3 import (
     AcceptedS3Run,
@@ -6,6 +6,16 @@ from pose_finalization.accepted_s3 import (
     list_accepted_s3_runs,
     resolve_accepted_s3_run,
     validate_accepted_s3_run,
+)
+from pose_finalization.run_discovery import (
+    ELIGIBLE_DOWNSTREAM,
+    FAILED_OR_INCOMPLETE,
+    MISSING_REQUIRED_ARTIFACTS,
+    STALE_SOURCE,
+    PoseFinalizationProjectSummary,
+    PoseFinalizationRunSummary,
+    explain_missing_accepted_s3,
+    summarize_pose_finalization_project,
 )
 from pose_finalization.contracts import (
     FINAL_POSE_COLUMNS,
@@ -69,6 +79,8 @@ from pose_finalization.timing import (
 __all__ = [
     "AcceptedS3Run",
     "DensePoseResult",
+    "ELIGIBLE_DOWNSTREAM",
+    "FAILED_OR_INCOMPLETE",
     "FINAL_POSE_COLUMNS",
     "FINAL_POSE_FILENAME",
     "FINAL_POSE_SCHEMA_VERSION",
@@ -76,6 +88,7 @@ __all__ = [
     "GAP_LINEAR_MAX_FRAMES_DEFAULT",
     "GapFillConfig",
     "HEADSTAGE_NODE_NAME",
+    "MISSING_REQUIRED_ARTIFACTS",
     "ManualBlankInterval",
     "ManualCorrectionsEffects",
     "ManualIdentitySwapInterval",
@@ -89,13 +102,16 @@ __all__ = [
     "PROVENANCE_PROTECTED_MANUAL_BLANK",
     "PROVENANCE_TEMPORAL_RESAMPLE",
     "PoseFinalizationError",
+    "PoseFinalizationProjectSummary",
     "PoseFinalizationRequest",
     "PoseFinalizationResult",
+    "PoseFinalizationRunSummary",
     "QcConfig",
     "QcSummary",
     "SAVGOL_ENABLED_DEFAULT",
     "SAVGOL_POLYORDER_DEFAULT",
     "SAVGOL_WINDOW_LENGTH_DEFAULT",
+    "STALE_SOURCE",
     "STATUS_COMPLETED",
     "STATUS_COMPLETED_WITH_WARNINGS",
     "STATUS_FAILED",
@@ -110,6 +126,7 @@ __all__ = [
     "build_uniform_target_timeline",
     "construct_dense_pose",
     "evaluate_finalization_qc",
+    "explain_missing_accepted_s3",
     "fill_coordinate_gaps",
     "find_latest_accepted_s3_run",
     "is_s4_run_eligible_for_downstream",
@@ -122,6 +139,7 @@ __all__ = [
     "map_target_to_source",
     "resolve_accepted_s3_run",
     "run_pose_finalization",
+    "summarize_pose_finalization_project",
     "validate_accepted_s3_run",
     "validate_s4_run_for_downstream",
     "write_final_pose_parquet",
