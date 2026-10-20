@@ -2242,10 +2242,10 @@ class JumpHandler:
                     if (count3 >= 1 or count1 >=2) and ((dist_1_prev is not None and dist_1_prev > self.Jt) or self.Xt1_prev is None):
                         self._swap_ids(frame)
                         return True
-                    if self.data.count_visible_nodes(frame,1) > 0 and count1 / self.data.count_visible_nodes(frame,1) >= 0.5 and count11 == 0 and abs(self.d10 - self.jt1) < 18 and self._distance(self.Xt1_curr,self.Xt1_prev) > 2 * self.Jt and self._distance(spine1_curr, spine0_prev) < 6:
+                    if self.data.count_visible_nodes(frame,1) > 0 and count1 / self.data.count_visible_nodes(frame,1) >= 0.5 and count11 == 0 and self.d10 is not None and self.jt1 is not None and abs(self.d10 - self.jt1) < 18 and self._distance(self.Xt1_curr,self.Xt1_prev) is not None and self._distance(self.Xt1_curr,self.Xt1_prev) > 2 * self.Jt and self._distance(spine1_curr, spine0_prev) is not None and self._distance(spine1_curr, spine0_prev) < 6:
                         self._swap_ids(frame)
                         return True
-                    if self.data.count_visible_nodes(frame,1) > 0 and count1 >0 and count11 == 0 and self.d10 < 24 and self._distance(self.Xt1_curr,self.Xt0_prev) < 20 and self._distance(spine1_curr, spine0_prev) < 6 and self._distance(self.Xt1_curr,self.Xt1_pred) > 2 * self.Jt:
+                    if self.data.count_visible_nodes(frame,1) > 0 and count1 >0 and count11 == 0 and self.d10 is not None and self.d10 < 24 and self._distance(self.Xt1_curr,self.Xt0_prev) is not None and self._distance(self.Xt1_curr,self.Xt0_prev) < 20 and self._distance(spine1_curr, spine0_prev) is not None and self._distance(spine1_curr, spine0_prev) < 6 and self._distance(self.Xt1_curr,self.Xt1_pred) is not None and self._distance(self.Xt1_curr,self.Xt1_pred) > 2 * self.Jt:
                         self._swap_ids(frame)
                         return True
                 elif self.jt0 is None and self.jt1 == 0:
