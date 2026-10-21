@@ -29,6 +29,8 @@ class GuiTaskKind(StrEnum):
     RAW_FRAME_READ = "raw_frame_read"
     CAGE_DETECTION = "cage_detection"
     PREPROCESS_RUN = "preprocess_run"
+    BLOB_FEATURES_EXTRACTION = "blob_features_extraction"
+    BLOB_FEATURES_PREVIEW = "blob_features_preview"
 
 
 @dataclass(slots=True)

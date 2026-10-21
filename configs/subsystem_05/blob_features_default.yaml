@@ -1,0 +1,42 @@
+# Subsystem 05 — blob feature extraction defaults
+# Faithfully derived from legacy/configs/blob_features.yaml (lab authority).
+#
+# Cable-artifact removal is EXCLUDED from the S5 MVP configuration and GUI.
+# This file assumes the legacy lab default remove_cable_artifact: false.
+# Cable_* parameters are intentionally omitted (not silently altered science).
+#
+# Temporal gap-fill runs at source prepared-video rate before 120 Hz mapping.
+# target_fps is fixed at 120.0 (S4-compatible lab clock).
+# n_workers / max_in_flight are execution-only knobs (Sprint 2 uses sequential decode).
+
+schema_version: blob_features_settings_v1
+
+segmentation:
+  # -1 = Otsu, -2 = 3-class Multi-Otsu (requires scikit-image), >=0 fixed
+  blob_threshold: -2
+  blob_blur_kernel_size: 9
+  blob_kernel_size: 27
+  blob_tail_open_kernel_size: 7
+  blob_min_area: 2900
+  blob_max_area: 0
+  blob_prune_min_radius: 10
+  blob_prune_regrow_iters: 7
+  blob_prune_max_regrow_dist: 8
+  blob_post_prune_min_area: 2900
+  blob_post_prune_max_area: 0
+  blob_final_smooth_kernel_size: 3
+  abs_dark_threshold: 10
+
+temporal:
+  # Fill internal cc_count NaN gaps only when flanking values match; 0 disables.
+  cc_count_gap_fill_max_gap: 5
+
+execution:
+  n_workers: 16
+  max_in_flight: 128
+
+target_fps: 120.0
+
+cable_removal:
+  excluded_from_s5_mvp: true
+  assumed_legacy_default: false

@@ -30,7 +30,18 @@ SavGol, automated QC), and writes `final_pose.parquet` under
 `pose_finalization/<run_id>/`. A full laboratory session was validated through
 the GUI. There is no S4 visual review or acceptance step.
 
-S2/S3/S4 MVP progress does not make the suite a complete scientific-analysis
+**Subsystem 05 — Video / Blob Feature Extraction** is MVP complete /
+lab-validated. From an eligible S1 session (independent of S2–S4), Group 2
+exposes interactive segmentation preview, bookmarks, full extraction to
+`blob_features.parquet` on the 120 Hz grid, run discovery, QC summary, and
+GUI persistence. Laboratory GUI acceptance passed after Sprint 4 remediation
+(batch bookmark previews, preview-required states, cache restoration, settings
+invalidation, area filtering, navigation during extraction, and restart
+persistence). Documented non-MVP follow-ups remain: cooperative cancellation,
+completed-run settings preview, optional cache/performance work, and cable
+removal. S6 Combined Features is the next stage and is not implemented.
+
+S2–S5 MVP progress does not make the suite a complete scientific-analysis
 pipeline. Elaborate model-optimization UI and active learning remain future or
 downstream responsibilities.
 
@@ -124,6 +135,12 @@ authoritative S1 120 Hz clock. Advanced Settings expose gap-fill and SavGol
 parameters; defaults are used when left unchanged. Completed S4 runs are
 discovered as eligible or stale by rechecking the recorded accepted S3 source.
 
+Independently of S2–S4, Subsystem 5 (Group 2 — Feature Processing) loads an
+eligible S1 session, previews segmentation, and runs full blob-feature
+extraction. Completed S5 runs are discovered as eligible or stale by rechecking
+recorded S1 digests. S6 Combined Features is shown as coming later and remains
+disabled.
+
 ---
 
 ## Active documentation
@@ -149,6 +166,10 @@ Current active documentation:
   scope, completion status, artifact contract, and stage boundary
 - `docs/subsystem_03/minimal_implementation_contract.md` — S3 MVP implementation
   boundary (design history with implemented-status note)
+- `docs/subsystem_04/mvp_scope_and_roadmap.md` — finalized Subsystem 04 MVP
+  scope, completion status, and post-MVP roadmap
+- `docs/subsystem_05/mvp_scope_and_roadmap.md` — finalized Subsystem 05 MVP
+  scope, laboratory acceptance evidence, and S6 handoff boundary
 - `docs/general/development/ai_coding_guide.md` — repository-wide AI-assisted
   development guidance
 
@@ -183,8 +204,13 @@ final scientific-usability assessment.
 Subsystem 04 is the pose-finalization subsystem. Its MVP consumes accepted S3
 `tracked_pose.parquet`, builds dense 120 Hz pose from S1 timing, applies gap
 fill and optional SavGol smoothing, and exports `final_pose.parquet` with
-automated QC. Behavior-ready feature extraction and classification remain
-downstream of S4.
+automated QC.
+
+Subsystem 05 is the video / blob feature-extraction subsystem. Its MVP
+consumes eligible S1 prepared video and background, extracts morphology and
+temporal occlusion features onto the shared 120 Hz timeline, and writes
+`blob_features.parquet` with automated QC. Combined pose+blob features (S6)
+and behavior classification remain downstream of S5.
 
 ---
 
@@ -204,6 +230,8 @@ Before making repository changes, read the applicable documentation:
   implementing Subsystem 03
 - `docs/subsystem_04/mvp_scope_and_roadmap.md` — required when changing or
   implementing Subsystem 04
+- `docs/subsystem_05/mvp_scope_and_roadmap.md` — required when changing or
+  implementing Subsystem 05
 - `docs/general/development/ai_coding_guide.md`
 
 Keep changes scoped, preserve scientific invariants, and update tests for any

@@ -4,10 +4,12 @@
 
 | Subsystem | Status | Downstream boundary |
 | --- | --- | --- |
-| 01 — Video Preprocessing | Functionally closed / maintenance | Hands prepared video + timing to S2 |
+| 01 — Video Preprocessing | Functionally closed / maintenance | Hands prepared video + timing to S2 / S5 |
 | 02 — Pose Inference and Technical QC | MVP finalized / validated | Hands completed `pose.parquet` run to S3 |
 | 03 — Tracking Correction and Verification | MVP implemented / validated | Hands accepted `tracked_pose.parquet` to S4 |
 | 04 — Pose Finalization | MVP complete / validated | Hands `final_pose.parquet` to later analysis |
+| 05 — Video / Blob Feature Extraction | MVP complete / lab-validated | Consumes eligible S1; feeds upcoming S6 Combined Features |
+| 06 — Combined Features | Not started (upcoming) | Will consume eligible S5 (+ S4 timelines) |
 
 ## Subsystem 01 — Video Preprocessing
 
@@ -40,6 +42,21 @@
 ## Subsystem 04 — Pose Finalization (MVP Complete / Validated)
 
 - [MVP Scope and Roadmap](subsystem_04/mvp_scope_and_roadmap.md)
+
+## Subsystem 05 — Video / Blob Feature Extraction (MVP Complete / Lab-Validated)
+
+- [Final MVP Scope, Completion Status, and Roadmap](subsystem_05/mvp_scope_and_roadmap.md)
+- [Sprint 0 Repository Preflight and Integration Audit](subsystem_05/sprint_0_repository_audit.md)
+- [Sprint 1 Backend Foundation](subsystem_05/sprint_1_backend_foundation.md)
+- [Sprint 2 Complete Extraction Backend](subsystem_05/sprint_2_complete_extraction.md)
+- [Sprint 3 Interactive Video Segmentation GUI](subsystem_05/sprint_3_interactive_gui.md)
+- [Sprint 4 Full GUI Integration and MVP Acceptance](subsystem_05/sprint_4_full_gui_integration.md)
+
+## Subsystem 06 — Combined Features (Upcoming)
+
+Not started. S6 will consume currently eligible S5 runs and join on the shared
+120 Hz timeline with S4-compatible pose features. See the S5 roadmap handoff
+boundary for selection policy.
 
 ## General
 

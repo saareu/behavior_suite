@@ -7,6 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ui.controllers.blob_features_controller import BlobFeaturesController
 from ui.controllers.pose_finalization_controller import PoseFinalizationController
 from ui.controllers.pose_inference_controller import (
     PoseInferenceController,
@@ -25,14 +27,25 @@ from ui.controllers.pose_inference_controller import (
 )
 from ui.controllers.preprocess_setup_controller import PreprocessSetupController
 from ui.controllers.tracking_review_controller import TrackingReviewController
+from ui.pages.blob_features_page import BlobFeaturesPage
 from ui.pages.pose_finalization_page import PoseFinalizationPage
 from ui.pages.pose_inference_page import PoseInferencePage
 from ui.pages.tracking_review_page import TrackingReviewPage
 from ui.preprocess_wizard import PreprocessWizard
 
+GROUP_DATA_PREPARATION = "data_preparation"
+GROUP_FEATURE_PROCESSING = "feature_processing"
+
 
 class MainWindow(QMainWindow):
-    """Application shell preserving one session across subsystem screens."""
+    """Application shell preserving one session across subsystem screens.
+
+    Sprint 4 introduces two application groups while reusing the existing
+    ``QStackedWidget`` and S1–S5 page instances:
+
+    * Group 1 — Data Preparation: S1–S4
+    * Group 2 — Feature Processing: S5 (S6 shown as unavailable)
+    """
 
     def __init__(
         self,
@@ -40,6 +53,7 @@ class MainWindow(QMainWindow):
         pose_controller: PoseInferenceController | None = None,
         review_controller: TrackingReviewController | None = None,
         finalization_controller: PoseFinalizationController | None = None,
+        blob_features_controller: BlobFeaturesController | None = None,
     ) -> None:
         super().__init__()
         self.controller = controller
@@ -50,17 +64,23 @@ class MainWindow(QMainWindow):
         self.finalization_controller = (
             finalization_controller or PoseFinalizationController()
         )
+        self.blob_features_controller = (
+            blob_features_controller or BlobFeaturesController()
+        )
         self.setWindowTitle("behavior_suite")
         self.resize(1260, 900)
         self._session_root: Path | None = controller.state.project_dir
         self._shutdown_requested = False
         self._close_after_pose_task = False
         self._close_after_s4_task = False
+        self._close_after_s5_task = False
+        self._active_group = GROUP_DATA_PREPARATION
 
         self.wizard = PreprocessWizard(controller)
         self.pose_page = PoseInferencePage(self.pose_controller)
         self.review_page = TrackingReviewPage(self.review_controller)
         self.finalization_page = PoseFinalizationPage(self.finalization_controller)
+        self.blob_features_page = BlobFeaturesPage(self.blob_features_controller)
         self.s3_shell = self._build_s3_shell()
         self.s4_shell = self._build_s4_shell()
         self.pages = QStackedWidget()
@@ -68,24 +88,58 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.pose_page)
         self.pages.addWidget(self.s3_shell)
         self.pages.addWidget(self.s4_shell)
+        self.pages.addWidget(self.blob_features_page)
+
+        self.group_data_button = QPushButton("Group 1 — Data Preparation")
+        self.group_feature_button = QPushButton("Group 2 — Feature Processing")
+        self.group_data_button.setCheckable(True)
+        self.group_feature_button.setCheckable(True)
+        self.group_data_button.setChecked(True)
+        self._group_buttons = QButtonGroup(self)
+        self._group_buttons.setExclusive(True)
+        self._group_buttons.addButton(self.group_data_button)
+        self._group_buttons.addButton(self.group_feature_button)
+        self.group_data_button.clicked.connect(
+            lambda: self.set_application_group(GROUP_DATA_PREPARATION)
+        )
+        self.group_feature_button.clicked.connect(
+            lambda: self.set_application_group(GROUP_FEATURE_PROCESSING)
+        )
 
         self.s1_button = QPushButton("Subsystem 1 — Preprocess")
         self.s2_button = QPushButton("Subsystem 2 — Pose Inference")
         self.s3_button = QPushButton("Subsystem 3 — Tracking Review")
         self.s4_button = QPushButton("Subsystem 4 — Pose Finalization")
+        self.s5_button = QPushButton("Subsystem 5 — Video Features")
+        self.s6_button = QPushButton("Subsystem 6 — Combined Features (coming later)")
+        self.s6_button.setEnabled(False)
+        self.s6_button.setToolTip(
+            "S6 Combined Features is not implemented in this MVP. "
+            "It will consume currently eligible S5 runs later."
+        )
         self.s1_button.clicked.connect(self.show_subsystem_1)
         self.s2_button.clicked.connect(self.open_pose_inference)
         self.s3_button.clicked.connect(self.open_tracking_review)
         self.s4_button.clicked.connect(self.open_pose_finalization)
+        self.s5_button.clicked.connect(self.open_blob_features)
+
+        group_row = QHBoxLayout()
+        group_row.addWidget(self.group_data_button)
+        group_row.addWidget(self.group_feature_button)
+        group_row.addStretch(1)
+
         navigation = QHBoxLayout()
         navigation.addWidget(self.s1_button)
         navigation.addWidget(self.s2_button)
         navigation.addWidget(self.s3_button)
         navigation.addWidget(self.s4_button)
+        navigation.addWidget(self.s5_button)
+        navigation.addWidget(self.s6_button)
         navigation.addStretch(1)
 
         central = QWidget()
         layout = QVBoxLayout(central)
+        layout.addLayout(group_row)
         layout.addLayout(navigation)
         layout.addWidget(self.pages, 1)
         self.setCentralWidget(central)
@@ -108,8 +162,15 @@ class MainWindow(QMainWindow):
             self._s4_task_running_changed
         )
         self.finalization_page.task_finished.connect(self._s4_task_finished)
+        self.blob_features_page.unexpected_error.connect(self._show_unexpected_error)
+        self.blob_features_page.status_message.connect(self.statusBar().showMessage)
+        self.blob_features_page.task_running_changed.connect(
+            self._s5_task_running_changed
+        )
+        self.blob_features_page.task_finished.connect(self._s5_task_finished)
+        self._apply_group_visibility()
         self.statusBar().showMessage(
-            "Select a project in S1 or open an existing session in S2."
+            "Select a project in S1 or open an existing session in S2/S5."
         )
 
     def _build_s3_shell(self) -> QWidget:
@@ -182,19 +243,64 @@ class MainWindow(QMainWindow):
         self.wizard.show_initial_error(message)
         self.statusBar().showMessage("Startup configuration requires attention.")
 
+    def set_application_group(self, group: str) -> None:
+        """Switch between Data Preparation and Feature Processing groups."""
+
+        if self._hard_navigation_blocked():
+            # Restore checked state to the active group (S2/S4 hard lock).
+            self.group_data_button.setChecked(
+                self._active_group == GROUP_DATA_PREPARATION
+            )
+            self.group_feature_button.setChecked(
+                self._active_group == GROUP_FEATURE_PROCESSING
+            )
+            return
+        if group not in (GROUP_DATA_PREPARATION, GROUP_FEATURE_PROCESSING):
+            return
+        if group == self._active_group:
+            self._apply_group_visibility()
+            return
+        self._active_group = group
+        self.group_data_button.setChecked(group == GROUP_DATA_PREPARATION)
+        self.group_feature_button.setChecked(group == GROUP_FEATURE_PROCESSING)
+        self._apply_group_visibility()
+        if group == GROUP_DATA_PREPARATION:
+            # Stay on current data-prep page if already there; otherwise S1.
+            if self.pages.currentWidget() not in (
+                self.wizard,
+                self.pose_page,
+                self.s3_shell,
+                self.s4_shell,
+            ):
+                self.show_subsystem_1()
+            else:
+                self._update_navigation()
+            message = "Data Preparation (S1–S4)"
+            if self.blob_features_page.has_running_task:
+                message = (
+                    f"{message} — S5 task continues in the background; "
+                    "return to Feature Processing for progress."
+                )
+            self.statusBar().showMessage(message)
+        else:
+            self.open_blob_features()
+            self.statusBar().showMessage("Feature Processing (S5)")
+
     def show_subsystem_1(self) -> None:
         """Return to S1 without discarding session or S2 selection state."""
 
-        if self._navigation_blocked():
+        if self._hard_navigation_blocked():
             return
+        self._ensure_group(GROUP_DATA_PREPARATION)
         self.pages.setCurrentWidget(self.wizard)
         self._update_navigation()
 
     def open_pose_inference(self, session_root: object = None) -> None:
         """Open S2 from normal navigation or an explicit same-session handoff."""
 
-        if self._navigation_blocked():
+        if self._hard_navigation_blocked():
             return
+        self._ensure_group(GROUP_DATA_PREPARATION)
         if isinstance(session_root, Path | str) and str(session_root).strip():
             self._remember_session(session_root)
         if self._session_root is not None:
@@ -208,8 +314,9 @@ class MainWindow(QMainWindow):
     def open_tracking_review(self) -> None:
         """Show the S3 review workspace."""
 
-        if self._navigation_blocked():
+        if self._hard_navigation_blocked():
             return
+        self._ensure_group(GROUP_DATA_PREPARATION)
         self.pages.setCurrentWidget(self.s3_shell)
         self._update_navigation()
         self.statusBar().showMessage("Subsystem 3 tracking review")
@@ -217,8 +324,9 @@ class MainWindow(QMainWindow):
     def open_pose_finalization(self, session_root: object = None) -> None:
         """Show the S4 finalization workspace for the current or provided session."""
 
-        if self._navigation_blocked():
+        if self._hard_navigation_blocked():
             return
+        self._ensure_group(GROUP_DATA_PREPARATION)
         if isinstance(session_root, Path | str) and str(session_root).strip():
             self._remember_session(session_root)
         if self._session_root is not None:
@@ -228,6 +336,54 @@ class MainWindow(QMainWindow):
         self.pages.setCurrentWidget(self.s4_shell)
         self._update_navigation()
         self.statusBar().showMessage("Subsystem 4 pose finalization")
+
+    def open_blob_features(self, session_root: object = None) -> None:
+        """Show S5 video / blob feature workspace (Feature Processing group)."""
+
+        if self._hard_navigation_blocked():
+            return
+        self._ensure_group(GROUP_FEATURE_PROCESSING)
+        if isinstance(session_root, Path | str) and str(session_root).strip():
+            self._remember_session(session_root)
+        if self._session_root is not None:
+            current = self.blob_features_page.controller.state.session_root
+            target = self._session_root.resolve(strict=False)
+            same_session = (
+                current is not None and current.resolve(strict=False) == target
+            )
+            if same_session:
+                # Returning during an active S5 task must not re-load the session.
+                self.blob_features_page.refresh_from_state()
+            elif self.blob_features_page.has_running_task:
+                self.statusBar().showMessage(
+                    "Cannot change the S5 session while a Subsystem 5 task is active."
+                )
+                self.blob_features_page.refresh_from_state()
+            else:
+                self.blob_features_page.set_session(self._session_root)
+        else:
+            self.blob_features_page.refresh_from_state()
+        self.pages.setCurrentWidget(self.blob_features_page)
+        self._update_navigation()
+        self.statusBar().showMessage("Subsystem 5 video / blob feature extraction")
+
+    def _ensure_group(self, group: str) -> None:
+        if self._active_group == group:
+            self._apply_group_visibility()
+            return
+        self._active_group = group
+        self.group_data_button.setChecked(group == GROUP_DATA_PREPARATION)
+        self.group_feature_button.setChecked(group == GROUP_FEATURE_PROCESSING)
+        self._apply_group_visibility()
+
+    def _apply_group_visibility(self) -> None:
+        data = self._active_group == GROUP_DATA_PREPARATION
+        self.s1_button.setVisible(data)
+        self.s2_button.setVisible(data)
+        self.s3_button.setVisible(data)
+        self.s4_button.setVisible(data)
+        self.s5_button.setVisible(not data)
+        self.s6_button.setVisible(not data)
 
     def _remember_session(self, session_root: object) -> None:
         if isinstance(session_root, Path | str) and str(session_root).strip():
@@ -239,7 +395,7 @@ class MainWindow(QMainWindow):
         self.open_pose_inference(session_root)
 
     def _show_s3_from_s2(self, handoff: object) -> None:
-        if self._navigation_blocked():
+        if self._hard_navigation_blocked():
             return
         if not isinstance(handoff, S3PoseInput):
             self._show_unexpected_error("Unexpected Subsystem 3 handoff type.")
@@ -285,7 +441,7 @@ class MainWindow(QMainWindow):
         )
 
     def _browse_s3_project(self) -> None:
-        if self._navigation_blocked():
+        if self._hard_navigation_blocked():
             return
         start = str(self._session_root) if self._session_root is not None else ""
         chosen = QFileDialog.getExistingDirectory(
@@ -298,7 +454,7 @@ class MainWindow(QMainWindow):
         self.review_page.open_path(root)
 
     def _browse_s4_project(self) -> None:
-        if self._navigation_blocked():
+        if self._hard_navigation_blocked():
             return
         start = str(self._session_root) if self._session_root is not None else ""
         chosen = QFileDialog.getExistingDirectory(
@@ -310,7 +466,14 @@ class MainWindow(QMainWindow):
         self._remember_session(root)
         self.finalization_page.set_session(root)
 
-    def _navigation_blocked(self) -> bool:
+    def _hard_navigation_blocked(self) -> bool:
+        """Return True when S2/S4 tasks require a full navigation lock.
+
+        S5 preview/extraction intentionally do **not** hard-block group or
+        S1–S4 navigation. Users may leave Feature Processing and return while
+        extraction continues. Source-mutating S5 actions stay page-locked.
+        """
+
         if self.pose_page.has_running_task:
             self.statusBar().showMessage(
                 "Navigation is disabled while a Subsystem 2 task is active."
@@ -323,17 +486,30 @@ class MainWindow(QMainWindow):
             return True
         return False
 
+    def _navigation_blocked(self) -> bool:
+        """Backward-compatible alias for the S2/S4 hard navigation lock."""
+
+        return self._hard_navigation_blocked()
+
     def _update_navigation(self) -> None:
-        running = self.pose_page.has_running_task or self.finalization_page.has_running_task
-        self.s1_button.setEnabled(not running)
-        self.s2_button.setEnabled(not running)
-        self.s3_button.setEnabled(not running)
-        self.s4_button.setEnabled(not running)
-        self.s3_back_button.setEnabled(not running)
-        self.open_s3_button.setEnabled(not running)
-        self.s3_continue_s4_button.setEnabled(not running)
-        self.s4_back_button.setEnabled(not running)
-        self.open_s4_button.setEnabled(not running)
+        # S2/S4 keep a full lock. S5 tasks leave group and S1–S4 navigation open.
+        hard_lock = (
+            self.pose_page.has_running_task or self.finalization_page.has_running_task
+        )
+        self.group_data_button.setEnabled(not hard_lock)
+        self.group_feature_button.setEnabled(not hard_lock)
+        self.s1_button.setEnabled(not hard_lock)
+        self.s2_button.setEnabled(not hard_lock)
+        self.s3_button.setEnabled(not hard_lock)
+        self.s4_button.setEnabled(not hard_lock)
+        self.s5_button.setEnabled(not hard_lock)
+        # S6 remains permanently unavailable in this MVP.
+        self.s6_button.setEnabled(False)
+        self.s3_back_button.setEnabled(not hard_lock)
+        self.open_s3_button.setEnabled(not hard_lock)
+        self.s3_continue_s4_button.setEnabled(not hard_lock)
+        self.s4_back_button.setEnabled(not hard_lock)
+        self.open_s4_button.setEnabled(not hard_lock)
 
     def _pose_task_running_changed(self, _running: bool) -> None:
         self._update_navigation()
@@ -353,6 +529,15 @@ class MainWindow(QMainWindow):
             self._close_after_s4_task = False
             self.close()
 
+    def _s5_task_running_changed(self, _running: bool) -> None:
+        self._update_navigation()
+
+    def _s5_task_finished(self) -> None:
+        self._update_navigation()
+        if self._close_after_s5_task:
+            self._close_after_s5_task = False
+            self.close()
+
     def _show_unexpected_error(self, message: str) -> None:
         QMessageBox.critical(
             self,
@@ -362,7 +547,7 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """Wait for non-cancellable S2/S4 work or cooperatively cancel S1 work."""
+        """Wait for non-cancellable S2/S4/S5 work or cooperatively cancel S1 work."""
 
         if self.pose_page.has_running_task:
             event.ignore()
@@ -378,6 +563,15 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 "Pose finalization is active and has no safe cancellation hook. "
                 "The window remains responsive and will close when the task finishes."
+            )
+            return
+        if self.blob_features_page.has_running_task:
+            event.ignore()
+            self._close_after_s5_task = True
+            self.statusBar().showMessage(
+                "An S5 task is active and has no safe cancellation hook. "
+                "The window remains responsive and will close when the task finishes. "
+                "Partial parquet outputs are never published as completed."
             )
             return
         if self.wizard.has_running_tasks():

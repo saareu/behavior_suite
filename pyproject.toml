@@ -46,6 +46,7 @@ dependencies = [
 "typer>=0.12,<1",
 "rich>=13.7,<15",
 "platformdirs>=4.2,<5",
+"scikit-image>=0.22,<1",
 ]
 
 [project.optional-dependencies]
@@ -83,6 +84,7 @@ include = [
 "pose_inference*",
 "tracking_correction*",
 "pose_finalization*",
+"blob_features*",
 "cli*",
 "ui*",
 ]
@@ -123,6 +125,7 @@ source = [
 "pose_inference",
 "tracking_correction",
 "pose_finalization",
+"blob_features",
 "cli",
 ]
 
@@ -171,6 +174,8 @@ known-first-party = [
 "preprocess",
 "pose_inference",
 "tracking_correction",
+"pose_finalization",
+"blob_features",
 "cli",
 "ui",
 ]
@@ -184,6 +189,7 @@ packages = [
 "pose_inference",
 "tracking_correction",
 "cli",
+"blob_features",
 ]
 check_untyped_defs = true
 disallow_any_generics = true
@@ -200,6 +206,10 @@ strict_equality = true
 module = [
 "cv2",
 "h5py",
+"scipy",
+"scipy.*",
+"skimage",
+"skimage.*",
 ]
 ignore_missing_imports = true
 
