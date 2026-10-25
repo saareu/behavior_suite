@@ -7,16 +7,6 @@ from pose_finalization.accepted_s3 import (
     resolve_accepted_s3_run,
     validate_accepted_s3_run,
 )
-from pose_finalization.run_discovery import (
-    ELIGIBLE_DOWNSTREAM,
-    FAILED_OR_INCOMPLETE,
-    MISSING_REQUIRED_ARTIFACTS,
-    STALE_SOURCE,
-    PoseFinalizationProjectSummary,
-    PoseFinalizationRunSummary,
-    explain_missing_accepted_s3,
-    summarize_pose_finalization_project,
-)
 from pose_finalization.contracts import (
     FINAL_POSE_COLUMNS,
     FINAL_POSE_FILENAME,
@@ -59,6 +49,17 @@ from pose_finalization.export import (
 )
 from pose_finalization.gap_fill import GapFillConfig, fill_coordinate_gaps
 from pose_finalization.qc import QcConfig, QcSummary, evaluate_finalization_qc
+from pose_finalization.run_discovery import (
+    ELIGIBLE_DOWNSTREAM,
+    FAILED_OR_INCOMPLETE,
+    MISSING_REQUIRED_ARTIFACTS,
+    STALE_SOURCE,
+    PoseFinalizationProjectSummary,
+    PoseFinalizationRunSummary,
+    explain_missing_accepted_s3,
+    find_latest_eligible_s4_run,
+    summarize_pose_finalization_project,
+)
 from pose_finalization.runner import (
     PoseFinalizationRequest,
     PoseFinalizationResult,
@@ -129,6 +130,7 @@ __all__ = [
     "explain_missing_accepted_s3",
     "fill_coordinate_gaps",
     "find_latest_accepted_s3_run",
+    "find_latest_eligible_s4_run",
     "is_s4_run_eligible_for_downstream",
     "list_accepted_s3_runs",
     "load_final_pose_table",

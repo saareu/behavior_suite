@@ -31,6 +31,7 @@ class GuiTaskKind(StrEnum):
     PREPROCESS_RUN = "preprocess_run"
     BLOB_FEATURES_EXTRACTION = "blob_features_extraction"
     BLOB_FEATURES_PREVIEW = "blob_features_preview"
+    COMBINED_FEATURES_EXTRACTION = "combined_features_extraction"
 
 
 @dataclass(slots=True)

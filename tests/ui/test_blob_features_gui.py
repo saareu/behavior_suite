@@ -312,7 +312,7 @@ def test_group_navigation_preserves_s1_s4_and_shares_session(tmp_path: Path) -> 
     assert window.s5_button.isHidden() is False
     assert window.s1_button.isHidden() is True
     assert window.s6_button.isHidden() is False
-    assert window.s6_button.isEnabled() is False
+    assert window.s6_button.isEnabled() is True
     assert window.pages.currentWidget() is window.blob_features_page
     assert window._session_root == session.resolve()
     assert window.blob_features_page.controller.state.eligible is not None

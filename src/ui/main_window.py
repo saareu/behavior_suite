@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui.controllers.blob_features_controller import BlobFeaturesController
+from ui.controllers.combined_features_controller import CombinedFeaturesController
 from ui.controllers.pose_finalization_controller import PoseFinalizationController
 from ui.controllers.pose_inference_controller import (
     PoseInferenceController,
@@ -28,6 +29,7 @@ from ui.controllers.pose_inference_controller import (
 from ui.controllers.preprocess_setup_controller import PreprocessSetupController
 from ui.controllers.tracking_review_controller import TrackingReviewController
 from ui.pages.blob_features_page import BlobFeaturesPage
+from ui.pages.combined_features_page import CombinedFeaturesPage
 from ui.pages.pose_finalization_page import PoseFinalizationPage
 from ui.pages.pose_inference_page import PoseInferencePage
 from ui.pages.tracking_review_page import TrackingReviewPage
@@ -40,11 +42,11 @@ GROUP_FEATURE_PROCESSING = "feature_processing"
 class MainWindow(QMainWindow):
     """Application shell preserving one session across subsystem screens.
 
-    Sprint 4 introduces two application groups while reusing the existing
-    ``QStackedWidget`` and S1–S5 page instances:
+    Two application groups reuse the existing ``QStackedWidget`` and page
+    instances:
 
     * Group 1 — Data Preparation: S1–S4
-    * Group 2 — Feature Processing: S5 (S6 shown as unavailable)
+    * Group 2 — Feature Processing: S5–S6
     """
 
     def __init__(
@@ -54,6 +56,7 @@ class MainWindow(QMainWindow):
         review_controller: TrackingReviewController | None = None,
         finalization_controller: PoseFinalizationController | None = None,
         blob_features_controller: BlobFeaturesController | None = None,
+        combined_features_controller: CombinedFeaturesController | None = None,
     ) -> None:
         super().__init__()
         self.controller = controller
@@ -67,6 +70,9 @@ class MainWindow(QMainWindow):
         self.blob_features_controller = (
             blob_features_controller or BlobFeaturesController()
         )
+        self.combined_features_controller = (
+            combined_features_controller or CombinedFeaturesController()
+        )
         self.setWindowTitle("behavior_suite")
         self.resize(1260, 900)
         self._session_root: Path | None = controller.state.project_dir
@@ -74,13 +80,18 @@ class MainWindow(QMainWindow):
         self._close_after_pose_task = False
         self._close_after_s4_task = False
         self._close_after_s5_task = False
+        self._close_after_s6_task = False
         self._active_group = GROUP_DATA_PREPARATION
+        self._last_feature_page: str = "s5"
 
         self.wizard = PreprocessWizard(controller)
         self.pose_page = PoseInferencePage(self.pose_controller)
         self.review_page = TrackingReviewPage(self.review_controller)
         self.finalization_page = PoseFinalizationPage(self.finalization_controller)
         self.blob_features_page = BlobFeaturesPage(self.blob_features_controller)
+        self.combined_features_page = CombinedFeaturesPage(
+            self.combined_features_controller
+        )
         self.s3_shell = self._build_s3_shell()
         self.s4_shell = self._build_s4_shell()
         self.pages = QStackedWidget()
@@ -89,6 +100,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.s3_shell)
         self.pages.addWidget(self.s4_shell)
         self.pages.addWidget(self.blob_features_page)
+        self.pages.addWidget(self.combined_features_page)
 
         self.group_data_button = QPushButton("Group 1 — Data Preparation")
         self.group_feature_button = QPushButton("Group 2 — Feature Processing")
@@ -111,17 +123,17 @@ class MainWindow(QMainWindow):
         self.s3_button = QPushButton("Subsystem 3 — Tracking Review")
         self.s4_button = QPushButton("Subsystem 4 — Pose Finalization")
         self.s5_button = QPushButton("Subsystem 5 — Video Features")
-        self.s6_button = QPushButton("Subsystem 6 — Combined Features (coming later)")
-        self.s6_button.setEnabled(False)
+        self.s6_button = QPushButton("Subsystem 6 — Combined Features")
         self.s6_button.setToolTip(
-            "S6 Combined Features is not implemented in this MVP. "
-            "It will consume currently eligible S5 runs later."
+            "Combine currently eligible S4 final pose with eligible S5 blob "
+            "features. Does not run model inference."
         )
         self.s1_button.clicked.connect(self.show_subsystem_1)
         self.s2_button.clicked.connect(self.open_pose_inference)
         self.s3_button.clicked.connect(self.open_tracking_review)
         self.s4_button.clicked.connect(self.open_pose_finalization)
         self.s5_button.clicked.connect(self.open_blob_features)
+        self.s6_button.clicked.connect(self.open_combined_features)
 
         group_row = QHBoxLayout()
         group_row.addWidget(self.group_data_button)
@@ -168,9 +180,15 @@ class MainWindow(QMainWindow):
             self._s5_task_running_changed
         )
         self.blob_features_page.task_finished.connect(self._s5_task_finished)
+        self.combined_features_page.unexpected_error.connect(self._show_unexpected_error)
+        self.combined_features_page.status_message.connect(self.statusBar().showMessage)
+        self.combined_features_page.task_running_changed.connect(
+            self._s6_task_running_changed
+        )
+        self.combined_features_page.task_finished.connect(self._s6_task_finished)
         self._apply_group_visibility()
         self.statusBar().showMessage(
-            "Select a project in S1 or open an existing session in S2/S5."
+            "Select a project in S1 or open an existing session in S2/S5/S6."
         )
 
     def _build_s3_shell(self) -> QWidget:
@@ -276,15 +294,23 @@ class MainWindow(QMainWindow):
             else:
                 self._update_navigation()
             message = "Data Preparation (S1–S4)"
+            background: list[str] = []
             if self.blob_features_page.has_running_task:
+                background.append("S5")
+            if self.combined_features_page.has_running_task:
+                background.append("S6")
+            if background:
                 message = (
-                    f"{message} — S5 task continues in the background; "
-                    "return to Feature Processing for progress."
+                    f"{message} — {'/'.join(background)} task continues in the "
+                    "background; return to Feature Processing for progress."
                 )
             self.statusBar().showMessage(message)
         else:
-            self.open_blob_features()
-            self.statusBar().showMessage("Feature Processing (S5)")
+            if self._last_feature_page == "s6":
+                self.open_combined_features()
+            else:
+                self.open_blob_features()
+            self.statusBar().showMessage("Feature Processing (S5–S6)")
 
     def show_subsystem_1(self) -> None:
         """Return to S1 without discarding session or S2 selection state."""
@@ -364,8 +390,39 @@ class MainWindow(QMainWindow):
         else:
             self.blob_features_page.refresh_from_state()
         self.pages.setCurrentWidget(self.blob_features_page)
+        self._last_feature_page = "s5"
         self._update_navigation()
         self.statusBar().showMessage("Subsystem 5 video / blob feature extraction")
+
+    def open_combined_features(self, session_root: object = None) -> None:
+        """Show S6 combined-feature workspace (Feature Processing group)."""
+
+        if self._hard_navigation_blocked():
+            return
+        self._ensure_group(GROUP_FEATURE_PROCESSING)
+        if isinstance(session_root, Path | str) and str(session_root).strip():
+            self._remember_session(session_root)
+        if self._session_root is not None:
+            current = self.combined_features_page.controller.state.session_root
+            target = self._session_root.resolve(strict=False)
+            same_session = (
+                current is not None and current.resolve(strict=False) == target
+            )
+            if same_session:
+                self.combined_features_page.refresh_from_state()
+            elif self.combined_features_page.has_running_task:
+                self.statusBar().showMessage(
+                    "Cannot change the S6 session while a Subsystem 6 task is active."
+                )
+                self.combined_features_page.refresh_from_state()
+            else:
+                self.combined_features_page.set_session(self._session_root)
+        else:
+            self.combined_features_page.refresh_from_state()
+        self.pages.setCurrentWidget(self.combined_features_page)
+        self._last_feature_page = "s6"
+        self._update_navigation()
+        self.statusBar().showMessage("Subsystem 6 combined pose & video features")
 
     def _ensure_group(self, group: str) -> None:
         if self._active_group == group:
@@ -469,9 +526,9 @@ class MainWindow(QMainWindow):
     def _hard_navigation_blocked(self) -> bool:
         """Return True when S2/S4 tasks require a full navigation lock.
 
-        S5 preview/extraction intentionally do **not** hard-block group or
+        S5 and S6 extraction intentionally do **not** hard-block group or
         S1–S4 navigation. Users may leave Feature Processing and return while
-        extraction continues. Source-mutating S5 actions stay page-locked.
+        extraction continues. Source-mutating S5/S6 actions stay page-locked.
         """
 
         if self.pose_page.has_running_task:
@@ -492,7 +549,7 @@ class MainWindow(QMainWindow):
         return self._hard_navigation_blocked()
 
     def _update_navigation(self) -> None:
-        # S2/S4 keep a full lock. S5 tasks leave group and S1–S4 navigation open.
+        # S2/S4 keep a full lock. S5/S6 tasks leave group and page navigation open.
         hard_lock = (
             self.pose_page.has_running_task or self.finalization_page.has_running_task
         )
@@ -503,8 +560,7 @@ class MainWindow(QMainWindow):
         self.s3_button.setEnabled(not hard_lock)
         self.s4_button.setEnabled(not hard_lock)
         self.s5_button.setEnabled(not hard_lock)
-        # S6 remains permanently unavailable in this MVP.
-        self.s6_button.setEnabled(False)
+        self.s6_button.setEnabled(not hard_lock)
         self.s3_back_button.setEnabled(not hard_lock)
         self.open_s3_button.setEnabled(not hard_lock)
         self.s3_continue_s4_button.setEnabled(not hard_lock)
@@ -538,6 +594,15 @@ class MainWindow(QMainWindow):
             self._close_after_s5_task = False
             self.close()
 
+    def _s6_task_running_changed(self, _running: bool) -> None:
+        self._update_navigation()
+
+    def _s6_task_finished(self) -> None:
+        self._update_navigation()
+        if self._close_after_s6_task:
+            self._close_after_s6_task = False
+            self.close()
+
     def _show_unexpected_error(self, message: str) -> None:
         QMessageBox.critical(
             self,
@@ -547,7 +612,7 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """Wait for non-cancellable S2/S4/S5 work or cooperatively cancel S1 work."""
+        """Wait for non-cancellable S2/S4/S5/S6 work or cooperatively cancel S1 work."""
 
         if self.pose_page.has_running_task:
             event.ignore()
@@ -570,6 +635,15 @@ class MainWindow(QMainWindow):
             self._close_after_s5_task = True
             self.statusBar().showMessage(
                 "An S5 task is active and has no safe cancellation hook. "
+                "The window remains responsive and will close when the task finishes. "
+                "Partial parquet outputs are never published as completed."
+            )
+            return
+        if self.combined_features_page.has_running_task:
+            event.ignore()
+            self._close_after_s6_task = True
+            self.statusBar().showMessage(
+                "An S6 task is active and has no safe cancellation hook. "
                 "The window remains responsive and will close when the task finishes. "
                 "Partial parquet outputs are never published as completed."
             )

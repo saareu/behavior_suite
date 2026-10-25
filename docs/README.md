@@ -8,8 +8,8 @@
 | 02 — Pose Inference and Technical QC | MVP finalized / validated | Hands completed `pose.parquet` run to S3 |
 | 03 — Tracking Correction and Verification | MVP implemented / validated | Hands accepted `tracked_pose.parquet` to S4 |
 | 04 — Pose Finalization | MVP complete / validated | Hands `final_pose.parquet` to later analysis |
-| 05 — Video / Blob Feature Extraction | MVP complete / lab-validated | Consumes eligible S1; feeds upcoming S6 Combined Features |
-| 06 — Combined Features | Not started (upcoming) | Will consume eligible S5 (+ S4 timelines) |
+| 05 — Video / Blob Feature Extraction | MVP complete / lab-validated | Consumes eligible S1; feeds S6 Combined Features |
+| 06 - Combined Features | MVP complete / lab-validated | Eligible S4 + S5 -> `dyadic_features_full.parquet` + model-compat report |
 
 ## Subsystem 01 — Video Preprocessing
 
@@ -52,11 +52,26 @@
 - [Sprint 3 Interactive Video Segmentation GUI](subsystem_05/sprint_3_interactive_gui.md)
 - [Sprint 4 Full GUI Integration and MVP Acceptance](subsystem_05/sprint_4_full_gui_integration.md)
 
-## Subsystem 06 — Combined Features (Upcoming)
+## Subsystem 06 - Combined Pose & Video Feature Generation (MVP Complete / Lab-Validated)
 
-Not started. S6 will consume currently eligible S5 runs and join on the shared
-120 Hz timeline with S4-compatible pose features. See the S5 roadmap handoff
-boundary for selection policy.
+S6 MVP is complete and lab-validated. Sprints 1-4 delivered headless joint
+S4/S5 processing plus Group 2 GUI. Operator laboratory GUI acceptance passed
+on `E_full_session_integration` (2026-10-25). S6 does not train models or run
+inference. Subsystem 07 has not started.
+
+- [Final MVP Scope, Completion Status, and Roadmap](subsystem_06/mvp_scope_and_roadmap.md)
+- [Architecture Audit (S6-A)](subsystem_06/architecture_audit.md)
+- [Implementation Contract (S6-B)](subsystem_06/implementation_contract.md)
+- [Sprint 1 - Input Validation and S4 Pose Adapter](subsystem_06/sprint_1_input_adapter.md)
+- [Sprint 2 - Feature Calculation Migration](subsystem_06/sprint_2_feature_migration.md)
+- [Sprint 3 - Export, QC, Model Compatibility, Run Discovery](subsystem_06/sprint_3_export_compatibility.md)
+- [Sprint 4 - GUI Integration and Laboratory Acceptance](subsystem_06/sprint_4_gui_integration.md)
+- [Laboratory Acceptance Checklist](subsystem_06/laboratory_acceptance_checklist.md)
+
+S6 consumes currently eligible S4 + S5 runs, aligns on the shared 120 Hz
+timeline, adapts `final_pose.parquet` into the legacy Pipeline 50 /
+`frame_features` input contract, and emits a complete directional feature
+artifact plus a separate model-compat report (no inference).
 
 ## General
 

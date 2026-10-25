@@ -1,0 +1,18 @@
+# Subsystem 06 default settings (Sprint 3).
+# model_registry.root must be set explicitly to a lab/local models tree.
+# The ignored legacy/ directory is never implied at runtime.
+
+schema_version: combined_features_settings_v1
+smooth_win: 9
+diff_dt: 1
+iteration_name: suite
+exp_name: null
+adapter_policy_version: combined_features_pose_adapter_v1
+dyadic_features_schema_version: dyadic_features_full_v1
+
+model_registry:
+  root: null
+  dyadic_subdir: dyadic/v1
+  focal_subdir: focal/v1
+  include_obsolete: false
+  include_focal: true

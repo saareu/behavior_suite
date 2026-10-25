@@ -95,6 +95,20 @@ def summarize_pose_finalization_project(
     )
 
 
+def find_latest_eligible_s4_run(
+    session_root: Path | str,
+) -> PoseFinalizationRunSummary | None:
+    """Return the newest currently eligible completed S4 run, if any.
+
+    Mirrors ``blob_features.find_latest_eligible_s5_run`` for S6 pair selection.
+    Callers must not treat completed-but-stale runs as eligible.
+    """
+
+    summary = summarize_pose_finalization_project(session_root)
+    eligible = summary.eligible_runs
+    return eligible[0] if eligible else None
+
+
 def explain_missing_accepted_s3(session_root: Path | str) -> str:
     """Return a human-readable explanation when no eligible accepted S3 exists."""
 

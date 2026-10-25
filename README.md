@@ -39,9 +39,11 @@ GUI persistence. Laboratory GUI acceptance passed after Sprint 4 remediation
 invalidation, area filtering, navigation during extraction, and restart
 persistence). Documented non-MVP follow-ups remain: cooperative cancellation,
 completed-run settings preview, optional cache/performance work, and cable
-removal. S6 Combined Features is the next stage and is not implemented.
+removal. Subsystem 06 Combined Features is MVP complete / lab-validated.
 
-S2–S5 MVP progress does not make the suite a complete scientific-analysis
+
+**Subsystem 06 - Combined Pose & Video Feature Generation** is MVP complete / lab-validated. From jointly aligned eligible S4 `final_pose.parquet` and S5 `blob_features.parquet`, Group 2 exposes source selection, alignment status, background extraction to `dyadic_features_full.parquet`, QC, optional model-compatibility reporting, and run discovery. Operator laboratory GUI acceptance passed on session `E_full_session_integration` (S4 `pose_finalization__20261025T173206` + S5 `blob_features__20261021T152749` -> S6 `combined_features__20261025T173244`: 36528 samples, 73056 directional rows, structural QC OK). S6 does not train models or run inference. Documented non-MVP follow-ups remain: cooperative cancellation, GUI settings persistence, optional packaged model registry, and numerical regression vs historical Pipeline 50 caches. Subsystem 07 has not started.
+S2-S6 MVP progress does not make the suite a complete scientific-analysis
 pipeline. Elaborate model-optimization UI and active learning remain future or
 downstream responsibilities.
 
@@ -209,8 +211,8 @@ automated QC.
 Subsystem 05 is the video / blob feature-extraction subsystem. Its MVP
 consumes eligible S1 prepared video and background, extracts morphology and
 temporal occlusion features onto the shared 120 Hz timeline, and writes
-`blob_features.parquet` with automated QC. Combined pose+blob features (S6)
-and behavior classification remain downstream of S5.
+`blob_features.parquet` with automated QC. Combined pose+blob features (S6) are implemented and lab-validated;
+behavior classification remains downstream of S6.
 
 ---
 
@@ -236,3 +238,5 @@ Before making repository changes, read the applicable documentation:
 
 Keep changes scoped, preserve scientific invariants, and update tests for any
 implementation behavior change.
+- `docs/subsystem_06/mvp_scope_and_roadmap.md` - finalized Subsystem 06 MVP
+  scope, laboratory acceptance evidence, and non-MVP follow-ups
