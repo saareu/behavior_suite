@@ -163,8 +163,9 @@ def track_legend_entries(
     """Return overlay track colors, with optional authoritative profile roles.
 
     When ``implanted_track`` is provided (e.g. the track that currently owns
-    ``headstage`` after a manual identity swap), that track receives the
+    ``headstage`` after a manual ``swap_node``), that track receives the
     implanted/headstage role label instead of the static profile default.
+    Identity swaps themselves leave ``headstage`` on the implanted track.
     """
 
     role_by_track = _profile_track_role_labels(implanted_track=implanted_track)
@@ -425,7 +426,10 @@ class TrackingReviewSession:
         return is_currently_accepted(self.acceptance_state)
 
     def swap_identities(self, start_frame: int, end_frame: int) -> ManualEditResult:
-        """Swap track 0 ↔ track 1 for all nodes over an inclusive interval."""
+        """Swap track 0 ↔ track 1 for body nodes over an inclusive interval.
+
+        ``headstage`` ownership is preserved (profile: implanted cue on track 0).
+        """
 
         def mutate(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
             edited = apply_swap_identities(

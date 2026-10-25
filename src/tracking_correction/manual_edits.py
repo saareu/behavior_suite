@@ -32,6 +32,10 @@ from tracking_correction.contracts import (
 
 _TRACK_A = 0
 _TRACK_B = 1
+# Current-lab profile invariant: implanted animal is always track 0, and the
+# headstage cue must remain on that track after an identity swap. Body nodes
+# swap; headstage ownership does not flip to track 1.
+_IDENTITY_SWAP_PRESERVED_NODES = frozenset({"headstage"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,10 +105,14 @@ def apply_swap_identities(
 ) -> pd.DataFrame:
     """Swap track 0 ↔ track 1 ownership over an inclusive frame interval.
 
-    Entire detection rows move by flipping their track label — including
-    ``headstage`` and any other single-sided nodes — so sparse
+    Body detection rows move by flipping their track label so sparse
     ``(frame, track, node)`` sets and all associated pose/provenance columns
     travel with the detection. Missing nodes on one side are not invented.
+
+    Profile invariant: ``headstage`` (and any other preserved cue nodes) keep
+    their existing track label. For ``current_lab_two_mouse_headstage_v1`` that
+    means the implanted cue stays on track 0 and is never moved onto track 1
+    by an identity swap. Use ``swap_node`` if a headstage row itself must move.
     """
 
     start, end = _validate_interval(start_frame, end_frame)
@@ -112,22 +120,28 @@ def apply_swap_identities(
     frame_col = _frame_column(out)
     track_values = _track_series(out).to_numpy(dtype=int, copy=True)
     frame_values = pd.to_numeric(out[frame_col], errors="coerce").to_numpy()
+    node_values = out["node"].astype(str).to_numpy() if "node" in out.columns else None
     in_range = (
         np.isfinite(frame_values)
         & (frame_values >= start)
         & (frame_values <= end)
         & np.isin(track_values, (_TRACK_A, _TRACK_B))
     )
-    if not bool(np.any(in_range)):
+    if node_values is not None:
+        preserved = np.isin(node_values, list(_IDENTITY_SWAP_PRESERVED_NODES))
+        swappable = in_range & ~preserved
+    else:
+        swappable = in_range
+    if not bool(np.any(swappable)):
         raise TrackingCorrectionError(
-            f"No track 0/1 rows found in frames {start}–{end}."
+            f"No swappable track 0/1 body rows found in frames {start}–{end}."
         )
-    # Flip ownership with a single vectorized write so every node in range —
-    # including headstage — changes track together. Avoid the temp-track
-    # round-trip, which can fail to round-trip on some pandas dtypes.
+    # Flip body ownership with one vectorized write. Preserved cue nodes
+    # (headstage) are excluded so identity repair cannot put the implant cue
+    # onto the partner track.
     swapped = track_values.copy()
-    swapped[in_range & (track_values == _TRACK_A)] = _TRACK_B
-    swapped[in_range & (track_values == _TRACK_B)] = _TRACK_A
+    swapped[swappable & (track_values == _TRACK_A)] = _TRACK_B
+    swapped[swappable & (track_values == _TRACK_B)] = _TRACK_A
     out["track"] = swapped
     return _sort_pose(out)
 
@@ -167,32 +181,37 @@ def apply_swap_node(
     node_name = _validate_node(node)
     out = frame.copy()
     frame_col = _frame_column(out)
-    track_values = _track_series(out)
-    touched = False
-    for index in range(start, end + 1):
-        node_mask = (out[frame_col] == index) & (out["node"].astype(str) == node_name)
-        idx_a = out.index[node_mask & (track_values == _TRACK_A)].tolist()
-        idx_b = out.index[node_mask & (track_values == _TRACK_B)].tolist()
-        if len(idx_a) > 1 or len(idx_b) > 1:
-            raise TrackingCorrectionError(
-                f"Node {node_name!r} has duplicate rows at frame {index}."
-            )
-        if not idx_a and not idx_b:
-            continue
-        touched = True
-        if idx_a and idx_b:
-            out.at[int(idx_a[0]), "track"] = _TRACK_B
-            out.at[int(idx_b[0]), "track"] = _TRACK_A
-        elif idx_a:
-            out.at[int(idx_a[0]), "track"] = _TRACK_B
-        else:
-            out.at[int(idx_b[0]), "track"] = _TRACK_A
-        # Track series is stale after in-place track edits; refresh for next frame.
-        track_values = _track_series(out)
-    if not touched:
+    track_values = _track_series(out).to_numpy(dtype=int, copy=True)
+    frame_values = pd.to_numeric(out[frame_col], errors="coerce").to_numpy()
+    node_values = out["node"].astype(str).to_numpy()
+    in_range = (
+        np.isfinite(frame_values)
+        & (frame_values >= start)
+        & (frame_values <= end)
+        & (node_values == node_name)
+        & np.isin(track_values, (_TRACK_A, _TRACK_B))
+    )
+    if not bool(np.any(in_range)):
         raise TrackingCorrectionError(
             f"Node {node_name!r} is missing on both tracks in frames {start}–{end}."
         )
+    # Reject duplicate (frame, track) rows for this node before flipping.
+    selected_frames = frame_values[in_range].astype(np.int64, copy=False)
+    selected_tracks = track_values[in_range].astype(np.int64, copy=False)
+    pair_keys = selected_frames * 2 + selected_tracks
+    _, first_idx, key_counts = np.unique(
+        pair_keys, return_index=True, return_counts=True
+    )
+    if bool(np.any(key_counts > 1)):
+        dup_key = int(pair_keys[first_idx[key_counts > 1][0]])
+        bad_frame = int(dup_key // 2)
+        raise TrackingCorrectionError(
+            f"Node {node_name!r} has duplicate rows at frame {bad_frame}."
+        )
+    swapped = track_values.copy()
+    swapped[in_range & (track_values == _TRACK_A)] = _TRACK_B
+    swapped[in_range & (track_values == _TRACK_B)] = _TRACK_A
+    out["track"] = swapped
     return _sort_pose(out)
 
 

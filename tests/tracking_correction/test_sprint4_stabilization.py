@@ -98,14 +98,15 @@ def test_track_legend_matches_overlay_colors() -> None:
         assert entry.color_bgr == TRACK_COLORS_BGR[entry.track]
         # Overlay lookup uses the same mapping.
         assert TRACK_COLORS_BGR.get(entry.track) == entry.color_bgr
-    # Authoritative profile role for track 0.
+    # Authoritative profile role for track 0; identity swap must not move the
+    # implant cue onto track 1, so the static profile default remains correct.
     by_track = {entry.track: entry for entry in entries}
     assert by_track[0].role_label == "implanted/headstage"
     assert by_track[1].role_label is None
-    # After identity swap, role follows the track that owns headstage.
-    swapped = {entry.track: entry for entry in track_legend_entries(implanted_track=1)}
-    assert swapped[1].role_label == "implanted/headstage"
-    assert swapped[0].role_label is None
+    # Explicit override remains available for callers that need it.
+    overridden = {entry.track: entry for entry in track_legend_entries(implanted_track=1)}
+    assert overridden[1].role_label == "implanted/headstage"
+    assert overridden[0].role_label is None
 
 
 def test_manual_edit_updates_overlay_immediately_without_waiting_for_disk(
