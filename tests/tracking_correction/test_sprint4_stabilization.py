@@ -102,6 +102,10 @@ def test_track_legend_matches_overlay_colors() -> None:
     by_track = {entry.track: entry for entry in entries}
     assert by_track[0].role_label == "implanted/headstage"
     assert by_track[1].role_label is None
+    # After identity swap, role follows the track that owns headstage.
+    swapped = {entry.track: entry for entry in track_legend_entries(implanted_track=1)}
+    assert swapped[1].role_label == "implanted/headstage"
+    assert swapped[0].role_label is None
 
 
 def test_manual_edit_updates_overlay_immediately_without_waiting_for_disk(

@@ -32,7 +32,6 @@ from tracking_correction.contracts import (
 
 _TRACK_A = 0
 _TRACK_B = 1
-_TEMP_TRACK = -999
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +101,8 @@ def apply_swap_identities(
 ) -> pd.DataFrame:
     """Swap track 0 ↔ track 1 ownership over an inclusive frame interval.
 
-    Entire detection rows move by flipping their track label, so sparse
+    Entire detection rows move by flipping their track label — including
+    ``headstage`` and any other single-sided nodes — so sparse
     ``(frame, track, node)`` sets and all associated pose/provenance columns
     travel with the detection. Missing nodes on one side are not invented.
     """
@@ -110,58 +110,89 @@ def apply_swap_identities(
     start, end = _validate_interval(start_frame, end_frame)
     out = frame.copy()
     frame_col = _frame_column(out)
-    track_values = _track_series(out)
-    mask = (out[frame_col] >= start) & (out[frame_col] <= end)
-    mask_a = mask & (track_values == _TRACK_A)
-    mask_b = mask & (track_values == _TRACK_B)
-    if not bool(mask_a.any()) and not bool(mask_b.any()):
+    track_values = _track_series(out).to_numpy(dtype=int, copy=True)
+    frame_values = pd.to_numeric(out[frame_col], errors="coerce").to_numpy()
+    in_range = (
+        np.isfinite(frame_values)
+        & (frame_values >= start)
+        & (frame_values <= end)
+        & np.isin(track_values, (_TRACK_A, _TRACK_B))
+    )
+    if not bool(np.any(in_range)):
         raise TrackingCorrectionError(
             f"No track 0/1 rows found in frames {start}–{end}."
         )
-    # Flip ownership in place. Do not mutate other columns: provenance stays
-    # attached to the detection row as the track label changes.
-    out.loc[mask_a, "track"] = _TEMP_TRACK
-    out.loc[mask_b, "track"] = _TRACK_A
-    out.loc[out["track"] == _TEMP_TRACK, "track"] = _TRACK_B
+    # Flip ownership with a single vectorized write so every node in range —
+    # including headstage — changes track together. Avoid the temp-track
+    # round-trip, which can fail to round-trip on some pandas dtypes.
+    swapped = track_values.copy()
+    swapped[in_range & (track_values == _TRACK_A)] = _TRACK_B
+    swapped[in_range & (track_values == _TRACK_B)] = _TRACK_A
+    out["track"] = swapped
     return _sort_pose(out)
 
 
 def apply_swap_node(
     frame: pd.DataFrame,
     *,
-    frame_idx: int,
     node: str,
+    start_frame: int | None = None,
+    end_frame: int | None = None,
+    frame_idx: int | None = None,
 ) -> pd.DataFrame:
-    """Swap or move one node between track 0 and track 1 at a single frame.
+    """Swap or move one node between track 0 and track 1 over an inclusive interval.
 
-    If the node exists on both tracks, ownership is swapped. If it exists on
-    only one track, the detection row is moved to the other track. Pose and
+    ``frame_idx`` is accepted as a single-frame alias for
+    ``start_frame=end_frame=frame_idx``.
+
+    If the node exists on both tracks at a frame, ownership is swapped. If it
+    exists on only one track, the detection row is moved to the other track.
+    Frames where the node is missing on both tracks are skipped. Pose and
     provenance columns travel with the row; nothing is duplicated or invented.
     """
 
-    index = _validate_frame(frame_idx)
+    if frame_idx is not None:
+        if start_frame is not None or end_frame is not None:
+            raise TrackingCorrectionError(
+                "Pass either frame_idx or start_frame/end_frame, not both."
+            )
+        start, end = _validate_interval(frame_idx, frame_idx)
+    else:
+        if start_frame is None or end_frame is None:
+            raise TrackingCorrectionError(
+                "swap_node requires start_frame and end_frame (or frame_idx)."
+            )
+        start, end = _validate_interval(start_frame, end_frame)
+
     node_name = _validate_node(node)
     out = frame.copy()
     frame_col = _frame_column(out)
     track_values = _track_series(out)
-    node_mask = (out[frame_col] == index) & (out["node"].astype(str) == node_name)
-    idx_a = out.index[node_mask & (track_values == _TRACK_A)].tolist()
-    idx_b = out.index[node_mask & (track_values == _TRACK_B)].tolist()
-    if len(idx_a) > 1 or len(idx_b) > 1:
+    touched = False
+    for index in range(start, end + 1):
+        node_mask = (out[frame_col] == index) & (out["node"].astype(str) == node_name)
+        idx_a = out.index[node_mask & (track_values == _TRACK_A)].tolist()
+        idx_b = out.index[node_mask & (track_values == _TRACK_B)].tolist()
+        if len(idx_a) > 1 or len(idx_b) > 1:
+            raise TrackingCorrectionError(
+                f"Node {node_name!r} has duplicate rows at frame {index}."
+            )
+        if not idx_a and not idx_b:
+            continue
+        touched = True
+        if idx_a and idx_b:
+            out.at[int(idx_a[0]), "track"] = _TRACK_B
+            out.at[int(idx_b[0]), "track"] = _TRACK_A
+        elif idx_a:
+            out.at[int(idx_a[0]), "track"] = _TRACK_B
+        else:
+            out.at[int(idx_b[0]), "track"] = _TRACK_A
+        # Track series is stale after in-place track edits; refresh for next frame.
+        track_values = _track_series(out)
+    if not touched:
         raise TrackingCorrectionError(
-            f"Node {node_name!r} has duplicate rows at frame {index}."
+            f"Node {node_name!r} is missing on both tracks in frames {start}–{end}."
         )
-    if not idx_a and not idx_b:
-        raise TrackingCorrectionError(
-            f"Node {node_name!r} is missing on both tracks at frame {index}."
-        )
-    if idx_a and idx_b:
-        out.at[int(idx_a[0]), "track"] = _TRACK_B
-        out.at[int(idx_b[0]), "track"] = _TRACK_A
-    elif idx_a:
-        out.at[int(idx_a[0]), "track"] = _TRACK_B
-    else:
-        out.at[int(idx_b[0]), "track"] = _TRACK_A
     return _sort_pose(out)
 
 
@@ -216,7 +247,8 @@ def undo_edit(frame: pd.DataFrame, record: Mapping[str, Any]) -> pd.DataFrame:
     if action == MANUAL_ACTION_SWAP_NODE:
         return apply_swap_node(
             frame,
-            frame_idx=int(record["start_frame"]),
+            start_frame=int(record["start_frame"]),
+            end_frame=int(record["end_frame"]),
             node=str(record["node"]),
         )
     if action == MANUAL_ACTION_BLANK_NODE:

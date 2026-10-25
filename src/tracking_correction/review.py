@@ -156,10 +156,18 @@ class TrackLegendEntry:
         return f"#{red:02x}{green:02x}{blue:02x}"
 
 
-def track_legend_entries() -> tuple[TrackLegendEntry, ...]:
-    """Return overlay track colors, with optional authoritative profile roles."""
+def track_legend_entries(
+    *,
+    implanted_track: int | None = None,
+) -> tuple[TrackLegendEntry, ...]:
+    """Return overlay track colors, with optional authoritative profile roles.
 
-    role_by_track = _profile_track_role_labels()
+    When ``implanted_track`` is provided (e.g. the track that currently owns
+    ``headstage`` after a manual identity swap), that track receives the
+    implanted/headstage role label instead of the static profile default.
+    """
+
+    role_by_track = _profile_track_role_labels(implanted_track=implanted_track)
     tracks = sorted(TRACK_COLORS_BGR)
     return tuple(
         TrackLegendEntry(
@@ -171,18 +179,27 @@ def track_legend_entries() -> tuple[TrackLegendEntry, ...]:
     )
 
 
-def _profile_track_role_labels() -> dict[int, str]:
+def _profile_track_role_labels(
+    *,
+    implanted_track: int | None = None,
+) -> dict[int, str]:
     """Map track indices to documented profile roles only (no inference)."""
 
+    labels: dict[int, str] = {}
+    if implanted_track is not None:
+        if isinstance(implanted_track, bool) or not isinstance(implanted_track, int):
+            return labels
+        if implanted_track in TRACK_COLORS_BGR:
+            labels[int(implanted_track)] = "implanted/headstage"
+        return labels
     try:
         config = load_current_profile_config()
     except TrackingCorrectionError:
         return {}
-    labels: dict[int, str] = {}
     implanted = config.get("implanted_track")
     if isinstance(implanted, bool) or not isinstance(implanted, int):
         return labels
-    # Current MVP profile: track 0 owns the implanted/headstage animal.
+    # Current MVP profile default: track 0 owns the implanted/headstage animal.
     labels[int(implanted)] = "implanted/headstage"
     return labels
 
@@ -316,6 +333,20 @@ class TrackingReviewSession:
         )
         return table.get(index, ())
 
+    def headstage_track_for_frame(
+        self,
+        frame_idx: int | None = None,
+        *,
+        source: PoseDisplaySource | None = None,
+    ) -> int | None:
+        """Return the track that owns ``headstage`` on a frame, if unique."""
+
+        points = self.pose_points_for_frame(frame_idx, source=source)
+        owners = sorted({point.track for point in points if point.node == "headstage"})
+        if len(owners) == 1:
+            return int(owners[0])
+        return None
+
     def current_correction_types(self) -> tuple[str, ...]:
         return self.corrections_by_frame.get(self.current_frame, ())
 
@@ -410,17 +441,36 @@ class TrackingReviewSession:
 
         return self._commit_manual_edit(mutate)
 
-    def swap_node(self, node: str, frame_idx: int | None = None) -> ManualEditResult:
-        """Swap one node between tracks at the current (or given) frame."""
+    def swap_node(
+        self,
+        node: str,
+        start_frame: int | None = None,
+        end_frame: int | None = None,
+        frame_idx: int | None = None,
+    ) -> ManualEditResult:
+        """Swap one node between tracks over an inclusive frame interval.
 
-        index = self.current_frame if frame_idx is None else int(frame_idx)
+        When no interval is provided, the current frame is used. ``frame_idx``
+        remains a single-frame alias for callers that pass one index.
+        """
+
+        if frame_idx is not None:
+            start = end = int(frame_idx)
+        else:
+            start = self.current_frame if start_frame is None else int(start_frame)
+            end = start if end_frame is None else int(end_frame)
 
         def mutate(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
-            edited = apply_swap_node(frame, frame_idx=index, node=node)
+            edited = apply_swap_node(
+                frame,
+                start_frame=start,
+                end_frame=end,
+                node=node,
+            )
             record = build_edit_record(
                 action=MANUAL_ACTION_SWAP_NODE,
-                start_frame=index,
-                end_frame=index,
+                start_frame=start,
+                end_frame=end,
                 tracks=(0, 1),
                 node=str(node).strip(),
             )

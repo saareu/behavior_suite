@@ -241,8 +241,19 @@ class TrackingReviewController:
     def swap_identities(self, start_frame: int, end_frame: int) -> ManualEditResult:
         return self.require_session().swap_identities(start_frame, end_frame)
 
-    def swap_node(self, node: str, frame_idx: int | None = None) -> ManualEditResult:
-        return self.require_session().swap_node(node, frame_idx=frame_idx)
+    def swap_node(
+        self,
+        node: str,
+        start_frame: int | None = None,
+        end_frame: int | None = None,
+        frame_idx: int | None = None,
+    ) -> ManualEditResult:
+        return self.require_session().swap_node(
+            node,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            frame_idx=frame_idx,
+        )
 
     def blank_node(
         self,

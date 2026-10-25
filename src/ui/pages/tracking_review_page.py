@@ -265,8 +265,24 @@ class TrackingReviewPage(QWidget):
     def _build_legend_widget(self) -> QGroupBox:
         box = QGroupBox("Track colors")
         layout = QVBoxLayout(box)
-        for entry in track_legend_entries():
-            row = QHBoxLayout()
+        layout.setContentsMargins(8, 8, 8, 8)
+        self._legend_layout = layout
+        self._refresh_legend(implanted_track=None)
+        return box
+
+    def _refresh_legend(self, *, implanted_track: int | None) -> None:
+        layout = getattr(self, "_legend_layout", None)
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for entry in track_legend_entries(implanted_track=implanted_track):
+            row_host = QWidget()
+            row = QHBoxLayout(row_host)
+            row.setContentsMargins(0, 0, 0, 0)
             swatch = QLabel()
             pixmap = QPixmap(14, 14)
             pixmap.fill(QColor(*entry.color_rgb))
@@ -278,8 +294,7 @@ class TrackingReviewPage(QWidget):
             text = QLabel(label)
             row.addWidget(swatch)
             row.addWidget(text, 1)
-            layout.addLayout(row)
-        return box
+            layout.addWidget(row_host)
 
     def open_project(self, session_root: Path) -> None:
         """Open a project/session directory and load a completed S3 run when possible."""
@@ -525,9 +540,14 @@ class TrackingReviewPage(QWidget):
             self.skeleton_label.setText(
                 f"Skeleton: {edge_count} edge(s) from {session.skeleton_source}"
             )
+            self._refresh_legend(
+                implanted_track=session.headstage_track_for_frame(view.frame_idx)
+            )
             if sync_episode_list:
                 self._populate_episode_list(session.navigable_episodes)
                 self._sync_episode_list_selection(session.current_frame)
+        else:
+            self._refresh_legend(implanted_track=None)
         if view.acceptance_state == ACCEPTANCE_SUPERSEDED:
             self.acceptance_label.setText(
                 "Acceptance: superseded — press Accept Tracking again"
@@ -759,7 +779,11 @@ class TrackingReviewPage(QWidget):
             QMessageBox.warning(self, "Swap node failed", "Select a node first.")
             return
         try:
-            result = self.controller.swap_node(node)
+            result = self.controller.swap_node(
+                node,
+                start_frame=self.interval_start_spin.value(),
+                end_frame=self.interval_end_spin.value(),
+            )
         except TrackingCorrectionError as exc:
             QMessageBox.warning(self, "Swap node failed", str(exc))
             self.status_message.emit(str(exc))
@@ -768,7 +792,13 @@ class TrackingReviewPage(QWidget):
             self.unexpected_error.emit(str(exc))
             return
         self._refresh_view()
-        message = f"Swapped node {node!r} at frame {result.start_frame}."
+        if result.start_frame == result.end_frame:
+            message = f"Swapped node {node!r} at frame {result.start_frame}."
+        else:
+            message = (
+                f"Swapped node {node!r} on frames "
+                f"{result.start_frame}–{result.end_frame}."
+            )
         if result.acceptance_invalidated:
             message += " Prior acceptance superseded."
         self.status_message.emit(message)

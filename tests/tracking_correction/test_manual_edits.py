@@ -31,6 +31,7 @@ from tracking_correction.manual_edits import (
     apply_swap_node,
     frame_domain_signature,
     read_working_pose,
+    undo_edit,
 )
 from ui.controllers.tracking_review_controller import TrackingReviewController
 
@@ -294,6 +295,73 @@ def test_node_swap_and_blank(tmp_path: Path) -> None:
     assert pd.isna(row["x"]) and pd.isna(row["y"])
     points = session.pose_points_for_frame(3)
     assert not any(p.track == 1 and p.node == "neck" for p in points)
+
+
+def test_interval_node_swap_uses_start_and_end_frame(tmp_path: Path) -> None:
+    s3_dir, _s2_run, _s1 = _completed_s3(tmp_path)
+    session = load_review_session(s3_dir)
+    before = _disk_working(session)
+    nose_before = {
+        frame_idx: (
+            _coords(before, frame_idx=frame_idx, track=0, node="nose"),
+            _coords(before, frame_idx=frame_idx, track=1, node="nose"),
+        )
+        for frame_idx in (2, 3, 4)
+    }
+
+    result = session.swap_node("nose", start_frame=2, end_frame=4)
+    assert result.action == "swap_node"
+    assert result.start_frame == 2
+    assert result.end_frame == 4
+
+    after = _disk_working(session)
+    for frame_idx, (nose_0, nose_1) in nose_before.items():
+        assert _coords(after, frame_idx=frame_idx, track=0, node="nose") == pytest.approx(
+            nose_1
+        )
+        assert _coords(after, frame_idx=frame_idx, track=1, node="nose") == pytest.approx(
+            nose_0
+        )
+    # Outside the interval is unchanged.
+    assert _coords(after, frame_idx=1, track=0, node="nose") == pytest.approx(
+        _coords(before, frame_idx=1, track=0, node="nose")
+    )
+    assert _coords(after, frame_idx=5, track=0, node="nose") == pytest.approx(
+        _coords(before, frame_idx=5, track=0, node="nose")
+    )
+    records = json.loads((s3_dir / MANUAL_CORRECTIONS_FILENAME).read_text(encoding="utf-8"))
+    assert records[-1]["action"] == "swap_node"
+    assert records[-1]["start_frame"] == 2
+    assert records[-1]["end_frame"] == 4
+
+
+def test_identity_swap_moves_headstage_track_and_overlay(tmp_path: Path) -> None:
+    s3_dir, _s2_run, _s1 = _completed_s3(tmp_path)
+    session = load_review_session(s3_dir)
+    before = _disk_working(session)
+    hs_before = _row(before, frame_idx=2, track=0, node="headstage")
+    assert len(before[(before["frame_idx"] == 2) & (before["node"] == "headstage")]) == 1
+    assert session.headstage_track_for_frame(2) == 0
+
+    session.swap_identities(2, 4)
+    after = _disk_working(session)
+    assert len(after[(after["track"] == 0) & (after["node"] == "headstage") & (after["frame_idx"] == 2)]) == 0
+    hs_after = _row(after, frame_idx=2, track=1, node="headstage")
+    assert float(hs_after["x"]) == pytest.approx(float(hs_before["x"]))
+    assert float(hs_after["y"]) == pytest.approx(float(hs_before["y"]))
+
+    points = session.pose_points_for_frame(2)
+    hs_points = [point for point in points if point.node == "headstage"]
+    assert len(hs_points) == 1
+    assert hs_points[0].track == 1
+    assert hs_points[0].x == pytest.approx(float(hs_before["x"]))
+    # Overlay color follows the new track; implanted role should follow headstage.
+    assert session.headstage_track_for_frame(2) == 1
+    from tracking_correction.review import track_legend_entries
+
+    legend = {entry.track: entry.role_label for entry in track_legend_entries(implanted_track=1)}
+    assert legend[1] == "implanted/headstage"
+    assert legend[0] is None
 
 
 def test_automatic_baseline_preserved_and_reset(tmp_path: Path) -> None:
@@ -585,6 +653,49 @@ def test_sparse_node_swap_moves_single_sided_detection() -> None:
     assert len(restored[(restored["track"] == 1) & (restored["node"] == "headstage")]) == 0
     hs0 = _row(restored, frame_idx=0, track=0, node="headstage")
     assert float(hs0["x_raw"]) == pytest.approx(3.1)
+
+
+def test_apply_swap_node_interval_and_undo() -> None:
+    rows: list[dict[str, object]] = []
+    for frame_idx in (0, 1, 2):
+        rows.extend(
+            [
+                {
+                    "frame_idx": frame_idx,
+                    "frame": frame_idx,
+                    "track": 0,
+                    "node": "nose",
+                    "x": float(frame_idx),
+                    "y": 1.0,
+                    "point_score": 0.9,
+                },
+                {
+                    "frame_idx": frame_idx,
+                    "frame": frame_idx,
+                    "track": 1,
+                    "node": "nose",
+                    "x": float(10 + frame_idx),
+                    "y": 2.0,
+                    "point_score": 0.8,
+                },
+            ]
+        )
+    df = pd.DataFrame(rows)
+    swapped = apply_swap_node(df, start_frame=0, end_frame=1, node="nose")
+    assert float(_row(swapped, frame_idx=0, track=0, node="nose")["x"]) == pytest.approx(10.0)
+    assert float(_row(swapped, frame_idx=1, track=0, node="nose")["x"]) == pytest.approx(11.0)
+    assert float(_row(swapped, frame_idx=2, track=0, node="nose")["x"]) == pytest.approx(2.0)
+    restored = undo_edit(
+        swapped,
+        {
+            "action": "swap_node",
+            "start_frame": 0,
+            "end_frame": 1,
+            "node": "nose",
+        },
+    )
+    assert float(_row(restored, frame_idx=0, track=0, node="nose")["x"]) == pytest.approx(0.0)
+    assert float(_row(restored, frame_idx=1, track=0, node="nose")["x"]) == pytest.approx(1.0)
 
 
 def test_blank_undo_restores_complete_row_including_provenance(tmp_path: Path) -> None:

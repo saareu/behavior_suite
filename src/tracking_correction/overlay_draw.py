@@ -30,7 +30,7 @@ def draw_pose_overlay(
         by_track.setdefault(point.track, {})[point.node] = point
 
     for track, nodes in by_track.items():
-        color = TRACK_COLORS_BGR.get(track, (200, 200, 200))
+        color = TRACK_COLORS_BGR.get(int(track), (200, 200, 200))
         for start_name, end_name in skeleton_edges:
             start = nodes.get(start_name)
             end = nodes.get(end_name)
