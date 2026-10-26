@@ -10,7 +10,8 @@ htmlcov/
 *.partial
 **/preprocess/.internal/
 Thumbs.db
-test_cases/**/preprocess/
+# Local laboratory sessions and generated run artifacts (never part of the suite package).
+/test_cases/
 test_runs/
 acceptance_tests/
 bsuite_runs/
