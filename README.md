@@ -42,8 +42,11 @@ completed-run settings preview, optional cache/performance work, and cable
 removal. Subsystem 06 Combined Features is MVP complete / lab-validated.
 
 
-**Subsystem 06 - Combined Pose & Video Feature Generation** is MVP complete / lab-validated. From jointly aligned eligible S4 `final_pose.parquet` and S5 `blob_features.parquet`, Group 2 exposes source selection, alignment status, background extraction to `dyadic_features_full.parquet`, QC, optional model-compatibility reporting, and run discovery. Operator laboratory GUI acceptance passed on session `E_full_session_integration` (S4 `pose_finalization__20261025T173206` + S5 `blob_features__20261021T152749` -> S6 `combined_features__20261025T173244`: 36528 samples, 73056 directional rows, structural QC OK). S6 does not train models or run inference. Documented non-MVP follow-ups remain: cooperative cancellation, GUI settings persistence, optional packaged model registry, and numerical regression vs historical Pipeline 50 caches. Subsystem 07 has not started.
-S2-S6 MVP progress does not make the suite a complete scientific-analysis
+**Subsystem 06 - Combined Pose & Video Feature Generation** is MVP complete / lab-validated. From jointly aligned eligible S4 `final_pose.parquet` and S5 `blob_features.parquet`, Group 2 exposes source selection, alignment status, background extraction to `dyadic_features_full.parquet`, QC, optional model-compatibility reporting, and run discovery. Operator laboratory GUI acceptance passed on session `E_full_session_integration` (S4 `pose_finalization__20261025T173206` + S5 `blob_features__20261021T152749` -> S6 `combined_features__20261025T173244`: 36528 samples, 73056 directional rows, structural QC OK). S6 does not train models or run inference. Documented non-MVP follow-ups remain: cooperative cancellation, GUI settings persistence, optional packaged model registry, and numerical regression vs historical Pipeline 50 caches.
+
+**Subsystem 07 - Behavioral Inference** is MVP complete / lab-validated. From an eligible S6 `dyadic_features_full.parquet`, Group 3 exposes registry configuration, unified dyadic/focal detector selection, thresholds/`legacy_parity`, background inference to canonical + wide prediction artifacts, QC, and run discovery (including `stale_models` when recorded model digests are missing or changed). Operator laboratory GUI acceptance passed on session `E_full_session_integration` (2026-10-26; final GUI run `behavioral_inference__20261026T163224`). The standard Windows installer installs S2+S7 runtime libraries into `behavior_suite_gui`. Trusted model binaries remain lab-local and are configured once in the S7 registry path (persisted across launches). Documented non-MVP follow-ups remain: S8 arbitration/bouts, cooperative cancellation, multi-animal beyond two tracks, and shipping packaged models. S8 has not started.
+
+S1–S7 MVP progress does not make the suite a complete scientific-analysis
 pipeline. Elaborate model-optimization UI and active learning remain future or
 downstream responsibilities.
 
@@ -61,10 +64,19 @@ scripts\launch_windows_gui.bat
 
 The installer recreates the dedicated `behavior_suite_gui` Conda environment
 with Python 3.12, FFmpeg 7.1.1 from conda-forge, PySide6 6.11.1 from
-conda-forge, and this repository installed in editable mode with its S2 runtime
-dependencies. It does not
-require PowerShell activation/profile setup and does not modify the user's base
-environment.
+conda-forge, and this repository installed in editable mode with the S2 and S7
+runtime extras (`sleap-io`, plus `xgboost` / `scikit-learn` / `joblib` for
+behavioral inference). Model binaries are **not** installed by the script; open
+Subsystem 7 and browse to a trusted local model-registry root (saved for later
+launches). The installer does not require PowerShell activation/profile setup
+and does not modify the user's base environment.
+
+If you must install S7 libraries manually into the GUI env, use a PowerShell-safe
+form (avoid double-quoted `.[s7]`, which expands `$7`):
+
+```powershell
+conda run -n behavior_suite_gui python -m pip install -e '.[s2,s7]'
+```
 
 S2 uses two deliberately separate runtime components. The resolved external
 `sleap-nn` 0.3.x executable performs model inference and writes `pose.slp`.
@@ -140,8 +152,10 @@ discovered as eligible or stale by rechecking the recorded accepted S3 source.
 Independently of S2–S4, Subsystem 5 (Group 2 — Feature Processing) loads an
 eligible S1 session, previews segmentation, and runs full blob-feature
 extraction. Completed S5 runs are discovered as eligible or stale by rechecking
-recorded S1 digests. S6 Combined Features is shown as coming later and remains
-disabled.
+recorded S1 digests. Subsystem 6 combines eligible S4+S5 into
+`dyadic_features_full.parquet`. Subsystem 7 (Group 3) scores configured
+dyadic/focal detectors from an eligible S6 run and publishes prediction
+artifacts for future Subsystem 8.
 
 ---
 
@@ -172,6 +186,10 @@ Current active documentation:
   scope, completion status, and post-MVP roadmap
 - `docs/subsystem_05/mvp_scope_and_roadmap.md` — finalized Subsystem 05 MVP
   scope, laboratory acceptance evidence, and S6 handoff boundary
+- `docs/subsystem_06/mvp_scope_and_roadmap.md` — finalized Subsystem 06 MVP
+  scope, laboratory acceptance evidence, and non-MVP follow-ups
+- `docs/subsystem_07/mvp_scope_and_roadmap.md` — finalized Subsystem 07 MVP
+  scope, laboratory acceptance evidence, and S8 boundary
 - `docs/general/development/ai_coding_guide.md` — repository-wide AI-assisted
   development guidance
 
@@ -211,8 +229,9 @@ automated QC.
 Subsystem 05 is the video / blob feature-extraction subsystem. Its MVP
 consumes eligible S1 prepared video and background, extracts morphology and
 temporal occlusion features onto the shared 120 Hz timeline, and writes
-`blob_features.parquet` with automated QC. Combined pose+blob features (S6) are implemented and lab-validated;
-behavior classification remains downstream of S6.
+`blob_features.parquet` with automated QC. Combined pose+blob features (S6) and
+behavioral inference (S7) are implemented and lab-validated; cross-model
+arbitration and bout packaging remain Subsystem 08.
 
 ---
 
@@ -238,5 +257,7 @@ Before making repository changes, read the applicable documentation:
 
 Keep changes scoped, preserve scientific invariants, and update tests for any
 implementation behavior change.
-- `docs/subsystem_06/mvp_scope_and_roadmap.md` - finalized Subsystem 06 MVP
-  scope, laboratory acceptance evidence, and non-MVP follow-ups
+- `docs/subsystem_06/mvp_scope_and_roadmap.md` — required when changing or
+  implementing Subsystem 06
+- `docs/subsystem_07/mvp_scope_and_roadmap.md` — required when changing or
+  implementing Subsystem 07

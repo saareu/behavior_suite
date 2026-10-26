@@ -10,6 +10,8 @@
 | 04 — Pose Finalization | MVP complete / validated | Hands `final_pose.parquet` to later analysis |
 | 05 — Video / Blob Feature Extraction | MVP complete / lab-validated | Consumes eligible S1; feeds S6 Combined Features |
 | 06 - Combined Features | MVP complete / lab-validated | Eligible S4 + S5 -> `dyadic_features_full.parquet` + model-compat report |
+| 07 — Behavioral Inference | MVP complete / lab-validated | Consumes eligible S6; publishes predictions for S8 |
+| 08 — Behavioral Arbitration | S8-A architecture audit (docs only) | Consumes eligible S7 (+ linked S6 features); publishes ethogram / bouts |
 
 ## Subsystem 01 — Video Preprocessing
 
@@ -57,7 +59,7 @@
 S6 MVP is complete and lab-validated. Sprints 1-4 delivered headless joint
 S4/S5 processing plus Group 2 GUI. Operator laboratory GUI acceptance passed
 on `E_full_session_integration` (2026-10-25). S6 does not train models or run
-inference. Subsystem 07 has not started.
+inference. Subsystem 07 Behavioral Inference is MVP complete / lab-validated.
 
 - [Final MVP Scope, Completion Status, and Roadmap](subsystem_06/mvp_scope_and_roadmap.md)
 - [Architecture Audit (S6-A)](subsystem_06/architecture_audit.md)
@@ -72,6 +74,42 @@ S6 consumes currently eligible S4 + S5 runs, aligns on the shared 120 Hz
 timeline, adapts `final_pose.parquet` into the legacy Pipeline 50 /
 `frame_features` input contract, and emits a complete directional feature
 artifact plus a separate model-compat report (no inference).
+
+## Subsystem 07 — Behavioral Inference (MVP Complete / Lab-Validated)
+
+S7 MVP is complete and lab-validated. Sprints 1–4 delivered registry, unified
+dyadic/focal inference, immutable artifacts/QC/discovery, and Group 3 GUI.
+Operator laboratory GUI acceptance passed on `E_full_session_integration`
+(2026-10-26) after install/registry/responsiveness remediation and obsolete
+focal-directory cleanup. Model binaries stay lab-local (not committed). S8
+arbitration remains out of S7 scope; S8-A architecture audit is documentation-only.
+
+- [Final MVP Scope, Completion Status, and Roadmap](subsystem_07/mvp_scope_and_roadmap.md)
+- [Architecture Audit (S7-A)](subsystem_07/architecture_audit.md)
+- [Implementation Contract (S7-B)](subsystem_07/implementation_contract.md)
+- [Sprint 1 — Model Registry and Runtime Foundation](subsystem_07/sprint_1_model_runtime.md)
+- [Sprint 2 — Unified Dyadic and Focal Inference](subsystem_07/sprint_2_inference_engine.md)
+- [Sprint 3 — Prediction Artifacts, QC, and Run Discovery](subsystem_07/sprint_3_artifacts_qc_discovery.md)
+- [Sprint 4 — GUI Integration and Laboratory Acceptance](subsystem_07/sprint_4_gui_integration.md)
+- [Laboratory Acceptance Checklist](subsystem_07/laboratory_acceptance_checklist.md)
+
+S7 consumes eligible S6 `dyadic_features_full.parquet` tables, scores configured
+dyadic/focal detector bundles, and publishes canonical + wide prediction
+artifacts for downstream S8. Cross-model arbitration and temporal bout
+post-processing remain Subsystem 08 (legacy Pipeline 100).
+
+## Subsystem 08 — Behavioral Arbitration and Bout Generation (S8-A)
+
+S8-A inventories legacy Pipeline 100 arbitration / bout post-processing and maps
+S7 prediction handoff contracts. Documentation only — no production S8 code.
+Manual bout correction remains downstream of S8 (legacy Pipeline 110 / review).
+
+- [Architecture Audit (S8-A)](subsystem_08/architecture_audit.md)
+
+S8 will consume eligible S7 prediction runs (plus linked S6 feature columns for
+gates / vetoes / optical assist), apply hierarchical conflict resolution and
+temporal bout rules, and publish immutable framewise ethogram + bout artifacts
+without modifying S7 outputs.
 
 ## General
 

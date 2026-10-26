@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ui.controllers.behavioral_inference_controller import BehavioralInferenceController
 from ui.controllers.blob_features_controller import BlobFeaturesController
 from ui.controllers.combined_features_controller import CombinedFeaturesController
 from ui.controllers.pose_finalization_controller import PoseFinalizationController
@@ -28,6 +29,7 @@ from ui.controllers.pose_inference_controller import (
 )
 from ui.controllers.preprocess_setup_controller import PreprocessSetupController
 from ui.controllers.tracking_review_controller import TrackingReviewController
+from ui.pages.behavioral_inference_page import BehavioralInferencePage
 from ui.pages.blob_features_page import BlobFeaturesPage
 from ui.pages.combined_features_page import CombinedFeaturesPage
 from ui.pages.pose_finalization_page import PoseFinalizationPage
@@ -37,16 +39,18 @@ from ui.preprocess_wizard import PreprocessWizard
 
 GROUP_DATA_PREPARATION = "data_preparation"
 GROUP_FEATURE_PROCESSING = "feature_processing"
+GROUP_BEHAVIORAL_INFERENCE = "behavioral_inference"
 
 
 class MainWindow(QMainWindow):
     """Application shell preserving one session across subsystem screens.
 
-    Two application groups reuse the existing ``QStackedWidget`` and page
+    Application groups reuse the existing ``QStackedWidget`` and page
     instances:
 
     * Group 1 — Data Preparation: S1–S4
     * Group 2 — Feature Processing: S5–S6
+    * Group 3 — Behavioral Inference: S7
     """
 
     def __init__(
@@ -57,6 +61,7 @@ class MainWindow(QMainWindow):
         finalization_controller: PoseFinalizationController | None = None,
         blob_features_controller: BlobFeaturesController | None = None,
         combined_features_controller: CombinedFeaturesController | None = None,
+        behavioral_inference_controller: BehavioralInferenceController | None = None,
     ) -> None:
         super().__init__()
         self.controller = controller
@@ -73,6 +78,12 @@ class MainWindow(QMainWindow):
         self.combined_features_controller = (
             combined_features_controller or CombinedFeaturesController()
         )
+        self.behavioral_inference_controller = (
+            behavioral_inference_controller
+            or BehavioralInferenceController(
+                settings=QSettings("BehaviorSuite", "BehaviorSuite")
+            )
+        )
         self.setWindowTitle("behavior_suite")
         self.resize(1260, 900)
         self._session_root: Path | None = controller.state.project_dir
@@ -81,8 +92,10 @@ class MainWindow(QMainWindow):
         self._close_after_s4_task = False
         self._close_after_s5_task = False
         self._close_after_s6_task = False
+        self._close_after_s7_task = False
         self._active_group = GROUP_DATA_PREPARATION
         self._last_feature_page: str = "s5"
+        self._last_behavior_page: str = "s7"
 
         self.wizard = PreprocessWizard(controller)
         self.pose_page = PoseInferencePage(self.pose_controller)
@@ -91,6 +104,9 @@ class MainWindow(QMainWindow):
         self.blob_features_page = BlobFeaturesPage(self.blob_features_controller)
         self.combined_features_page = CombinedFeaturesPage(
             self.combined_features_controller
+        )
+        self.behavioral_inference_page = BehavioralInferencePage(
+            self.behavioral_inference_controller
         )
         self.s3_shell = self._build_s3_shell()
         self.s4_shell = self._build_s4_shell()
@@ -101,21 +117,28 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.s4_shell)
         self.pages.addWidget(self.blob_features_page)
         self.pages.addWidget(self.combined_features_page)
+        self.pages.addWidget(self.behavioral_inference_page)
 
         self.group_data_button = QPushButton("Group 1 — Data Preparation")
         self.group_feature_button = QPushButton("Group 2 — Feature Processing")
+        self.group_behavior_button = QPushButton("Group 3 — Behavioral Inference")
         self.group_data_button.setCheckable(True)
         self.group_feature_button.setCheckable(True)
+        self.group_behavior_button.setCheckable(True)
         self.group_data_button.setChecked(True)
         self._group_buttons = QButtonGroup(self)
         self._group_buttons.setExclusive(True)
         self._group_buttons.addButton(self.group_data_button)
         self._group_buttons.addButton(self.group_feature_button)
+        self._group_buttons.addButton(self.group_behavior_button)
         self.group_data_button.clicked.connect(
             lambda: self.set_application_group(GROUP_DATA_PREPARATION)
         )
         self.group_feature_button.clicked.connect(
             lambda: self.set_application_group(GROUP_FEATURE_PROCESSING)
+        )
+        self.group_behavior_button.clicked.connect(
+            lambda: self.set_application_group(GROUP_BEHAVIORAL_INFERENCE)
         )
 
         self.s1_button = QPushButton("Subsystem 1 — Preprocess")
@@ -128,16 +151,23 @@ class MainWindow(QMainWindow):
             "Combine currently eligible S4 final pose with eligible S5 blob "
             "features. Does not run model inference."
         )
+        self.s7_button = QPushButton("Subsystem 7 — Behavioral Inference")
+        self.s7_button.setToolTip(
+            "Score eligible S6 features with dyadic and focal detectors. "
+            "Does not run S8 arbitration or bout generation."
+        )
         self.s1_button.clicked.connect(self.show_subsystem_1)
         self.s2_button.clicked.connect(self.open_pose_inference)
         self.s3_button.clicked.connect(self.open_tracking_review)
         self.s4_button.clicked.connect(self.open_pose_finalization)
         self.s5_button.clicked.connect(self.open_blob_features)
         self.s6_button.clicked.connect(self.open_combined_features)
+        self.s7_button.clicked.connect(self.open_behavioral_inference)
 
         group_row = QHBoxLayout()
         group_row.addWidget(self.group_data_button)
         group_row.addWidget(self.group_feature_button)
+        group_row.addWidget(self.group_behavior_button)
         group_row.addStretch(1)
 
         navigation = QHBoxLayout()
@@ -147,6 +177,7 @@ class MainWindow(QMainWindow):
         navigation.addWidget(self.s4_button)
         navigation.addWidget(self.s5_button)
         navigation.addWidget(self.s6_button)
+        navigation.addWidget(self.s7_button)
         navigation.addStretch(1)
 
         central = QWidget()
@@ -186,9 +217,19 @@ class MainWindow(QMainWindow):
             self._s6_task_running_changed
         )
         self.combined_features_page.task_finished.connect(self._s6_task_finished)
+        self.behavioral_inference_page.unexpected_error.connect(
+            self._show_unexpected_error
+        )
+        self.behavioral_inference_page.status_message.connect(
+            self.statusBar().showMessage
+        )
+        self.behavioral_inference_page.task_running_changed.connect(
+            self._s7_task_running_changed
+        )
+        self.behavioral_inference_page.task_finished.connect(self._s7_task_finished)
         self._apply_group_visibility()
         self.statusBar().showMessage(
-            "Select a project in S1 or open an existing session in S2/S5/S6."
+            "Select a project in S1 or open an existing session in S2/S5/S6/S7."
         )
 
     def _build_s3_shell(self) -> QWidget:
@@ -262,7 +303,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Startup configuration requires attention.")
 
     def set_application_group(self, group: str) -> None:
-        """Switch between Data Preparation and Feature Processing groups."""
+        """Switch between Data Preparation, Feature Processing, and Behavioral Inference."""
 
         if self._hard_navigation_blocked():
             # Restore checked state to the active group (S2/S4 hard lock).
@@ -272,8 +313,15 @@ class MainWindow(QMainWindow):
             self.group_feature_button.setChecked(
                 self._active_group == GROUP_FEATURE_PROCESSING
             )
+            self.group_behavior_button.setChecked(
+                self._active_group == GROUP_BEHAVIORAL_INFERENCE
+            )
             return
-        if group not in (GROUP_DATA_PREPARATION, GROUP_FEATURE_PROCESSING):
+        if group not in (
+            GROUP_DATA_PREPARATION,
+            GROUP_FEATURE_PROCESSING,
+            GROUP_BEHAVIORAL_INFERENCE,
+        ):
             return
         if group == self._active_group:
             self._apply_group_visibility()
@@ -281,6 +329,7 @@ class MainWindow(QMainWindow):
         self._active_group = group
         self.group_data_button.setChecked(group == GROUP_DATA_PREPARATION)
         self.group_feature_button.setChecked(group == GROUP_FEATURE_PROCESSING)
+        self.group_behavior_button.setChecked(group == GROUP_BEHAVIORAL_INFERENCE)
         self._apply_group_visibility()
         if group == GROUP_DATA_PREPARATION:
             # Stay on current data-prep page if already there; otherwise S1.
@@ -299,18 +348,40 @@ class MainWindow(QMainWindow):
                 background.append("S5")
             if self.combined_features_page.has_running_task:
                 background.append("S6")
+            if self.behavioral_inference_page.has_running_task:
+                background.append("S7")
+            if background:
+                message = (
+                    f"{message} — {'/'.join(background)} task continues in the "
+                    "background; return to the relevant group for progress."
+                )
+            self.statusBar().showMessage(message)
+        elif group == GROUP_FEATURE_PROCESSING:
+            if self._last_feature_page == "s6":
+                self.open_combined_features()
+            else:
+                self.open_blob_features()
+            message = "Feature Processing (S5–S6)"
+            if self.behavioral_inference_page.has_running_task:
+                message = (
+                    f"{message} — S7 task continues in the background; "
+                    "return to Behavioral Inference for progress."
+                )
+            self.statusBar().showMessage(message)
+        else:
+            self.open_behavioral_inference()
+            message = "Behavioral Inference (S7)"
+            background = []
+            if self.blob_features_page.has_running_task:
+                background.append("S5")
+            if self.combined_features_page.has_running_task:
+                background.append("S6")
             if background:
                 message = (
                     f"{message} — {'/'.join(background)} task continues in the "
                     "background; return to Feature Processing for progress."
                 )
             self.statusBar().showMessage(message)
-        else:
-            if self._last_feature_page == "s6":
-                self.open_combined_features()
-            else:
-                self.open_blob_features()
-            self.statusBar().showMessage("Feature Processing (S5–S6)")
 
     def show_subsystem_1(self) -> None:
         """Return to S1 without discarding session or S2 selection state."""
@@ -424,6 +495,37 @@ class MainWindow(QMainWindow):
         self._update_navigation()
         self.statusBar().showMessage("Subsystem 6 combined pose & video features")
 
+    def open_behavioral_inference(self, session_root: object = None) -> None:
+        """Show S7 behavioral-inference workspace (Behavioral Inference group)."""
+
+        if self._hard_navigation_blocked():
+            return
+        self._ensure_group(GROUP_BEHAVIORAL_INFERENCE)
+        if isinstance(session_root, Path | str) and str(session_root).strip():
+            self._remember_session(session_root)
+        if self._session_root is not None:
+            current = self.behavioral_inference_page.controller.state.session_root
+            target = self._session_root.resolve(strict=False)
+            same_session = (
+                current is not None and current.resolve(strict=False) == target
+            )
+            if same_session:
+                self.behavioral_inference_page.refresh_from_state()
+            elif self.behavioral_inference_page.controller.state.task_running:
+                self.statusBar().showMessage(
+                    "Cannot change the S7 session while behavioral inference is active."
+                )
+                self.behavioral_inference_page.refresh_from_state()
+            else:
+                # Discovery may still be running; set_session supersedes it safely.
+                self.behavioral_inference_page.set_session(self._session_root)
+        else:
+            self.behavioral_inference_page.refresh_from_state()
+        self.pages.setCurrentWidget(self.behavioral_inference_page)
+        self._last_behavior_page = "s7"
+        self._update_navigation()
+        self.statusBar().showMessage("Subsystem 7 behavioral inference")
+
     def _ensure_group(self, group: str) -> None:
         if self._active_group == group:
             self._apply_group_visibility()
@@ -431,16 +533,20 @@ class MainWindow(QMainWindow):
         self._active_group = group
         self.group_data_button.setChecked(group == GROUP_DATA_PREPARATION)
         self.group_feature_button.setChecked(group == GROUP_FEATURE_PROCESSING)
+        self.group_behavior_button.setChecked(group == GROUP_BEHAVIORAL_INFERENCE)
         self._apply_group_visibility()
 
     def _apply_group_visibility(self) -> None:
         data = self._active_group == GROUP_DATA_PREPARATION
+        feature = self._active_group == GROUP_FEATURE_PROCESSING
+        behavior = self._active_group == GROUP_BEHAVIORAL_INFERENCE
         self.s1_button.setVisible(data)
         self.s2_button.setVisible(data)
         self.s3_button.setVisible(data)
         self.s4_button.setVisible(data)
-        self.s5_button.setVisible(not data)
-        self.s6_button.setVisible(not data)
+        self.s5_button.setVisible(feature)
+        self.s6_button.setVisible(feature)
+        self.s7_button.setVisible(behavior)
 
     def _remember_session(self, session_root: object) -> None:
         if isinstance(session_root, Path | str) and str(session_root).strip():
@@ -526,9 +632,9 @@ class MainWindow(QMainWindow):
     def _hard_navigation_blocked(self) -> bool:
         """Return True when S2/S4 tasks require a full navigation lock.
 
-        S5 and S6 extraction intentionally do **not** hard-block group or
-        S1–S4 navigation. Users may leave Feature Processing and return while
-        extraction continues. Source-mutating S5/S6 actions stay page-locked.
+        S5/S6/S7 tasks intentionally do **not** hard-block group or S1–S4
+        navigation. Users may leave Feature Processing / Behavioral Inference
+        and return while work continues. Source-mutating actions stay page-locked.
         """
 
         if self.pose_page.has_running_task:
@@ -549,18 +655,20 @@ class MainWindow(QMainWindow):
         return self._hard_navigation_blocked()
 
     def _update_navigation(self) -> None:
-        # S2/S4 keep a full lock. S5/S6 tasks leave group and page navigation open.
+        # S2/S4 keep a full lock. S5/S6/S7 tasks leave group and page navigation open.
         hard_lock = (
             self.pose_page.has_running_task or self.finalization_page.has_running_task
         )
         self.group_data_button.setEnabled(not hard_lock)
         self.group_feature_button.setEnabled(not hard_lock)
+        self.group_behavior_button.setEnabled(not hard_lock)
         self.s1_button.setEnabled(not hard_lock)
         self.s2_button.setEnabled(not hard_lock)
         self.s3_button.setEnabled(not hard_lock)
         self.s4_button.setEnabled(not hard_lock)
         self.s5_button.setEnabled(not hard_lock)
         self.s6_button.setEnabled(not hard_lock)
+        self.s7_button.setEnabled(not hard_lock)
         self.s3_back_button.setEnabled(not hard_lock)
         self.open_s3_button.setEnabled(not hard_lock)
         self.s3_continue_s4_button.setEnabled(not hard_lock)
@@ -603,6 +711,15 @@ class MainWindow(QMainWindow):
             self._close_after_s6_task = False
             self.close()
 
+    def _s7_task_running_changed(self, _running: bool) -> None:
+        self._update_navigation()
+
+    def _s7_task_finished(self) -> None:
+        self._update_navigation()
+        if self._close_after_s7_task:
+            self._close_after_s7_task = False
+            self.close()
+
     def _show_unexpected_error(self, message: str) -> None:
         QMessageBox.critical(
             self,
@@ -612,7 +729,7 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """Wait for non-cancellable S2/S4/S5/S6 work or cooperatively cancel S1 work."""
+        """Wait for non-cancellable S2/S4/S5/S6/S7 work or cooperatively cancel S1 work."""
 
         if self.pose_page.has_running_task:
             event.ignore()
@@ -646,6 +763,15 @@ class MainWindow(QMainWindow):
                 "An S6 task is active and has no safe cancellation hook. "
                 "The window remains responsive and will close when the task finishes. "
                 "Partial parquet outputs are never published as completed."
+            )
+            return
+        if self.behavioral_inference_page.has_running_task:
+            event.ignore()
+            self._close_after_s7_task = True
+            self.statusBar().showMessage(
+                "An S7 task is active and has no safe cancellation hook. "
+                "The window remains responsive and will close when the task finishes. "
+                "Partial prediction artifacts are never published as completed."
             )
             return
         if self.wizard.has_running_tasks():

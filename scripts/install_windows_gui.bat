@@ -45,8 +45,10 @@ if errorlevel 1 (
     goto fail
 )
 
-set "STEP=installing behavior_suite editable package"
-call conda run -n %ENV_NAME% python -m pip install -e ".[s2]"
+set "STEP=installing behavior_suite editable package with S2 and S7 extras"
+rem S2 = sleap-io; S7 = xgboost/scikit-learn/joblib for behavioral inference.
+rem Models stay lab-local and are configured in the GUI (not installed here).
+call conda run -n %ENV_NAME% python -m pip install -e ".[s2,s7]"
 if errorlevel 1 (
     echo Failed to install the current checkout into %ENV_NAME%.
     goto fail
@@ -66,11 +68,12 @@ if errorlevel 1 (
     goto fail
 )
 
-set "STEP=validating PySide6, S2, and application dependency imports"
+set "STEP=validating PySide6, S2, S7, and application dependency imports"
 call conda run -n %ENV_NAME% python scripts\validate_windows_gui_runtime.py
 if errorlevel 1 (
-    echo PySide6, S2, or an application dependency failed validation in %ENV_NAME%.
-    echo The supported runtime uses Conda-forge PySide6 6.11.1 and sleap-io 0.8.0.
+    echo PySide6, S2, S7, or an application dependency failed validation in %ENV_NAME%.
+    echo The supported runtime uses Conda-forge PySide6 6.11.1, sleap-io 0.8.0,
+    echo and the pinned [s7] xgboost/scikit-learn/joblib extras.
     goto fail
 )
 
@@ -89,7 +92,9 @@ if errorlevel 1 (
 )
 
 echo.
-echo behavior_suite Windows GUI runtime is ready.
+echo behavior_suite Windows GUI runtime is ready (S1-S7 libraries installed).
+echo Model binaries are not installed by this script. In Subsystem 7, configure
+echo a trusted local model-registry root (for example a lab models directory).
 echo Launch with:
 echo   scripts\launch_windows_gui.bat
 exit /b 0

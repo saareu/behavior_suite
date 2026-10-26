@@ -1,0 +1,55 @@
+# Subsystem 07 default inference settings (Sprint 3).
+# Working thresholds are copied from legacy dyadic_inference.yaml and
+# 90_focal_inference.yaml. Bundle threshold_working values are never applied.
+# model_registry.root must be set explicitly (lab-local models tree).
+
+schema_version: behavioral_inference_settings_v1
+model_iteration: v1
+parity_mode: legacy_parity
+allow_default_threshold_0_5: false
+
+model_registry:
+  root: null
+  dyadic_subdir: dyadic/v1
+  focal_subdir: focal/v1
+  include_obsolete: false
+  include_focal: true
+
+active_detectors:
+  dyadic:
+    - contact
+    - nose_to_nose
+    - mutually_disengaged
+    - side_by_side
+  focal:
+    - nose_to_body
+    - nose_to_tail
+    - approach
+    - retract
+
+working_thresholds:
+  contact:
+    intact: 0.9731
+    occluded: 0.4295
+  nose_to_nose: 0.0816
+  mutually_disengaged: 0.0469
+  side_by_side: 0.0095
+  nose_to_body:
+    intact: 0.6141
+    occluded: 0.4825
+  nose_to_tail: 0.6636
+  approach: 0.3766
+  retract: 0.4892
+
+user_threshold_overrides: {}
+
+adapters:
+  dyadic_collapse: lower_id_as_focal
+  nose_to_body_rolling_median:
+    enabled: true
+    window: 5
+    min_periods: 1
+  fail_fast_on_detector_error: true
+  allow_nose_to_body_single_stage_fallback: true
+  require_exactly_two_mice: true
+  emit_wide_views: true

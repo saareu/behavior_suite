@@ -32,6 +32,8 @@ class GuiTaskKind(StrEnum):
     BLOB_FEATURES_EXTRACTION = "blob_features_extraction"
     BLOB_FEATURES_PREVIEW = "blob_features_preview"
     COMBINED_FEATURES_EXTRACTION = "combined_features_extraction"
+    BEHAVIORAL_INFERENCE = "behavioral_inference"
+    BEHAVIORAL_INFERENCE_DISCOVERY = "behavioral_inference_discovery"
 
 
 @dataclass(slots=True)

@@ -66,6 +66,17 @@ s2 = [
 "sleap-io==0.8.0",
 ]
 
+# Subsystem 07 behavioral inference runtime (model load + predict_proba).
+# Pins verified 2026-10-26 against lab joblib XGBClassifier bundles under
+# legacy/models (booster serialization format [3, 2, 0]; successful load with
+# xgboost 3.2.0 + scikit-learn 1.6.1 + joblib 1.5.3). Non-inference subsystems
+# remain usable without this extra.
+s7 = [
+"xgboost>=3.2.0,<3.3",
+"scikit-learn>=1.6.1,<1.7",
+"joblib>=1.3,<2",
+]
+
 [project.scripts]
 behavior-suite = "cli.preprocess:app"
 
@@ -86,6 +97,7 @@ include = [
 "pose_finalization*",
 "blob_features*",
 "combined_features*",
+"behavioral_inference*",
 "cli*",
 "ui*",
 ]
@@ -128,6 +140,7 @@ source = [
 "pose_finalization",
 "blob_features",
 "combined_features",
+"behavioral_inference",
 "cli",
 ]
 
@@ -182,6 +195,7 @@ known-first-party = [
 "pose_finalization",
 "blob_features",
 "combined_features",
+"behavioral_inference",
 "cli",
 "ui",
 ]
@@ -197,6 +211,7 @@ packages = [
 "cli",
 "blob_features",
 "combined_features",
+"behavioral_inference",
 ]
 check_untyped_defs = true
 disallow_any_generics = true
@@ -217,6 +232,11 @@ module = [
 "scipy.*",
 "skimage",
 "skimage.*",
+"xgboost",
+"xgboost.*",
+"sklearn",
+"sklearn.*",
+"joblib",
 ]
 ignore_missing_imports = true
 

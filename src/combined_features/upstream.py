@@ -6,7 +6,6 @@ Feature calculation, blob merge, and S6 run export are later sprints.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -70,6 +69,7 @@ from pose_finalization.run_discovery import (
 )
 from pose_finalization.runner import validate_s4_run_for_downstream
 from pose_finalization.timing import build_uniform_target_timeline, load_source_timing
+from project.file_digest import sha256_file
 
 
 @dataclass(frozen=True, slots=True)
@@ -699,11 +699,7 @@ def _optional_text(value: object) -> str | None:
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return sha256_file(path)
 
 
 __all__ = [

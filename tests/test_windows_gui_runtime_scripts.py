@@ -46,6 +46,16 @@ def test_s2_optional_dependency_pins_sleap_io() -> None:
     assert project["project"]["optional-dependencies"]["s2"] == ["sleap-io==0.8.0"]
 
 
+def test_s7_optional_dependency_pins_match_sprint1() -> None:
+    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+
+    assert project["project"]["optional-dependencies"]["s7"] == [
+        "xgboost>=3.2.0,<3.3",
+        "scikit-learn>=1.6.1,<1.7",
+        "joblib>=1.3,<2",
+    ]
+
+
 def test_windows_installer_recreates_dedicated_environment_without_pip_uninstall() -> None:
     text = Path("scripts/install_windows_gui.bat").read_text(encoding="utf-8")
     conda_lines = _active_conda_lines("scripts/install_windows_gui.bat")
@@ -58,7 +68,7 @@ def test_windows_installer_recreates_dedicated_environment_without_pip_uninstall
     assert 'call conda env create -f "%ENV_FILE%" -y' in text
     assert "conda env update" not in text
     assert "pip uninstall" not in text
-    assert 'call conda run -n %ENV_NAME% python -m pip install -e ".[s2]"' in text
+    assert 'call conda run -n %ENV_NAME% python -m pip install -e ".[s2,s7]"' in text
     assert '".[gui]"' not in text
     assert "python scripts\\validate_windows_gui_runtime.py" in text
     assert "python -m pip check" in text
@@ -71,14 +81,17 @@ def test_windows_installer_recreates_dedicated_environment_without_pip_uninstall
     assert 'cd /d "%REPO_ROOT%"' in text
     assert "if errorlevel 1" in text.lower()
     assert "broken pip metadata" in text
-    assert "Conda-forge PySide6 6.11.1 and sleap-io 0.8.0" in text
+    assert "Conda-forge PySide6 6.11.1" in text
+    assert "sleap-io 0.8.0" in text
+    assert "[s7]" in text
+    assert "Model binaries are not installed" in text
     assert "rmdir /s" not in text.lower()
     assert "del /s" not in text.lower()
     pip_install_lines = [
         line for line in text.splitlines() if "python -m pip install" in line
     ]
     assert pip_install_lines == [
-        'call conda run -n %ENV_NAME% python -m pip install -e ".[s2]"'
+        'call conda run -n %ENV_NAME% python -m pip install -e ".[s2,s7]"'
     ]
     assert all("pyside" not in line.lower() for line in pip_install_lines)
     assert "python -m pip install -U PySide6" not in text
@@ -87,9 +100,9 @@ def test_windows_installer_recreates_dedicated_environment_without_pip_uninstall
         'conda env create -f "%ENV_FILE%"'
     )
     assert text.index('conda env create -f "%ENV_FILE%"') < text.index(
-        'python -m pip install -e ".[s2]"'
+        'python -m pip install -e ".[s2,s7]"'
     )
-    assert text.index('python -m pip install -e ".[s2]"') < text.index(
+    assert text.index('python -m pip install -e ".[s2,s7]"') < text.index(
         "Python startup: ok"
     )
     assert text.index("Python startup: ok") < text.index(
@@ -118,7 +131,18 @@ def test_windows_runtime_validator_imports_full_application_surface(
         versions = {"PySide6": "6.11.1", "sleap_io": "0.8.0"}
         return SimpleNamespace(__version__=versions.get(name))
 
+    def fake_version(name: str) -> str:
+        versions = {
+            "xgboost": "3.2.0",
+            "scikit-learn": "1.6.1",
+            "joblib": "1.5.3",
+        }
+        if name not in versions:
+            raise module.PackageNotFoundError(name)
+        return versions[name]
+
     monkeypatch.setattr(module.importlib, "import_module", fake_import)
+    monkeypatch.setattr(module, "version", fake_version)
 
     assert module.main() == 0
     assert imported == [
@@ -126,13 +150,32 @@ def test_windows_runtime_validator_imports_full_application_surface(
         *module.QT_MODULES,
         *module.S2_DEPENDENCY_MODULES,
         *module.S2_ARTIFACT_MODULES,
+        *module.S7_DEPENDENCY_MODULES,
         *module.APPLICATION_MODULES,
     ]
     output = capsys.readouterr().out
     assert "PySide6 import/version: ok (6.11.1)" in output
     assert "sleap-io import/version: ok (0.8.0)" in output
+    assert "S7 runtime packages: ok" in output
+    assert "xgboost==3.2.0" in output
     assert "Application dependency imports: ok" in output
     assert "S2 artifact module imports: ok" in output
+    assert "S7 dependency imports: ok" in output
+    assert "model bundles must still be configured" in output
+
+
+def _patch_s7_versions(module, monkeypatch) -> None:
+    def fake_version(name: str) -> str:
+        versions = {
+            "xgboost": "3.2.0",
+            "scikit-learn": "1.6.1",
+            "joblib": "1.5.3",
+        }
+        if name not in versions:
+            raise module.PackageNotFoundError(name)
+        return versions[name]
+
+    monkeypatch.setattr(module, "version", fake_version)
 
 
 def test_windows_runtime_validator_fails_when_sleap_io_is_missing(
@@ -151,6 +194,7 @@ def test_windows_runtime_validator_fails_when_sleap_io_is_missing(
         return SimpleNamespace(__version__="6.11.1" if name == "PySide6" else None)
 
     monkeypatch.setattr(module.importlib, "import_module", fake_import)
+    _patch_s7_versions(module, monkeypatch)
 
     assert module.main() == 1
     output = capsys.readouterr().out
@@ -173,10 +217,39 @@ def test_windows_runtime_validator_rejects_incompatible_sleap_io_version(
         return SimpleNamespace(__version__=versions.get(name))
 
     monkeypatch.setattr(module.importlib, "import_module", fake_import)
+    _patch_s7_versions(module, monkeypatch)
 
     assert module.main() == 1
     output = capsys.readouterr().out
     assert "sleap-io version mismatch: expected 0.8.0, found 0.9.0" in output
+
+
+def test_windows_runtime_validator_fails_when_s7_runtime_missing(
+    monkeypatch,
+    capsys,
+) -> None:
+    path = Path("scripts/validate_windows_gui_runtime.py")
+    spec = importlib.util.spec_from_file_location("validate_windows_gui_runtime", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    def fake_import(name: str):
+        if name in {"xgboost", "sklearn", "joblib"}:
+            raise ModuleNotFoundError(f"No module named '{name}'")
+        versions = {"PySide6": "6.11.1", "sleap_io": "0.8.0"}
+        return SimpleNamespace(__version__=versions.get(name))
+
+    monkeypatch.setattr(module.importlib, "import_module", fake_import)
+    monkeypatch.setattr(
+        module,
+        "version",
+        lambda _name: (_ for _ in ()).throw(module.PackageNotFoundError("missing")),
+    )
+
+    assert module.main() == 1
+    output = capsys.readouterr().out
+    assert "xgboost: ModuleNotFoundError" in output
 
 
 def test_windows_launcher_checks_environment_doctor_then_gui() -> None:

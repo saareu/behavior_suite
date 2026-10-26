@@ -14,7 +14,6 @@ Partial or structurally invalid parquet outputs are never marked completed.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from collections.abc import Callable, Mapping, Sequence
@@ -58,6 +57,7 @@ from combined_features.processing import (
 from combined_features.qc import QcSummary, assert_structural_qc, evaluate_combined_features_qc
 from combined_features.upstream import JointEligiblePair, validate_joint_s4_s5_pair
 from preprocess.models import OperationProgress
+from project.file_digest import sha256_file
 
 ProgressCallback = Callable[[OperationProgress], None]
 
@@ -869,14 +869,7 @@ def _path_text(path: Path) -> str:
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while True:
-            chunk = stream.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
+    return sha256_file(path)
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
