@@ -32,10 +32,8 @@ from tracking_correction.contracts import (
 
 _TRACK_A = 0
 _TRACK_B = 1
-# Current-lab profile invariant: implanted animal is always track 0, and the
-# headstage cue must remain on that track after an identity swap. Body nodes
-# swap; headstage ownership does not flip to track 1.
-_IDENTITY_SWAP_PRESERVED_NODES = frozenset({"headstage"})
+_HEADSTAGE_NODE = "headstage"
+_IMPLANTED_TRACK = _TRACK_A
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,14 +103,16 @@ def apply_swap_identities(
 ) -> pd.DataFrame:
     """Swap track 0 ↔ track 1 ownership over an inclusive frame interval.
 
-    Body detection rows move by flipping their track label so sparse
-    ``(frame, track, node)`` sets and all associated pose/provenance columns
-    travel with the detection. Missing nodes on one side are not invented.
+    Entire detection rows move by flipping their track label — including
+    ``headstage`` — so sparse ``(frame, track, node)`` sets and associated
+    pose/provenance columns travel with the detection. Missing nodes on one
+    side are not invented.
 
-    Profile invariant: ``headstage`` (and any other preserved cue nodes) keep
-    their existing track label. For ``current_lab_two_mouse_headstage_v1`` that
-    means the implanted cue stays on track 0 and is never moved onto track 1
-    by an identity swap. Use ``swap_node`` if a headstage row itself must move.
+    Profile invariant for ``current_lab_two_mouse_headstage_v1``: after the
+    flip, ``headstage`` is reconciled onto the implanted track (0). A headstage
+    that was only on track 1 moves to track 0 with its animal; a headstage that
+    would land on track 1 after a body repair is moved back to track 0. Duplicate
+    headstages on both tracks keep track 0 and blank track 1.
     """
 
     start, end = _validate_interval(start_frame, end_frame)
@@ -120,30 +120,72 @@ def apply_swap_identities(
     frame_col = _frame_column(out)
     track_values = _track_series(out).to_numpy(dtype=int, copy=True)
     frame_values = pd.to_numeric(out[frame_col], errors="coerce").to_numpy()
-    node_values = out["node"].astype(str).to_numpy() if "node" in out.columns else None
     in_range = (
         np.isfinite(frame_values)
         & (frame_values >= start)
         & (frame_values <= end)
         & np.isin(track_values, (_TRACK_A, _TRACK_B))
     )
-    if node_values is not None:
-        preserved = np.isin(node_values, list(_IDENTITY_SWAP_PRESERVED_NODES))
-        swappable = in_range & ~preserved
-    else:
-        swappable = in_range
-    if not bool(np.any(swappable)):
+    if not bool(np.any(in_range)):
         raise TrackingCorrectionError(
-            f"No swappable track 0/1 body rows found in frames {start}–{end}."
+            f"No track 0/1 rows found in frames {start}–{end}."
         )
-    # Flip body ownership with one vectorized write. Preserved cue nodes
-    # (headstage) are excluded so identity repair cannot put the implant cue
-    # onto the partner track.
     swapped = track_values.copy()
-    swapped[swappable & (track_values == _TRACK_A)] = _TRACK_B
-    swapped[swappable & (track_values == _TRACK_B)] = _TRACK_A
+    swapped[in_range & (track_values == _TRACK_A)] = _TRACK_B
+    swapped[in_range & (track_values == _TRACK_B)] = _TRACK_A
     out["track"] = swapped
+    _enforce_headstage_on_implanted_track(out, start=start, end=end)
     return _sort_pose(out)
+
+
+def _enforce_headstage_on_implanted_track(
+    frame: pd.DataFrame,
+    *,
+    start: int,
+    end: int,
+) -> None:
+    """In-place: ensure ``headstage`` belongs to the implanted track in range."""
+
+    if "node" not in frame.columns:
+        return
+    frame_col = _frame_column(frame)
+    track_values = _track_series(frame).to_numpy(dtype=int, copy=True)
+    frame_values = pd.to_numeric(frame[frame_col], errors="coerce").to_numpy()
+    node_values = frame["node"].astype(str).to_numpy()
+    in_range = (
+        np.isfinite(frame_values)
+        & (frame_values >= start)
+        & (frame_values <= end)
+        & (node_values == _HEADSTAGE_NODE)
+        & np.isin(track_values, (_TRACK_A, _TRACK_B))
+    )
+    if not bool(np.any(in_range)):
+        return
+
+    hs0_frames = frame_values[in_range & (track_values == _IMPLANTED_TRACK)]
+    hs1_idx = np.flatnonzero(in_range & (track_values == _TRACK_B))
+    if hs1_idx.size == 0:
+        return
+
+    has_hs0 = np.isin(frame_values[hs1_idx], hs0_frames)
+    move_idx = hs1_idx[~has_hs0]
+    blank_idx = hs1_idx[has_hs0]
+
+    if move_idx.size:
+        track_values = track_values.copy()
+        track_values[move_idx] = _IMPLANTED_TRACK
+        frame["track"] = track_values
+
+    if blank_idx.size:
+        for row_idx in blank_idx.tolist():
+            for column in ("x", "y"):
+                if column in frame.columns:
+                    frame.at[frame.index[int(row_idx)], column] = np.nan
+            for score_col in ("point_score", "score"):
+                if score_col in frame.columns:
+                    frame.at[frame.index[int(row_idx)], score_col] = 0.0
+            if "was_node_blanked" in frame.columns:
+                frame.at[frame.index[int(row_idx)], "was_node_blanked"] = np.uint8(1)
 
 
 def apply_swap_node(

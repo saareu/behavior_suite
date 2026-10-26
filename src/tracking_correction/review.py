@@ -426,10 +426,7 @@ class TrackingReviewSession:
         return is_currently_accepted(self.acceptance_state)
 
     def swap_identities(self, start_frame: int, end_frame: int) -> ManualEditResult:
-        """Swap track 0 ↔ track 1 for body nodes over an inclusive interval.
-
-        ``headstage`` ownership is preserved (profile: implanted cue on track 0).
-        """
+        """Swap track 0 ↔ track 1 for all nodes, then pin ``headstage`` to track 0."""
 
         def mutate(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
             edited = apply_swap_identities(

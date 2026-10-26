@@ -336,7 +336,7 @@ def test_interval_node_swap_uses_start_and_end_frame(tmp_path: Path) -> None:
 
 
 def test_identity_swap_keeps_headstage_on_implanted_track(tmp_path: Path) -> None:
-    """Identity swap repairs body IDs but must not put headstage on track 1."""
+    """When headstage is already on track 0, identity swap must not leave it on 1."""
 
     s3_dir, _s2_run, _s1 = _completed_s3(tmp_path)
     session = load_review_session(s3_dir)
@@ -352,8 +352,15 @@ def test_identity_swap_keeps_headstage_on_implanted_track(tmp_path: Path) -> Non
     # Body nodes swapped.
     assert _coords(after, frame_idx=2, track=0, node="nose") == pytest.approx(nose1_before)
     assert _coords(after, frame_idx=2, track=1, node="nose") == pytest.approx(nose0_before)
-    # Headstage stays on implanted track 0 with the same coordinates/provenance.
-    assert len(after[(after["track"] == 1) & (after["node"] == "headstage") & (after["frame_idx"] == 2)]) == 0
+    # Headstage is reconciled back onto implanted track 0 at the same coords.
+    assert len(
+        after[
+            (after["track"] == 1)
+            & (after["node"] == "headstage")
+            & (after["frame_idx"] == 2)
+            & after["x"].notna()
+        ]
+    ) == 0
     hs_after = _row(after, frame_idx=2, track=0, node="headstage")
     assert float(hs_after["x"]) == pytest.approx(float(hs_before["x"]))
     assert float(hs_after["y"]) == pytest.approx(float(hs_before["y"]))
@@ -369,6 +376,38 @@ def test_identity_swap_keeps_headstage_on_implanted_track(tmp_path: Path) -> Non
     legend = {entry.track: entry.role_label for entry in track_legend_entries()}
     assert legend[0] == "implanted/headstage"
     assert legend[1] is None
+
+
+def test_identity_swap_moves_track1_headstage_onto_implanted_track() -> None:
+    """Full blue skeleton incl. headstage: ID swap must bring headstage to orange/0."""
+
+    df = pd.DataFrame(
+        [
+            {"frame_idx": 0, "frame": 0, "track": 0, "node": "nose", "x": 1.0, "y": 2.0, "point_score": 0.9},
+            {"frame_idx": 0, "frame": 0, "track": 1, "node": "nose", "x": 10.0, "y": 20.0, "point_score": 0.8},
+            {
+                "frame_idx": 0,
+                "frame": 0,
+                "track": 1,
+                "node": "headstage",
+                "x": 11.0,
+                "y": 21.0,
+                "point_score": 0.7,
+                "x_raw": 11.5,
+                "y_raw": 21.5,
+                "point_score_raw": 0.71,
+            },
+        ]
+    )
+    out = apply_swap_identities(df, start_frame=0, end_frame=0)
+    assert _coords(out, frame_idx=0, track=0, node="nose") == pytest.approx((10.0, 20.0))
+    assert _coords(out, frame_idx=0, track=1, node="nose") == pytest.approx((1.0, 2.0))
+    assert len(out[(out["track"] == 1) & (out["node"] == "headstage") & out["x"].notna()]) == 0
+    hs = _row(out, frame_idx=0, track=0, node="headstage")
+    assert float(hs["x"]) == pytest.approx(11.0)
+    assert float(hs["y"]) == pytest.approx(21.0)
+    assert float(hs["x_raw"]) == pytest.approx(11.5)
+    assert float(hs["point_score_raw"]) == pytest.approx(0.71)
 
 
 def test_automatic_baseline_preserved_and_reset(tmp_path: Path) -> None:
@@ -581,8 +620,8 @@ def test_sparse_identity_swap_moves_complete_detection_rows() -> None:
     domain = frame_domain_signature(df)
     out = apply_swap_identities(df, start_frame=1, end_frame=1)
     assert frame_domain_signature(out) == domain
-    # Body nodes swap; headstage stays on track 0 with provenance intact.
-    assert len(out[(out["track"] == 1) & (out["node"] == "headstage")]) == 0
+    # Bodies swap; headstage flips then reconciles back to track 0 with provenance.
+    assert len(out[(out["track"] == 1) & (out["node"] == "headstage") & out["x"].notna()]) == 0
     hs = _row(out, frame_idx=1, track=0, node="headstage")
     assert float(hs["x"]) == pytest.approx(3.0)
     assert float(hs["x_raw"]) == pytest.approx(3.5)
@@ -593,7 +632,7 @@ def test_sparse_identity_swap_moves_complete_detection_rows() -> None:
     assert int(hs["was_node_blanked"]) == 0
     assert _coords(out, frame_idx=1, track=0, node="nose") == pytest.approx((10.0, 20.0))
     assert _coords(out, frame_idx=1, track=1, node="nose") == pytest.approx((1.0, 2.0))
-    # Undo via second swap restores body ownership without touching headstage.
+    # Second swap restores bodies; headstage remains on implanted track 0.
     restored = apply_swap_identities(out, start_frame=1, end_frame=1)
     assert restored.sort_values(["frame_idx", "track", "node"]).reset_index(
         drop=True
