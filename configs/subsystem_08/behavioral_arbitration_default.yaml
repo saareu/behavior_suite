@@ -1,0 +1,123 @@
+# Subsystem 08 default arbitration settings (Sprint 1–2 foundation).
+# Scientific numeric values match legacy behavioral_arbiter.yaml and
+# hardcoded Pipeline 100 constants (§4 of implementation_contract.md).
+# Do not introduce optimized thresholds here.
+# Sprint 2 consumes hierarchy / adaptive / contact / veto parameters below.
+
+schema_version: behavioral_arbitration_settings_v1
+fps: 120.0
+require_exactly_two_mice: true
+detector_coverage_profile: full_ethogram
+
+# Hierarchy S-score thresholds (echo of S7 working thresholds; used in S8-2).
+working_thresholds:
+  contact:
+    intact: 0.9731
+    occluded: 0.4295
+  nose_to_nose: 0.0816
+  mutually_disengaged: 0.0469
+  side_by_side: 0.0095
+  nose_to_body:
+    intact: 0.6141
+    occluded: 0.4825
+  nose_to_tail: 0.6636
+  approach: 0.3766
+  retract: 0.4892
+
+scientific:
+  # --- Already YAML in legacy behavioral_arbiter.yaml ---
+  decay_rate: 0.5
+  conf_frames: 5
+  engaged_min_threshold: 0.0469
+
+  hard_gap_nose_to_nose_distance_norm: 0.3
+  hard_gap_nose_to_body_distance_norm: 0.55
+  hard_gap_nose_to_tail_distance_norm: 0.45
+  hard_gap_side_by_side_distance_norm: 0.9
+  hard_gap_contact_spine_to_spine_distance_norm: 1.2
+
+  approach_hard_gap_nose_to_nose_distance_norm: 0.15
+  approach_hard_gap_nose_to_body_distance_norm: 0.2
+  approach_hard_gap_nose_to_tail_distance_norm: 0.15
+
+  max_sniff_engaged_gap_frames: 180
+  max_dynamic_engaged_gap_frames: 120
+  max_dynamic_padding_frames: 120
+  min_kinematic_intent_stitch: 0.5
+  min_rolling_speed_stitch: 25.0
+  case4_max_kinematic_intent_stitch: 1.0
+  case4_max_rolling_speed_stitch: 200.0
+  case4_initiation_kinematic_intent_stitch: 0.5
+  case4_initiation_rolling_speed_stitch: 50.0
+  max_idle_retract_gap_frames: 120
+  far_apart_idle_distance: 3.5
+  min_mutually_disengaged_frames: 120
+  final_engaged_hysteresis_frames: 12
+
+  post_processing:
+    contact:
+      # Stage 8 only. 0 = disable morphological closing (MVP / YAML-0 parity).
+      # Stage 10 gap fill remains independent (gap_fill_seconds below).
+      smoothing_window: 3
+      prob_threshold_high:
+        intact: 0.9731
+        occluded: 0.4295
+      prob_threshold_low: 0.4
+      optical_assist_min: 0.30
+      max_gap_to_fill: 0
+      min_bout_duration: 6
+
+  # --- Promoted from hardcoded Pipeline 100 constants (values unchanged) ---
+  hierarchy:
+    layer1_significance_floor: 0.05
+    approach_contact_penalty: 0.0
+
+  temporal:
+    gap_fill_seconds: 0.050
+    min_bout_seconds: 0.100
+
+  postural:
+    approach:
+      rearing_contraction_gt: 5.0
+      behind_score_lt: -0.5
+      cos_bearing_lt: -0.2
+      smear_frames: 15
+      escape_projected_vel_gt: 1.0
+    retract:
+      stationary_speed_lt: 15.0
+      passive_effort_lt: 0.20
+      passive_partner_speed_gt: 80.0
+      flinch_contraction_gt: 3.0
+      flinch_spine_vel_gt: -5.0
+      smear_frames: 15
+      escape_spine_vel_lt: -1.0
+      escape_combined_vel_lt: -1.0
+      escape_intent_lt: -1.0
+
+  adaptive:
+    approach_engaged_distance: 3.0
+    retract_engaged_distance_scale: 1.5
+    strict_threshold: 0.5
+    envelope_threshold: 0.25
+    window_frames: 15
+
+  rescue:
+    approach_prob_hint: 0.4
+    retract_prob_hint: 0.4
+    moving_intent_abs: 0.1
+    moving_smooth_frames: 12
+
+  stitch:
+    dynamic:
+      look_ahead_frames: 15
+      hard_speed: 50
+      hard_intent_factor: 2.0
+
+execution:
+  # Non-scientific runtime / diagnostics knobs.
+  emit_stage_diagnostics: true
+  # Optional long-form arbitration_diagnostics.parquet (default off).
+  emit_arbitration_diagnostics: false
+  generate_overlay_video: false
+  # Pipeline 110 emit floors must NOT be applied inside S8.
+  apply_pipeline_110_emit_filters: false

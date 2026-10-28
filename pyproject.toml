@@ -98,6 +98,7 @@ include = [
 "blob_features*",
 "combined_features*",
 "behavioral_inference*",
+"behavioral_arbitration*",
 "cli*",
 "ui*",
 ]
@@ -141,6 +142,7 @@ source = [
 "blob_features",
 "combined_features",
 "behavioral_inference",
+"behavioral_arbitration",
 "cli",
 ]
 
@@ -196,6 +198,7 @@ known-first-party = [
 "blob_features",
 "combined_features",
 "behavioral_inference",
+"behavioral_arbitration",
 "cli",
 "ui",
 ]
@@ -212,6 +215,7 @@ packages = [
 "blob_features",
 "combined_features",
 "behavioral_inference",
+"behavioral_arbitration",
 ]
 check_untyped_defs = true
 disallow_any_generics = true

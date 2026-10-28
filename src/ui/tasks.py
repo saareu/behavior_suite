@@ -34,6 +34,8 @@ class GuiTaskKind(StrEnum):
     COMBINED_FEATURES_EXTRACTION = "combined_features_extraction"
     BEHAVIORAL_INFERENCE = "behavioral_inference"
     BEHAVIORAL_INFERENCE_DISCOVERY = "behavioral_inference_discovery"
+    BEHAVIORAL_ARBITRATION = "behavioral_arbitration"
+    BEHAVIORAL_ARBITRATION_DISCOVERY = "behavioral_arbitration_discovery"
 
 
 @dataclass(slots=True)

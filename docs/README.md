@@ -11,7 +11,7 @@
 | 05 — Video / Blob Feature Extraction | MVP complete / lab-validated | Consumes eligible S1; feeds S6 Combined Features |
 | 06 - Combined Features | MVP complete / lab-validated | Eligible S4 + S5 -> `dyadic_features_full.parquet` + model-compat report |
 | 07 — Behavioral Inference | MVP complete / lab-validated | Consumes eligible S6; publishes predictions for S8 |
-| 08 — Behavioral Arbitration | S8-A architecture audit (docs only) | Consumes eligible S7 (+ linked S6 features); publishes ethogram / bouts |
+| 08 — Behavioral Arbitration | MVP complete / lab-validated | Consumes eligible S7 (+ linked S6 features); Group 3 beside S7; Group 4 deferred |
 
 ## Subsystem 01 — Video Preprocessing
 
@@ -82,7 +82,7 @@ dyadic/focal inference, immutable artifacts/QC/discovery, and Group 3 GUI.
 Operator laboratory GUI acceptance passed on `E_full_session_integration`
 (2026-10-26) after install/registry/responsiveness remediation and obsolete
 focal-directory cleanup. Model binaries stay lab-local (not committed). S8
-arbitration remains out of S7 scope; S8-A architecture audit is documentation-only.
+arbitration remains out of S7 scope; S8 is MVP complete / lab-validated in Group 3.
 
 - [Final MVP Scope, Completion Status, and Roadmap](subsystem_07/mvp_scope_and_roadmap.md)
 - [Architecture Audit (S7-A)](subsystem_07/architecture_audit.md)
@@ -98,18 +98,30 @@ dyadic/focal detector bundles, and publishes canonical + wide prediction
 artifacts for downstream S8. Cross-model arbitration and temporal bout
 post-processing remain Subsystem 08 (legacy Pipeline 100).
 
-## Subsystem 08 — Behavioral Arbitration and Bout Generation (S8-A)
+## Subsystem 08 — Behavioral Arbitration and Bout Generation (MVP Complete / Lab-Validated)
 
-S8-A inventories legacy Pipeline 100 arbitration / bout post-processing and maps
-S7 prediction handoff contracts. Documentation only — no production S8 code.
-Manual bout correction remains downstream of S8 (legacy Pipeline 110 / review).
+S8 MVP is complete and lab-validated. Sprints 1–4 delivered headless Pipeline 100
+arbitration (intake through temporal/bouts/publish), Group 3 GUI beside S7,
+responsiveness remediation, scientific E-session audit (**47/47**), and operator
+laboratory GUI acceptance on `E_full_session_integration` (2026-10-28; S8 run
+`behavioral_arbitration__20261028T133953`). Documented deviations from legacy
+Pipeline 100 (invalid-evidence handling, `undefined`, no contact remultiplex)
+are preserved. Manual bout correction stays downstream (legacy Pipeline 110 /
+review). Group 4 Results/Review has **not** started.
 
+- [Final MVP Scope, Completion Status, and Roadmap](subsystem_08/mvp_scope_and_roadmap.md)
 - [Architecture Audit (S8-A)](subsystem_08/architecture_audit.md)
+- [Implementation Contract (S8-B)](subsystem_08/implementation_contract.md)
+- [Sprint 1 — Source Intake, Directional Expansion and Initial Gates](subsystem_08/sprint_1_intake_gates.md)
+- [Sprint 2 — Hierarchy, Adaptive Movement and Contact Arbitration](subsystem_08/sprint_2_arbitration_contact.md)
+- [Sprint 3 — Temporal Rules, Bouts and Publication](subsystem_08/sprint_3_temporal_bouts_publication.md)
+- [Sprint 4 — GUI Integration and Laboratory Acceptance](subsystem_08/sprint_4_gui_integration.md)
+- [Laboratory Acceptance Checklist](subsystem_08/laboratory_acceptance_checklist.md)
+- [Scientific Output Audit (E-session)](subsystem_08/scientific_output_audit_e_session.md)
 
-S8 will consume eligible S7 prediction runs (plus linked S6 feature columns for
-gates / vetoes / optical assist), apply hierarchical conflict resolution and
-temporal bout rules, and publish immutable framewise ethogram + bout artifacts
-without modifying S7 outputs.
+S8 consumes eligible S7 prediction runs (plus the linked S6 feature columns for
+gates / vetoes / optical assist / stitch rescue) and publishes immutable ethogram
+states + bouts without modifying S7 outputs.
 
 ## General
 

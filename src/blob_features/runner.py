@@ -16,7 +16,6 @@ parquet outputs are never marked completed.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from collections.abc import Callable, Mapping, Sequence
@@ -61,6 +60,7 @@ from blob_features.timing import (
     build_nearest_neighbor_timing_map_from_prepared_sync,
 )
 from preprocess.models import OperationProgress
+from project.file_digest import sha256_file
 
 ProgressCallback = Callable[[OperationProgress], None]
 
@@ -833,14 +833,9 @@ def _path_text(path: Path) -> str:
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while True:
-            chunk = stream.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
+    """Content digest with process-local (path, size, mtime) caching."""
+
+    return sha256_file(path)
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:

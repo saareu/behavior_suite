@@ -19,6 +19,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ui.controllers.behavioral_arbitration_controller import (
+    BehavioralArbitrationController,
+)
 from ui.controllers.behavioral_inference_controller import BehavioralInferenceController
 from ui.controllers.blob_features_controller import BlobFeaturesController
 from ui.controllers.combined_features_controller import CombinedFeaturesController
@@ -29,6 +32,7 @@ from ui.controllers.pose_inference_controller import (
 )
 from ui.controllers.preprocess_setup_controller import PreprocessSetupController
 from ui.controllers.tracking_review_controller import TrackingReviewController
+from ui.pages.behavioral_arbitration_page import BehavioralArbitrationPage
 from ui.pages.behavioral_inference_page import BehavioralInferencePage
 from ui.pages.blob_features_page import BlobFeaturesPage
 from ui.pages.combined_features_page import CombinedFeaturesPage
@@ -50,7 +54,7 @@ class MainWindow(QMainWindow):
 
     * Group 1 — Data Preparation: S1–S4
     * Group 2 — Feature Processing: S5–S6
-    * Group 3 — Behavioral Inference: S7
+    * Group 3 — Behavioral Inference: S7–S8
     """
 
     def __init__(
@@ -62,6 +66,7 @@ class MainWindow(QMainWindow):
         blob_features_controller: BlobFeaturesController | None = None,
         combined_features_controller: CombinedFeaturesController | None = None,
         behavioral_inference_controller: BehavioralInferenceController | None = None,
+        behavioral_arbitration_controller: BehavioralArbitrationController | None = None,
     ) -> None:
         super().__init__()
         self.controller = controller
@@ -84,6 +89,9 @@ class MainWindow(QMainWindow):
                 settings=QSettings("BehaviorSuite", "BehaviorSuite")
             )
         )
+        self.behavioral_arbitration_controller = (
+            behavioral_arbitration_controller or BehavioralArbitrationController()
+        )
         self.setWindowTitle("behavior_suite")
         self.resize(1260, 900)
         self._session_root: Path | None = controller.state.project_dir
@@ -93,6 +101,7 @@ class MainWindow(QMainWindow):
         self._close_after_s5_task = False
         self._close_after_s6_task = False
         self._close_after_s7_task = False
+        self._close_after_s8_task = False
         self._active_group = GROUP_DATA_PREPARATION
         self._last_feature_page: str = "s5"
         self._last_behavior_page: str = "s7"
@@ -108,6 +117,9 @@ class MainWindow(QMainWindow):
         self.behavioral_inference_page = BehavioralInferencePage(
             self.behavioral_inference_controller
         )
+        self.behavioral_arbitration_page = BehavioralArbitrationPage(
+            self.behavioral_arbitration_controller
+        )
         self.s3_shell = self._build_s3_shell()
         self.s4_shell = self._build_s4_shell()
         self.pages = QStackedWidget()
@@ -118,6 +130,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.blob_features_page)
         self.pages.addWidget(self.combined_features_page)
         self.pages.addWidget(self.behavioral_inference_page)
+        self.pages.addWidget(self.behavioral_arbitration_page)
 
         self.group_data_button = QPushButton("Group 1 — Data Preparation")
         self.group_feature_button = QPushButton("Group 2 — Feature Processing")
@@ -156,6 +169,11 @@ class MainWindow(QMainWindow):
             "Score eligible S6 features with dyadic and focal detectors. "
             "Does not run S8 arbitration or bout generation."
         )
+        self.s8_button = QPushButton("Subsystem 8 — Behavioral Arbitration")
+        self.s8_button.setToolTip(
+            "Arbitrate eligible S7 predictions with linked S6 features into "
+            "exclusive ethogram labels and bouts. Does not train models or edit bouts."
+        )
         self.s1_button.clicked.connect(self.show_subsystem_1)
         self.s2_button.clicked.connect(self.open_pose_inference)
         self.s3_button.clicked.connect(self.open_tracking_review)
@@ -163,6 +181,7 @@ class MainWindow(QMainWindow):
         self.s5_button.clicked.connect(self.open_blob_features)
         self.s6_button.clicked.connect(self.open_combined_features)
         self.s7_button.clicked.connect(self.open_behavioral_inference)
+        self.s8_button.clicked.connect(self.open_behavioral_arbitration)
 
         group_row = QHBoxLayout()
         group_row.addWidget(self.group_data_button)
@@ -178,6 +197,7 @@ class MainWindow(QMainWindow):
         navigation.addWidget(self.s5_button)
         navigation.addWidget(self.s6_button)
         navigation.addWidget(self.s7_button)
+        navigation.addWidget(self.s8_button)
         navigation.addStretch(1)
 
         central = QWidget()
@@ -227,9 +247,19 @@ class MainWindow(QMainWindow):
             self._s7_task_running_changed
         )
         self.behavioral_inference_page.task_finished.connect(self._s7_task_finished)
+        self.behavioral_arbitration_page.unexpected_error.connect(
+            self._show_unexpected_error
+        )
+        self.behavioral_arbitration_page.status_message.connect(
+            self.statusBar().showMessage
+        )
+        self.behavioral_arbitration_page.task_running_changed.connect(
+            self._s8_task_running_changed
+        )
+        self.behavioral_arbitration_page.task_finished.connect(self._s8_task_finished)
         self._apply_group_visibility()
         self.statusBar().showMessage(
-            "Select a project in S1 or open an existing session in S2/S5/S6/S7."
+            "Select a project in S1 or open an existing session in S2/S5/S6/S7/S8."
         )
 
     def _build_s3_shell(self) -> QWidget:
@@ -350,6 +380,8 @@ class MainWindow(QMainWindow):
                 background.append("S6")
             if self.behavioral_inference_page.has_running_task:
                 background.append("S7")
+            if self.behavioral_arbitration_page.has_running_task:
+                background.append("S8")
             if background:
                 message = (
                     f"{message} — {'/'.join(background)} task continues in the "
@@ -362,15 +394,24 @@ class MainWindow(QMainWindow):
             else:
                 self.open_blob_features()
             message = "Feature Processing (S5–S6)"
+            behavior_bg: list[str] = []
             if self.behavioral_inference_page.has_running_task:
+                behavior_bg.append("S7")
+            if self.behavioral_arbitration_page.has_running_task:
+                behavior_bg.append("S8")
+            if behavior_bg:
                 message = (
-                    f"{message} — S7 task continues in the background; "
-                    "return to Behavioral Inference for progress."
+                    f"{message} — {'/'.join(behavior_bg)} task continues in the "
+                    "background; return to Behavioral Inference for progress."
                 )
             self.statusBar().showMessage(message)
         else:
-            self.open_behavioral_inference()
-            message = "Behavioral Inference (S7)"
+            if self._last_behavior_page == "s8":
+                self.open_behavioral_arbitration()
+                message = "Behavioral Inference (S8)"
+            else:
+                self.open_behavioral_inference()
+                message = "Behavioral Inference (S7)"
             background = []
             if self.blob_features_page.has_running_task:
                 background.append("S5")
@@ -526,6 +567,36 @@ class MainWindow(QMainWindow):
         self._update_navigation()
         self.statusBar().showMessage("Subsystem 7 behavioral inference")
 
+    def open_behavioral_arbitration(self, session_root: object = None) -> None:
+        """Show S8 behavioral-arbitration workspace (Behavioral Inference group)."""
+
+        if self._hard_navigation_blocked():
+            return
+        self._ensure_group(GROUP_BEHAVIORAL_INFERENCE)
+        if isinstance(session_root, Path | str) and str(session_root).strip():
+            self._remember_session(session_root)
+        if self._session_root is not None:
+            current = self.behavioral_arbitration_page.controller.state.session_root
+            target = self._session_root.resolve(strict=False)
+            same_session = (
+                current is not None and current.resolve(strict=False) == target
+            )
+            if same_session:
+                self.behavioral_arbitration_page.refresh_from_state()
+            elif self.behavioral_arbitration_page.controller.state.task_running:
+                self.statusBar().showMessage(
+                    "Cannot change the S8 session while behavioral arbitration is active."
+                )
+                self.behavioral_arbitration_page.refresh_from_state()
+            else:
+                self.behavioral_arbitration_page.set_session(self._session_root)
+        else:
+            self.behavioral_arbitration_page.refresh_from_state()
+        self.pages.setCurrentWidget(self.behavioral_arbitration_page)
+        self._last_behavior_page = "s8"
+        self._update_navigation()
+        self.statusBar().showMessage("Subsystem 8 behavioral arbitration")
+
     def _ensure_group(self, group: str) -> None:
         if self._active_group == group:
             self._apply_group_visibility()
@@ -547,6 +618,7 @@ class MainWindow(QMainWindow):
         self.s5_button.setVisible(feature)
         self.s6_button.setVisible(feature)
         self.s7_button.setVisible(behavior)
+        self.s8_button.setVisible(behavior)
 
     def _remember_session(self, session_root: object) -> None:
         if isinstance(session_root, Path | str) and str(session_root).strip():
@@ -632,7 +704,7 @@ class MainWindow(QMainWindow):
     def _hard_navigation_blocked(self) -> bool:
         """Return True when S2/S4 tasks require a full navigation lock.
 
-        S5/S6/S7 tasks intentionally do **not** hard-block group or S1–S4
+        S5/S6/S7/S8 tasks intentionally do **not** hard-block group or S1–S4
         navigation. Users may leave Feature Processing / Behavioral Inference
         and return while work continues. Source-mutating actions stay page-locked.
         """
@@ -655,7 +727,7 @@ class MainWindow(QMainWindow):
         return self._hard_navigation_blocked()
 
     def _update_navigation(self) -> None:
-        # S2/S4 keep a full lock. S5/S6/S7 tasks leave group and page navigation open.
+        # S2/S4 keep a full lock. S5–S8 tasks leave group and page navigation open.
         hard_lock = (
             self.pose_page.has_running_task or self.finalization_page.has_running_task
         )
@@ -669,6 +741,7 @@ class MainWindow(QMainWindow):
         self.s5_button.setEnabled(not hard_lock)
         self.s6_button.setEnabled(not hard_lock)
         self.s7_button.setEnabled(not hard_lock)
+        self.s8_button.setEnabled(not hard_lock)
         self.s3_back_button.setEnabled(not hard_lock)
         self.open_s3_button.setEnabled(not hard_lock)
         self.s3_continue_s4_button.setEnabled(not hard_lock)
@@ -720,6 +793,15 @@ class MainWindow(QMainWindow):
             self._close_after_s7_task = False
             self.close()
 
+    def _s8_task_running_changed(self, _running: bool) -> None:
+        self._update_navigation()
+
+    def _s8_task_finished(self) -> None:
+        self._update_navigation()
+        if self._close_after_s8_task:
+            self._close_after_s8_task = False
+            self.close()
+
     def _show_unexpected_error(self, message: str) -> None:
         QMessageBox.critical(
             self,
@@ -729,7 +811,7 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """Wait for non-cancellable S2/S4/S5/S6/S7 work or cooperatively cancel S1 work."""
+        """Wait for non-cancellable S2/S4/S5/S6/S7/S8 work or cooperatively cancel S1 work."""
 
         if self.pose_page.has_running_task:
             event.ignore()
@@ -772,6 +854,15 @@ class MainWindow(QMainWindow):
                 "An S7 task is active and has no safe cancellation hook. "
                 "The window remains responsive and will close when the task finishes. "
                 "Partial prediction artifacts are never published as completed."
+            )
+            return
+        if self.behavioral_arbitration_page.has_running_task:
+            event.ignore()
+            self._close_after_s8_task = True
+            self.statusBar().showMessage(
+                "An S8 task is active and has no safe cancellation hook. "
+                "The window remains responsive and will close when the task finishes. "
+                "Partial arbitration artifacts are never published as completed."
             )
             return
         if self.wizard.has_running_tasks():

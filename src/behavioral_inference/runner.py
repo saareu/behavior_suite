@@ -79,6 +79,11 @@ from combined_features.runner import (
 )
 from preprocess.models import OperationProgress
 from project.file_digest import sha256_file
+from project.validation_memo import (
+    artifact_fingerprint,
+    memoized_validation,
+    run_dir_fingerprint,
+)
 
 ProgressCallback = Callable[[OperationProgress], None]
 
@@ -454,6 +459,54 @@ def validate_s7_run_for_downstream(s7_run_dir: Path | str) -> dict[str, Any]:
     """
 
     run_dir = Path(s7_run_dir).expanduser().resolve()
+    fingerprint: tuple[Any, ...] = run_dir_fingerprint(
+        run_dir,
+        (PREDICTIONS_FILENAME, MODEL_MANIFEST_FILENAME, DYADIC_WIDE_FILENAME, FOCAL_WIDE_FILENAME),
+    )
+    meta_path = run_dir / RUN_META_FILENAME
+    if meta_path.is_file():
+        try:
+            meta = _load_json_object(meta_path)
+            source_s6 = meta.get("source_s6")
+            if isinstance(source_s6, Mapping):
+                s6_text = _optional_text(source_s6.get("run_dir"))
+                feat = _optional_text(source_s6.get("dyadic_features"))
+                if s6_text is not None:
+                    s6_dir = Path(s6_text)
+                    fingerprint = (
+                        *fingerprint,
+                        run_dir_fingerprint(s6_dir, (DYADIC_FEATURES_FILENAME,)),
+                    )
+                    # Nested S4/S5 mutations must invalidate even when S6 parquet is unchanged.
+                    s6_meta_path = s6_dir / "run_meta.json"
+                    if s6_meta_path.is_file():
+                        s6_meta = _load_json_object(s6_meta_path)
+                        source_s4 = s6_meta.get("source_s4")
+                        source_s5 = s6_meta.get("source_s5")
+                        if isinstance(source_s4, Mapping):
+                            fingerprint = (
+                                *fingerprint,
+                                artifact_fingerprint(source_s4.get("final_pose")),
+                                artifact_fingerprint(source_s4.get("prepared_sync")),
+                            )
+                        if isinstance(source_s5, Mapping):
+                            fingerprint = (
+                                *fingerprint,
+                                artifact_fingerprint(source_s5.get("blob_features")),
+                                artifact_fingerprint(source_s5.get("prepared_sync")),
+                            )
+                if feat is not None:
+                    fingerprint = (*fingerprint, artifact_fingerprint(feat))
+        except (ProvenanceError, OSError, TypeError, ValueError):
+            fingerprint = (*fingerprint, "s6_unreadable")
+    return memoized_validation(
+        kind="validate_s7_run_for_downstream",
+        fingerprint=fingerprint,
+        compute=lambda: _validate_s7_run_for_downstream_uncached(run_dir),
+    )
+
+
+def _validate_s7_run_for_downstream_uncached(run_dir: Path) -> dict[str, Any]:
     if not run_dir.is_dir():
         raise ProvenanceError(f"S7 run directory does not exist: {run_dir}")
 

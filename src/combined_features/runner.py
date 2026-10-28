@@ -58,6 +58,11 @@ from combined_features.qc import QcSummary, assert_structural_qc, evaluate_combi
 from combined_features.upstream import JointEligiblePair, validate_joint_s4_s5_pair
 from preprocess.models import OperationProgress
 from project.file_digest import sha256_file
+from project.validation_memo import (
+    artifact_fingerprint,
+    memoized_validation,
+    run_dir_fingerprint,
+)
 
 ProgressCallback = Callable[[OperationProgress], None]
 
@@ -371,6 +376,35 @@ def validate_s6_run_for_downstream(s6_run_dir: Path | str) -> dict[str, Any]:
     """Validate a completed S6 run for downstream use (staleness-aware)."""
 
     run_dir = Path(s6_run_dir).expanduser().resolve()
+    fingerprint: tuple[Any, ...] = run_dir_fingerprint(
+        run_dir, (DYADIC_FEATURES_FILENAME,)
+    )
+    # Invalidate when linked S4/S5 artifacts change even if S6 outputs do not.
+    meta_path = run_dir / RUN_META_FILENAME
+    if meta_path.is_file():
+        try:
+            meta = _load_json_object(meta_path)
+            upstream: list[Any] = []
+            source_s4 = meta.get("source_s4")
+            source_s5 = meta.get("source_s5")
+            if isinstance(source_s4, Mapping):
+                upstream.append(artifact_fingerprint(source_s4.get("final_pose")))
+                upstream.append(artifact_fingerprint(source_s4.get("prepared_sync")))
+            if isinstance(source_s5, Mapping):
+                upstream.append(artifact_fingerprint(source_s5.get("blob_features")))
+                upstream.append(artifact_fingerprint(source_s5.get("prepared_sync")))
+            if upstream:
+                fingerprint = (*fingerprint, *upstream)
+        except (CombinedFeaturesError, OSError, TypeError, ValueError):
+            fingerprint = (*fingerprint, "upstream_unreadable")
+    return memoized_validation(
+        kind="validate_s6_run_for_downstream",
+        fingerprint=fingerprint,
+        compute=lambda: _validate_s6_run_for_downstream_uncached(run_dir),
+    )
+
+
+def _validate_s6_run_for_downstream_uncached(run_dir: Path) -> dict[str, Any]:
     if not run_dir.is_dir():
         raise CombinedFeaturesError(f"S6 run directory does not exist: {run_dir}")
 
