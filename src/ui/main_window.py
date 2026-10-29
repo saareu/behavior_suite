@@ -23,6 +23,7 @@ from ui.controllers.behavioral_arbitration_controller import (
     BehavioralArbitrationController,
 )
 from ui.controllers.behavioral_inference_controller import BehavioralInferenceController
+from ui.controllers.behavioral_review_controller import BehavioralReviewController
 from ui.controllers.blob_features_controller import BlobFeaturesController
 from ui.controllers.combined_features_controller import CombinedFeaturesController
 from ui.controllers.pose_finalization_controller import PoseFinalizationController
@@ -35,6 +36,7 @@ from ui.controllers.results_packaging_controller import ResultsPackagingControll
 from ui.controllers.tracking_review_controller import TrackingReviewController
 from ui.pages.behavioral_arbitration_page import BehavioralArbitrationPage
 from ui.pages.behavioral_inference_page import BehavioralInferencePage
+from ui.pages.behavioral_review_page import BehavioralReviewPage
 from ui.pages.blob_features_page import BlobFeaturesPage
 from ui.pages.combined_features_page import CombinedFeaturesPage
 from ui.pages.pose_finalization_page import PoseFinalizationPage
@@ -58,7 +60,7 @@ class MainWindow(QMainWindow):
     * Group 1 — Data Preparation: S1–S4
     * Group 2 — Feature Processing: S5–S6
     * Group 3 — Behavioral Inference: S7–S8
-    * Group 4 — Behavioral Results & Review: S9 (S10 reserved / unimplemented)
+    * Group 4 — Behavioral Results & Review: S9 packaging + S10 behavioral review
     """
 
     def __init__(
@@ -72,6 +74,7 @@ class MainWindow(QMainWindow):
         behavioral_inference_controller: BehavioralInferenceController | None = None,
         behavioral_arbitration_controller: BehavioralArbitrationController | None = None,
         results_packaging_controller: ResultsPackagingController | None = None,
+        behavioral_review_controller: BehavioralReviewController | None = None,
     ) -> None:
         super().__init__()
         self.controller = controller
@@ -100,6 +103,9 @@ class MainWindow(QMainWindow):
         self.results_packaging_controller = (
             results_packaging_controller or ResultsPackagingController()
         )
+        self.behavioral_review_controller = (
+            behavioral_review_controller or BehavioralReviewController()
+        )
         self.setWindowTitle("behavior_suite")
         self.resize(1260, 900)
         self._session_root: Path | None = controller.state.project_dir
@@ -111,6 +117,7 @@ class MainWindow(QMainWindow):
         self._close_after_s7_task = False
         self._close_after_s8_task = False
         self._close_after_s9_task = False
+        self._close_after_s10_task = False
         self._active_group = GROUP_DATA_PREPARATION
         self._last_feature_page: str = "s5"
         self._last_behavior_page: str = "s7"
@@ -133,6 +140,9 @@ class MainWindow(QMainWindow):
         self.results_packaging_page = ResultsPackagingPage(
             self.results_packaging_controller
         )
+        self.behavioral_review_page = BehavioralReviewPage(
+            self.behavioral_review_controller
+        )
         self.s3_shell = self._build_s3_shell()
         self.s4_shell = self._build_s4_shell()
         self.pages = QStackedWidget()
@@ -145,6 +155,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.behavioral_inference_page)
         self.pages.addWidget(self.behavioral_arbitration_page)
         self.pages.addWidget(self.results_packaging_page)
+        self.pages.addWidget(self.behavioral_review_page)
 
         self.group_data_button = QPushButton("Group 1 — Data Preparation")
         self.group_feature_button = QPushButton("Group 2 — Feature Processing")
@@ -201,6 +212,12 @@ class MainWindow(QMainWindow):
             "Package eligible S8 outputs into an immutable analysis package. "
             "Does not host ethogram/video review or bout editing (S10)."
         )
+        self.s10_button = QPushButton("Subsystem 10 — Behavioral Review & Editing")
+        self.s10_button.setToolTip(
+            "Inspect eligible S9 packages with synchronized video/ethogram, "
+            "optionally correct and publish additive reviewed runs. Does not "
+            "re-package S9 or re-arbitrate S8."
+        )
         self.s1_button.clicked.connect(self.show_subsystem_1)
         self.s2_button.clicked.connect(self.open_pose_inference)
         self.s3_button.clicked.connect(self.open_tracking_review)
@@ -210,6 +227,7 @@ class MainWindow(QMainWindow):
         self.s7_button.clicked.connect(self.open_behavioral_inference)
         self.s8_button.clicked.connect(self.open_behavioral_arbitration)
         self.s9_button.clicked.connect(self.open_results_packaging)
+        self.s10_button.clicked.connect(self.open_behavioral_review)
 
         group_row = QHBoxLayout()
         group_row.addWidget(self.group_data_button)
@@ -228,6 +246,7 @@ class MainWindow(QMainWindow):
         navigation.addWidget(self.s7_button)
         navigation.addWidget(self.s8_button)
         navigation.addWidget(self.s9_button)
+        navigation.addWidget(self.s10_button)
         navigation.addStretch(1)
 
         central = QWidget()
@@ -295,9 +314,18 @@ class MainWindow(QMainWindow):
             self._s9_task_running_changed
         )
         self.results_packaging_page.task_finished.connect(self._s9_task_finished)
+        self.behavioral_review_page.unexpected_error.connect(
+            self._show_unexpected_error
+        )
+        self.behavioral_review_page.status_message.connect(self.statusBar().showMessage)
+        self.behavioral_review_page.task_running_changed.connect(
+            self._s10_task_running_changed
+        )
+        self.behavioral_review_page.task_finished.connect(self._s10_task_finished)
         self._apply_group_visibility()
         self.statusBar().showMessage(
-            "Select a project in S1 or open an existing session in S2/S5/S6/S7/S8/S9."
+            "Select a project in S1 or open an existing session in "
+            "S2/S5/S6/S7/S8/S9/S10."
         )
 
     def _build_s3_shell(self) -> QWidget:
@@ -427,6 +455,8 @@ class MainWindow(QMainWindow):
                 background.append("S8")
             if self.results_packaging_page.has_running_task:
                 background.append("S9")
+            if self.behavioral_review_page.has_running_task:
+                background.append("S10")
             if background:
                 message = (
                     f"{message} — {'/'.join(background)} task continues in the "
@@ -446,6 +476,8 @@ class MainWindow(QMainWindow):
                 behavior_bg.append("S8")
             if self.results_packaging_page.has_running_task:
                 behavior_bg.append("S9")
+            if self.behavioral_review_page.has_running_task:
+                behavior_bg.append("S10")
             if behavior_bg:
                 message = (
                     f"{message} — {'/'.join(behavior_bg)} task continues in the "
@@ -466,6 +498,8 @@ class MainWindow(QMainWindow):
                 background.append("S6")
             if self.results_packaging_page.has_running_task:
                 background.append("S9")
+            if self.behavioral_review_page.has_running_task:
+                background.append("S10")
             if background:
                 message = (
                     f"{message} — {'/'.join(background)} task continues in the "
@@ -473,8 +507,12 @@ class MainWindow(QMainWindow):
                 )
             self.statusBar().showMessage(message)
         else:
-            self.open_results_packaging()
-            message = "Behavioral Results & Review (S9)"
+            if self._last_results_page == "s10":
+                self.open_behavioral_review()
+                message = "Behavioral Results & Review (S10)"
+            else:
+                self.open_results_packaging()
+                message = "Behavioral Results & Review (S9)"
             background = []
             if self.blob_features_page.has_running_task:
                 background.append("S5")
@@ -694,6 +732,36 @@ class MainWindow(QMainWindow):
         self._update_navigation()
         self.statusBar().showMessage("Subsystem 9 results packaging & export")
 
+    def open_behavioral_review(self, session_root: object = None) -> None:
+        """Show S10 behavioral-review workspace (Behavioral Results & Review group)."""
+
+        if self._hard_navigation_blocked():
+            return
+        self._ensure_group(GROUP_RESULTS_REVIEW)
+        if isinstance(session_root, Path | str) and str(session_root).strip():
+            self._remember_session(session_root)
+        if self._session_root is not None:
+            current = self.behavioral_review_page.controller.state.session_root
+            target = self._session_root.resolve(strict=False)
+            same_session = (
+                current is not None and current.resolve(strict=False) == target
+            )
+            if same_session:
+                self.behavioral_review_page.refresh_from_state()
+            elif self.behavioral_review_page.controller.state.task_running:
+                self.statusBar().showMessage(
+                    "Cannot change the S10 session while behavioral review is active."
+                )
+                self.behavioral_review_page.refresh_from_state()
+            else:
+                self.behavioral_review_page.set_session(self._session_root)
+        else:
+            self.behavioral_review_page.refresh_from_state()
+        self.pages.setCurrentWidget(self.behavioral_review_page)
+        self._last_results_page = "s10"
+        self._update_navigation()
+        self.statusBar().showMessage("Subsystem 10 behavioral review & editing")
+
     def _ensure_group(self, group: str) -> None:
         if self._active_group == group:
             self._apply_group_visibility()
@@ -719,6 +787,7 @@ class MainWindow(QMainWindow):
         self.s7_button.setVisible(behavior)
         self.s8_button.setVisible(behavior)
         self.s9_button.setVisible(results)
+        self.s10_button.setVisible(results)
 
     def _remember_session(self, session_root: object) -> None:
         if isinstance(session_root, Path | str) and str(session_root).strip():
@@ -804,10 +873,10 @@ class MainWindow(QMainWindow):
     def _hard_navigation_blocked(self) -> bool:
         """Return True when S2/S4 tasks require a full navigation lock.
 
-        S5/S6/S7/S8/S9 tasks intentionally do **not** hard-block group or S1–S4
-        navigation. Users may leave Feature Processing / Behavioral Inference /
-        Results & Review and return while work continues. Source-mutating actions
-        stay page-locked.
+        S5/S6/S7/S8/S9/S10 tasks intentionally do **not** hard-block group or
+        S1–S4 navigation. Users may leave Feature Processing / Behavioral
+        Inference / Results & Review and return while work continues.
+        Source-mutating actions stay page-locked.
         """
 
         if self.pose_page.has_running_task:
@@ -828,7 +897,7 @@ class MainWindow(QMainWindow):
         return self._hard_navigation_blocked()
 
     def _update_navigation(self) -> None:
-        # S2/S4 keep a full lock. S5–S9 tasks leave group and page navigation open.
+        # S2/S4 keep a full lock. S5–S10 tasks leave group and page navigation open.
         hard_lock = (
             self.pose_page.has_running_task or self.finalization_page.has_running_task
         )
@@ -845,6 +914,7 @@ class MainWindow(QMainWindow):
         self.s7_button.setEnabled(not hard_lock)
         self.s8_button.setEnabled(not hard_lock)
         self.s9_button.setEnabled(not hard_lock)
+        self.s10_button.setEnabled(not hard_lock)
         self.s3_back_button.setEnabled(not hard_lock)
         self.open_s3_button.setEnabled(not hard_lock)
         self.s3_continue_s4_button.setEnabled(not hard_lock)
@@ -914,6 +984,15 @@ class MainWindow(QMainWindow):
             self._close_after_s9_task = False
             self.close()
 
+    def _s10_task_running_changed(self, _running: bool) -> None:
+        self._update_navigation()
+
+    def _s10_task_finished(self) -> None:
+        self._update_navigation()
+        if self._close_after_s10_task:
+            self._close_after_s10_task = False
+            self.close()
+
     def _show_unexpected_error(self, message: str) -> None:
         QMessageBox.critical(
             self,
@@ -923,7 +1002,7 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """Wait for non-cancellable S2/S4/S5/S6/S7/S8/S9 work or cooperatively cancel S1 work."""
+        """Wait for non-cancellable S2/S4/S5/S6/S7/S8/S9/S10 work or cancel S1."""
 
         if self.pose_page.has_running_task:
             event.ignore()
@@ -984,6 +1063,15 @@ class MainWindow(QMainWindow):
                 "An S9 task is active and has no safe cancellation hook. "
                 "The window remains responsive and will close when the task finishes. "
                 "Partial packaging artifacts are never published as completed."
+            )
+            return
+        if self.behavioral_review_page.has_running_task:
+            event.ignore()
+            self._close_after_s10_task = True
+            self.statusBar().showMessage(
+                "An S10 task is active and has no safe cancellation hook. "
+                "The window remains responsive and will close when the task finishes. "
+                "Working drafts remain recoverable; partial publishes are never eligible."
             )
             return
         if self.wizard.has_running_tasks():

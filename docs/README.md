@@ -13,7 +13,7 @@
 | 07 — Behavioral Inference | MVP complete / lab-validated | Consumes eligible S6; publishes predictions for S8 |
 | 08 — Behavioral Arbitration | MVP complete / lab-validated | Consumes eligible S7 (+ linked S6 features); Group 3 beside S7 |
 | 09 — Results Packaging & Export | Core MVP lab-accepted; media/CSV export backend + GUI (S9-E3) pending operator lab acceptance | Group 4 packaging; optional exports; S10 later |
-| 10 — Behavioral Review & Editing | Proposed / not started | Consumes S9 packages; optional manual review — not started |
+| 10 — Behavioral Review & Editing | S10-B accepted; Sprint 1–5 implemented (headless + Group 4 GUI); operator lab acceptance open | Consumes eligible S9 packages; publishes additive reviewed runs; Group 4 beside S9 |
 
 ## Subsystem 01 — Video Preprocessing
 
@@ -154,6 +154,38 @@ Group 4 conceptual separation: S9 packages eligible S8 outputs (plus sync /
 provenance); S10 consumes S9 packages for interactive review and optional
 versioned corrections (unimplemented). Media/CSV exports are optional derivatives
 of existing packages and must not mutate authoritative S8/S9 artifacts.
+
+## Subsystem 10 — Behavioral Review & Editing (Sprint 1–5 Implemented; Lab Acceptance Open)
+
+S10-A/S10-B design is accepted. **Sprint 1** delivered headless eligible S9
+package intake, dense↔prepared synchronization via `sync_index`, prepared-video
+identity seeking, and a read-only inspection session. **Sprint 2** added windowed
+S8 ethogram lanes (dual exclusive + contact/SBS), full packaged bout
+browsing/filtering, lazy S7/S8 evidence, and timeline visualization payloads.
+**Sprint 3** added explicit edit mode, framewise correction events, pure S8 bout
+regeneration, independent accept/reject/notes, durable working drafts with
+single-writer lock, and linear undo/redo across restart. **Sprint 4** publishes
+immutable `behavioral_review__*` runs with QC, discovery, current eligibility,
+stale-parent publish blocking (U12), and automated vs reviewed source-type
+selection. **Sprint 5** adds the Group 4 Qt GUI beside S9 (inspection workspace,
+async decode/window/publish workers, editing gates, publish/reopen UX) plus the
+operator laboratory acceptance checklist. Deferred MVP items remain frozen
+(U2 reciprocal tools, U3 `uncertain`, U6 reviewed exports, U15 reject
+status-only). **Do not mark S10 lab-validated until the operator checklist
+passes.**
+
+- [Architecture Audit (S10-A)](subsystem_10/architecture_audit.md)
+- [Implementation Contract (S10-B)](subsystem_10/implementation_contract.md)
+- [Sprint 1 — Source Validation, Synchronization and Video Seeking](subsystem_10/sprint_1_sources_sync_seek.md)
+- [Sprint 2 — Ethogram, Bout and Evidence Inspection](subsystem_10/sprint_2_inspection.md)
+- [Sprint 3 — Corrections, Review Decisions and Durable History](subsystem_10/sprint_3_corrections_history.md)
+- [Sprint 4 — Reviewed Publication, QC and Eligibility](subsystem_10/sprint_4_publication_qc.md)
+- [Sprint 5 — Integrated GUI and Laboratory Validation](subsystem_10/sprint_5_gui_integration.md)
+- [Laboratory Acceptance Checklist](subsystem_10/laboratory_acceptance_checklist.md)
+
+S10 must not repeat S9 packaging or S8 arbitration. Inspection is possible
+without corrections; manual review remains optional; automated S9 packages stay
+independently usable. Opening a package never creates an accepted review.
 
 ## General
 

@@ -100,6 +100,7 @@ include = [
 "behavioral_inference*",
 "behavioral_arbitration*",
 "results_packaging*",
+"behavioral_review*",
 "cli*",
 "ui*",
 ]
@@ -145,6 +146,7 @@ source = [
 "behavioral_inference",
 "behavioral_arbitration",
 "results_packaging",
+"behavioral_review",
 "cli",
 ]
 
@@ -202,6 +204,7 @@ known-first-party = [
 "behavioral_inference",
 "behavioral_arbitration",
 "results_packaging",
+"behavioral_review",
 "cli",
 "ui",
 ]
@@ -220,6 +223,7 @@ packages = [
 "behavioral_inference",
 "behavioral_arbitration",
 "results_packaging",
+"behavioral_review",
 ]
 check_untyped_defs = true
 disallow_any_generics = true

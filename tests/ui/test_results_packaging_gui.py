@@ -160,8 +160,8 @@ def test_main_window_exposes_group4_s9(tmp_path: Path) -> None:
         window.set_application_group(GROUP_RESULTS_REVIEW)
         assert window.group_results_button.isVisibleTo(window)
         assert window.s9_button.isVisibleTo(window)
+        assert window.s10_button.isVisibleTo(window)
         assert not window.s7_button.isVisibleTo(window)
-        assert not hasattr(window, "s10_button")
         window._session_root = None
         window.pages.setCurrentWidget(window.results_packaging_page)
         window._ensure_group(GROUP_RESULTS_REVIEW)
@@ -171,6 +171,7 @@ def test_main_window_exposes_group4_s9(tmp_path: Path) -> None:
         assert window.s7_button.isVisibleTo(window)
         assert window.s8_button.isVisibleTo(window)
         assert not window.s9_button.isVisibleTo(window)
+        assert not window.s10_button.isVisibleTo(window)
         window.set_application_group(GROUP_RESULTS_REVIEW)
         assert window.pages.currentWidget() is window.results_packaging_page
 

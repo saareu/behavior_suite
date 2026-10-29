@@ -15,6 +15,10 @@ Thumbs.db
 test_runs/
 acceptance_tests/
 bsuite_runs/
+# Local S8–S10 probe/audit working trees and one-off harness outputs.
+/tmp_s*/
+/tmp_s9_gui_e_session_probe.py
+*.s10bak
 # Large media assets elsewhere; models/SLEAP is tracked via Git LFS.
 *.slp
 *.mp4

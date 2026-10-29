@@ -40,6 +40,12 @@ class GuiTaskKind(StrEnum):
     RESULTS_PACKAGING_DISCOVERY = "results_packaging_discovery"
     RESULTS_CSV_EXPORT = "results_csv_export"
     RESULTS_MEDIA_EXPORT = "results_media_export"
+    BEHAVIORAL_REVIEW_DISCOVERY = "behavioral_review_discovery"
+    BEHAVIORAL_REVIEW_OPEN = "behavioral_review_open"
+    BEHAVIORAL_REVIEW_DECODE = "behavioral_review_decode"
+    BEHAVIORAL_REVIEW_WINDOW = "behavioral_review_window"
+    BEHAVIORAL_REVIEW_EDIT = "behavioral_review_edit"
+    BEHAVIORAL_REVIEW_PUBLISH = "behavioral_review_publish"
 
 
 @dataclass(slots=True)
