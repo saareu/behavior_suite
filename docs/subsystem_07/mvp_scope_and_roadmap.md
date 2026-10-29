@@ -114,7 +114,7 @@ Full checklist: [`laboratory_acceptance_checklist.md`](laboratory_acceptance_che
 
 1. No Subsystem 08 arbitration, reciprocity, hard-gap gates, or bout stitching.
 2. No cooperative cancellation for inference.
-3. Detector bundles ship under tracked `models/`; large SLEAP media (`*.mp4` / `*.slp`) stay gitignored.
+3. Detector bundles and SLEAP assets ship under tracked `models/` (SLEAP `*.mp4` / `*.slp` via Git LFS).
 4. Two-mouse gate remains the MVP default (`require_exactly_two_mice=true`).
 5. Unsupported JSON-expert focal bundles (`nose_body` / `nose_tail`) stay non-executable.
 6. Optional continue-on-error across detectors is not the MVP default (fail-fast).

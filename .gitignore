@@ -15,8 +15,10 @@ Thumbs.db
 test_runs/
 acceptance_tests/
 bsuite_runs/
-# Large media assets (including under models/SLEAP/); detector bundles are tracked.
+# Large media assets elsewhere; models/SLEAP is tracked via Git LFS.
 *.slp
 *.mp4
+!models/SLEAP/**/*.slp
+!models/SLEAP/**/*.mp4
 *.avi
 *.npz

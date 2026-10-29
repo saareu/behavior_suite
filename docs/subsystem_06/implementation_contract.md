@@ -381,7 +381,7 @@ Join contract: `left_on=dense_frame_idx`, prefer right key `dense_frame_idx`, `h
 
 | Location | Status |
 | --- | --- |
-| `models/**` detector bundles | **Tracked** in the suite package (SLEAP `*.mp4` / `*.slp` remain gitignored) |
+| `models/**` detector bundles + SLEAP assets | **Tracked** (SLEAP `*.mp4` / `*.slp` via Git LFS) |
 | Tracked suite package today | **No** production-packaged dyadic/focal model directory |
 
 S6 MVP **must not** claim models are shipped with the suite unless/until a tracked registry path is added. Compat checking reads an **explicit configured directory** that may point at a local lab path.
