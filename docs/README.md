@@ -12,7 +12,7 @@
 | 06 - Combined Features | MVP complete / lab-validated | Eligible S4 + S5 -> `dyadic_features_full.parquet` + model-compat report |
 | 07 — Behavioral Inference | MVP complete / lab-validated | Consumes eligible S6; publishes predictions for S8 |
 | 08 — Behavioral Arbitration | MVP complete / lab-validated | Consumes eligible S7 (+ linked S6 features); Group 3 beside S7 |
-| 09 — Results Packaging & Export | Core MVP lab-accepted; optional media/CSV export under design (S9-E1) | Group 4 packaging; consumes eligible S8; S10 later |
+| 09 — Results Packaging & Export | Core MVP lab-accepted; media/CSV export backend + GUI (S9-E3) pending operator lab acceptance | Group 4 packaging; optional exports; S10 later |
 | 10 — Behavioral Review & Editing | Proposed / not started | Consumes S9 packages; optional manual review — not started |
 
 ## Subsystem 01 — Video Preprocessing
@@ -133,8 +133,10 @@ summaries, and optional `review_emit_v1`. **Sprint 3** publishes immutable S9
 runs with QC, package manifests, discovery, and current eligibility. **Sprint 4**
 adds Group 4 GUI (packaging-only; no S10). **Operator laboratory acceptance for
 the core packaging MVP has passed.** Optional media (MP4) and automated CSV
-export are under architectural design (S9-E1) before final S9 closure — stop for
-review of that audit before implementation.
+export architecture (S9-E1) was accepted; **S9-E2** delivered the headless
+export backend; **S9-E3** adds Group 4 Export CSV / Bout Videos controls, frame-
+addressed encode verification, and MVP eligibility (currently eligible packages
+only). Stop for architectural review / operator lab acceptance of the extension.
 
 - [Architecture Audit (S9-A)](subsystem_09/architecture_audit.md)
 - [Implementation Contract (S9-B)](subsystem_09/implementation_contract.md)
@@ -144,6 +146,9 @@ review of that audit before implementation.
 - [Sprint 4 — GUI Integration and Laboratory Acceptance](subsystem_09/sprint_4_gui_integration.md)
 - [Laboratory Acceptance Checklist](subsystem_09/laboratory_acceptance_checklist.md)
 - [Media and CSV Export Architecture Audit (S9-E1)](subsystem_09/media_csv_export_architecture.md)
+- [Media and CSV Export Contract Freeze (S9-E2)](subsystem_09/media_csv_export_contract.md)
+- [Media and CSV Export Backend (S9-E2)](subsystem_09/media_csv_export_backend.md)
+- [Media and CSV Export GUI (S9-E3)](subsystem_09/media_csv_export_gui.md)
 
 Group 4 conceptual separation: S9 packages eligible S8 outputs (plus sync /
 provenance); S10 consumes S9 packages for interactive review and optional

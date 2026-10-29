@@ -21,7 +21,7 @@ This checklist is distinct from automated unit/GUI tests and from the scientific
 ## Architecture (retained)
 
 - **Group 3 — Behavioral Inference:** S7 Behavioral Inference + S8 Behavioral Arbitration.
-- **Group 4 — Results and Review:** deferred; not present in this MVP; implementation has not started.
+- **Group 4 — Results and Review:** delivered under Subsystem 09 (S9 packaging GUI); S10 remains unimplemented.
 
 ---
 

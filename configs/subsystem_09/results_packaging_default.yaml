@@ -1,0 +1,35 @@
+# Subsystem 09 — Results Packaging & Export (Sprint 3 defaults)
+#
+# Sprint 3 publishes immutable S9 runs (sync, full bouts, ethogram summary,
+# manifest, QC). review_emit_v1 is applied only when listed under
+# selected_export_profiles. Portable embed / clips / GIFs / symmetric collapse
+# remain deferred (U-R3/U-R4/U-R7).
+
+schema_version: results_package_settings_v1
+fps: 120.0
+default_profile_id: analysis_full
+
+execution:
+  sync_construction_method: rebuild_from_prepared_sync
+  package_mode: reference_lightweight
+  require_prepared_video: true
+  publish_run: false
+  # Optional full prepared-video SHA256 (U-R6). Off by default; never an
+  # implicit GUI-thread expense. When false, reuse trusted recorded digests
+  # or clearly labeled size/mtime fingerprints.
+  hash_prepared_video: false
+  # Default package retains all S8 bouts. Leave empty unless an optional
+  # export profile is explicitly requested.
+  selected_export_profiles: []
+
+# Approved review_emit_v1 defaults (U-R1 / U-R2). Applied only when
+# review_emit_v1 is explicitly selected. Seconds→frames uses explicit 120 Hz
+# (deliberate difference from Pipeline 110 source_video.fps). No profile may
+# change authoritative S8 bout boundaries.
+review_emit_v1_defaults:
+  include_contact: false
+  include_engaged: true
+  include_side_by_side: true
+  min_emit_bout_frames: 10
+  min_emit_bout_seconds: 0.10
+  target_fps: 120.0

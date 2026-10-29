@@ -31,6 +31,7 @@ from ui.controllers.pose_inference_controller import (
     S3PoseInput,
 )
 from ui.controllers.preprocess_setup_controller import PreprocessSetupController
+from ui.controllers.results_packaging_controller import ResultsPackagingController
 from ui.controllers.tracking_review_controller import TrackingReviewController
 from ui.pages.behavioral_arbitration_page import BehavioralArbitrationPage
 from ui.pages.behavioral_inference_page import BehavioralInferencePage
@@ -38,12 +39,14 @@ from ui.pages.blob_features_page import BlobFeaturesPage
 from ui.pages.combined_features_page import CombinedFeaturesPage
 from ui.pages.pose_finalization_page import PoseFinalizationPage
 from ui.pages.pose_inference_page import PoseInferencePage
+from ui.pages.results_packaging_page import ResultsPackagingPage
 from ui.pages.tracking_review_page import TrackingReviewPage
 from ui.preprocess_wizard import PreprocessWizard
 
 GROUP_DATA_PREPARATION = "data_preparation"
 GROUP_FEATURE_PROCESSING = "feature_processing"
 GROUP_BEHAVIORAL_INFERENCE = "behavioral_inference"
+GROUP_RESULTS_REVIEW = "results_review"
 
 
 class MainWindow(QMainWindow):
@@ -55,6 +58,7 @@ class MainWindow(QMainWindow):
     * Group 1 — Data Preparation: S1–S4
     * Group 2 — Feature Processing: S5–S6
     * Group 3 — Behavioral Inference: S7–S8
+    * Group 4 — Behavioral Results & Review: S9 (S10 reserved / unimplemented)
     """
 
     def __init__(
@@ -67,6 +71,7 @@ class MainWindow(QMainWindow):
         combined_features_controller: CombinedFeaturesController | None = None,
         behavioral_inference_controller: BehavioralInferenceController | None = None,
         behavioral_arbitration_controller: BehavioralArbitrationController | None = None,
+        results_packaging_controller: ResultsPackagingController | None = None,
     ) -> None:
         super().__init__()
         self.controller = controller
@@ -92,6 +97,9 @@ class MainWindow(QMainWindow):
         self.behavioral_arbitration_controller = (
             behavioral_arbitration_controller or BehavioralArbitrationController()
         )
+        self.results_packaging_controller = (
+            results_packaging_controller or ResultsPackagingController()
+        )
         self.setWindowTitle("behavior_suite")
         self.resize(1260, 900)
         self._session_root: Path | None = controller.state.project_dir
@@ -102,9 +110,11 @@ class MainWindow(QMainWindow):
         self._close_after_s6_task = False
         self._close_after_s7_task = False
         self._close_after_s8_task = False
+        self._close_after_s9_task = False
         self._active_group = GROUP_DATA_PREPARATION
         self._last_feature_page: str = "s5"
         self._last_behavior_page: str = "s7"
+        self._last_results_page: str = "s9"
 
         self.wizard = PreprocessWizard(controller)
         self.pose_page = PoseInferencePage(self.pose_controller)
@@ -120,6 +130,9 @@ class MainWindow(QMainWindow):
         self.behavioral_arbitration_page = BehavioralArbitrationPage(
             self.behavioral_arbitration_controller
         )
+        self.results_packaging_page = ResultsPackagingPage(
+            self.results_packaging_controller
+        )
         self.s3_shell = self._build_s3_shell()
         self.s4_shell = self._build_s4_shell()
         self.pages = QStackedWidget()
@@ -131,19 +144,25 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.combined_features_page)
         self.pages.addWidget(self.behavioral_inference_page)
         self.pages.addWidget(self.behavioral_arbitration_page)
+        self.pages.addWidget(self.results_packaging_page)
 
         self.group_data_button = QPushButton("Group 1 — Data Preparation")
         self.group_feature_button = QPushButton("Group 2 — Feature Processing")
         self.group_behavior_button = QPushButton("Group 3 — Behavioral Inference")
+        self.group_results_button = QPushButton(
+            "Group 4 — Behavioral Results & Review"
+        )
         self.group_data_button.setCheckable(True)
         self.group_feature_button.setCheckable(True)
         self.group_behavior_button.setCheckable(True)
+        self.group_results_button.setCheckable(True)
         self.group_data_button.setChecked(True)
         self._group_buttons = QButtonGroup(self)
         self._group_buttons.setExclusive(True)
         self._group_buttons.addButton(self.group_data_button)
         self._group_buttons.addButton(self.group_feature_button)
         self._group_buttons.addButton(self.group_behavior_button)
+        self._group_buttons.addButton(self.group_results_button)
         self.group_data_button.clicked.connect(
             lambda: self.set_application_group(GROUP_DATA_PREPARATION)
         )
@@ -152,6 +171,9 @@ class MainWindow(QMainWindow):
         )
         self.group_behavior_button.clicked.connect(
             lambda: self.set_application_group(GROUP_BEHAVIORAL_INFERENCE)
+        )
+        self.group_results_button.clicked.connect(
+            lambda: self.set_application_group(GROUP_RESULTS_REVIEW)
         )
 
         self.s1_button = QPushButton("Subsystem 1 — Preprocess")
@@ -174,6 +196,11 @@ class MainWindow(QMainWindow):
             "Arbitrate eligible S7 predictions with linked S6 features into "
             "exclusive ethogram labels and bouts. Does not train models or edit bouts."
         )
+        self.s9_button = QPushButton("Subsystem 9 — Results Packaging & Export")
+        self.s9_button.setToolTip(
+            "Package eligible S8 outputs into an immutable analysis package. "
+            "Does not host ethogram/video review or bout editing (S10)."
+        )
         self.s1_button.clicked.connect(self.show_subsystem_1)
         self.s2_button.clicked.connect(self.open_pose_inference)
         self.s3_button.clicked.connect(self.open_tracking_review)
@@ -182,11 +209,13 @@ class MainWindow(QMainWindow):
         self.s6_button.clicked.connect(self.open_combined_features)
         self.s7_button.clicked.connect(self.open_behavioral_inference)
         self.s8_button.clicked.connect(self.open_behavioral_arbitration)
+        self.s9_button.clicked.connect(self.open_results_packaging)
 
         group_row = QHBoxLayout()
         group_row.addWidget(self.group_data_button)
         group_row.addWidget(self.group_feature_button)
         group_row.addWidget(self.group_behavior_button)
+        group_row.addWidget(self.group_results_button)
         group_row.addStretch(1)
 
         navigation = QHBoxLayout()
@@ -198,6 +227,7 @@ class MainWindow(QMainWindow):
         navigation.addWidget(self.s6_button)
         navigation.addWidget(self.s7_button)
         navigation.addWidget(self.s8_button)
+        navigation.addWidget(self.s9_button)
         navigation.addStretch(1)
 
         central = QWidget()
@@ -257,9 +287,17 @@ class MainWindow(QMainWindow):
             self._s8_task_running_changed
         )
         self.behavioral_arbitration_page.task_finished.connect(self._s8_task_finished)
+        self.results_packaging_page.unexpected_error.connect(
+            self._show_unexpected_error
+        )
+        self.results_packaging_page.status_message.connect(self.statusBar().showMessage)
+        self.results_packaging_page.task_running_changed.connect(
+            self._s9_task_running_changed
+        )
+        self.results_packaging_page.task_finished.connect(self._s9_task_finished)
         self._apply_group_visibility()
         self.statusBar().showMessage(
-            "Select a project in S1 or open an existing session in S2/S5/S6/S7/S8."
+            "Select a project in S1 or open an existing session in S2/S5/S6/S7/S8/S9."
         )
 
     def _build_s3_shell(self) -> QWidget:
@@ -333,7 +371,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Startup configuration requires attention.")
 
     def set_application_group(self, group: str) -> None:
-        """Switch between Data Preparation, Feature Processing, and Behavioral Inference."""
+        """Switch among Data Preparation, Feature Processing, Behavioral Inference, Results."""
 
         if self._hard_navigation_blocked():
             # Restore checked state to the active group (S2/S4 hard lock).
@@ -346,11 +384,15 @@ class MainWindow(QMainWindow):
             self.group_behavior_button.setChecked(
                 self._active_group == GROUP_BEHAVIORAL_INFERENCE
             )
+            self.group_results_button.setChecked(
+                self._active_group == GROUP_RESULTS_REVIEW
+            )
             return
         if group not in (
             GROUP_DATA_PREPARATION,
             GROUP_FEATURE_PROCESSING,
             GROUP_BEHAVIORAL_INFERENCE,
+            GROUP_RESULTS_REVIEW,
         ):
             return
         if group == self._active_group:
@@ -360,6 +402,7 @@ class MainWindow(QMainWindow):
         self.group_data_button.setChecked(group == GROUP_DATA_PREPARATION)
         self.group_feature_button.setChecked(group == GROUP_FEATURE_PROCESSING)
         self.group_behavior_button.setChecked(group == GROUP_BEHAVIORAL_INFERENCE)
+        self.group_results_button.setChecked(group == GROUP_RESULTS_REVIEW)
         self._apply_group_visibility()
         if group == GROUP_DATA_PREPARATION:
             # Stay on current data-prep page if already there; otherwise S1.
@@ -382,6 +425,8 @@ class MainWindow(QMainWindow):
                 background.append("S7")
             if self.behavioral_arbitration_page.has_running_task:
                 background.append("S8")
+            if self.results_packaging_page.has_running_task:
+                background.append("S9")
             if background:
                 message = (
                     f"{message} — {'/'.join(background)} task continues in the "
@@ -399,13 +444,15 @@ class MainWindow(QMainWindow):
                 behavior_bg.append("S7")
             if self.behavioral_arbitration_page.has_running_task:
                 behavior_bg.append("S8")
+            if self.results_packaging_page.has_running_task:
+                behavior_bg.append("S9")
             if behavior_bg:
                 message = (
                     f"{message} — {'/'.join(behavior_bg)} task continues in the "
-                    "background; return to Behavioral Inference for progress."
+                    "background; return to the relevant group for progress."
                 )
             self.statusBar().showMessage(message)
-        else:
+        elif group == GROUP_BEHAVIORAL_INFERENCE:
             if self._last_behavior_page == "s8":
                 self.open_behavioral_arbitration()
                 message = "Behavioral Inference (S8)"
@@ -417,10 +464,30 @@ class MainWindow(QMainWindow):
                 background.append("S5")
             if self.combined_features_page.has_running_task:
                 background.append("S6")
+            if self.results_packaging_page.has_running_task:
+                background.append("S9")
             if background:
                 message = (
                     f"{message} — {'/'.join(background)} task continues in the "
-                    "background; return to Feature Processing for progress."
+                    "background; return to the relevant group for progress."
+                )
+            self.statusBar().showMessage(message)
+        else:
+            self.open_results_packaging()
+            message = "Behavioral Results & Review (S9)"
+            background = []
+            if self.blob_features_page.has_running_task:
+                background.append("S5")
+            if self.combined_features_page.has_running_task:
+                background.append("S6")
+            if self.behavioral_inference_page.has_running_task:
+                background.append("S7")
+            if self.behavioral_arbitration_page.has_running_task:
+                background.append("S8")
+            if background:
+                message = (
+                    f"{message} — {'/'.join(background)} task continues in the "
+                    "background; return to the relevant group for progress."
                 )
             self.statusBar().showMessage(message)
 
@@ -597,6 +664,36 @@ class MainWindow(QMainWindow):
         self._update_navigation()
         self.statusBar().showMessage("Subsystem 8 behavioral arbitration")
 
+    def open_results_packaging(self, session_root: object = None) -> None:
+        """Show S9 results-packaging workspace (Behavioral Results & Review group)."""
+
+        if self._hard_navigation_blocked():
+            return
+        self._ensure_group(GROUP_RESULTS_REVIEW)
+        if isinstance(session_root, Path | str) and str(session_root).strip():
+            self._remember_session(session_root)
+        if self._session_root is not None:
+            current = self.results_packaging_page.controller.state.session_root
+            target = self._session_root.resolve(strict=False)
+            same_session = (
+                current is not None and current.resolve(strict=False) == target
+            )
+            if same_session:
+                self.results_packaging_page.refresh_from_state()
+            elif self.results_packaging_page.controller.state.task_running:
+                self.statusBar().showMessage(
+                    "Cannot change the S9 session while results packaging is active."
+                )
+                self.results_packaging_page.refresh_from_state()
+            else:
+                self.results_packaging_page.set_session(self._session_root)
+        else:
+            self.results_packaging_page.refresh_from_state()
+        self.pages.setCurrentWidget(self.results_packaging_page)
+        self._last_results_page = "s9"
+        self._update_navigation()
+        self.statusBar().showMessage("Subsystem 9 results packaging & export")
+
     def _ensure_group(self, group: str) -> None:
         if self._active_group == group:
             self._apply_group_visibility()
@@ -605,12 +702,14 @@ class MainWindow(QMainWindow):
         self.group_data_button.setChecked(group == GROUP_DATA_PREPARATION)
         self.group_feature_button.setChecked(group == GROUP_FEATURE_PROCESSING)
         self.group_behavior_button.setChecked(group == GROUP_BEHAVIORAL_INFERENCE)
+        self.group_results_button.setChecked(group == GROUP_RESULTS_REVIEW)
         self._apply_group_visibility()
 
     def _apply_group_visibility(self) -> None:
         data = self._active_group == GROUP_DATA_PREPARATION
         feature = self._active_group == GROUP_FEATURE_PROCESSING
         behavior = self._active_group == GROUP_BEHAVIORAL_INFERENCE
+        results = self._active_group == GROUP_RESULTS_REVIEW
         self.s1_button.setVisible(data)
         self.s2_button.setVisible(data)
         self.s3_button.setVisible(data)
@@ -619,6 +718,7 @@ class MainWindow(QMainWindow):
         self.s6_button.setVisible(feature)
         self.s7_button.setVisible(behavior)
         self.s8_button.setVisible(behavior)
+        self.s9_button.setVisible(results)
 
     def _remember_session(self, session_root: object) -> None:
         if isinstance(session_root, Path | str) and str(session_root).strip():
@@ -704,9 +804,10 @@ class MainWindow(QMainWindow):
     def _hard_navigation_blocked(self) -> bool:
         """Return True when S2/S4 tasks require a full navigation lock.
 
-        S5/S6/S7/S8 tasks intentionally do **not** hard-block group or S1–S4
-        navigation. Users may leave Feature Processing / Behavioral Inference
-        and return while work continues. Source-mutating actions stay page-locked.
+        S5/S6/S7/S8/S9 tasks intentionally do **not** hard-block group or S1–S4
+        navigation. Users may leave Feature Processing / Behavioral Inference /
+        Results & Review and return while work continues. Source-mutating actions
+        stay page-locked.
         """
 
         if self.pose_page.has_running_task:
@@ -727,13 +828,14 @@ class MainWindow(QMainWindow):
         return self._hard_navigation_blocked()
 
     def _update_navigation(self) -> None:
-        # S2/S4 keep a full lock. S5–S8 tasks leave group and page navigation open.
+        # S2/S4 keep a full lock. S5–S9 tasks leave group and page navigation open.
         hard_lock = (
             self.pose_page.has_running_task or self.finalization_page.has_running_task
         )
         self.group_data_button.setEnabled(not hard_lock)
         self.group_feature_button.setEnabled(not hard_lock)
         self.group_behavior_button.setEnabled(not hard_lock)
+        self.group_results_button.setEnabled(not hard_lock)
         self.s1_button.setEnabled(not hard_lock)
         self.s2_button.setEnabled(not hard_lock)
         self.s3_button.setEnabled(not hard_lock)
@@ -742,6 +844,7 @@ class MainWindow(QMainWindow):
         self.s6_button.setEnabled(not hard_lock)
         self.s7_button.setEnabled(not hard_lock)
         self.s8_button.setEnabled(not hard_lock)
+        self.s9_button.setEnabled(not hard_lock)
         self.s3_back_button.setEnabled(not hard_lock)
         self.open_s3_button.setEnabled(not hard_lock)
         self.s3_continue_s4_button.setEnabled(not hard_lock)
@@ -802,6 +905,15 @@ class MainWindow(QMainWindow):
             self._close_after_s8_task = False
             self.close()
 
+    def _s9_task_running_changed(self, _running: bool) -> None:
+        self._update_navigation()
+
+    def _s9_task_finished(self) -> None:
+        self._update_navigation()
+        if self._close_after_s9_task:
+            self._close_after_s9_task = False
+            self.close()
+
     def _show_unexpected_error(self, message: str) -> None:
         QMessageBox.critical(
             self,
@@ -811,7 +923,7 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """Wait for non-cancellable S2/S4/S5/S6/S7/S8 work or cooperatively cancel S1 work."""
+        """Wait for non-cancellable S2/S4/S5/S6/S7/S8/S9 work or cooperatively cancel S1 work."""
 
         if self.pose_page.has_running_task:
             event.ignore()
@@ -863,6 +975,15 @@ class MainWindow(QMainWindow):
                 "An S8 task is active and has no safe cancellation hook. "
                 "The window remains responsive and will close when the task finishes. "
                 "Partial arbitration artifacts are never published as completed."
+            )
+            return
+        if self.results_packaging_page.has_running_task:
+            event.ignore()
+            self._close_after_s9_task = True
+            self.statusBar().showMessage(
+                "An S9 task is active and has no safe cancellation hook. "
+                "The window remains responsive and will close when the task finishes. "
+                "Partial packaging artifacts are never published as completed."
             )
             return
         if self.wizard.has_running_tasks():

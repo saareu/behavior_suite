@@ -36,6 +36,10 @@ class GuiTaskKind(StrEnum):
     BEHAVIORAL_INFERENCE_DISCOVERY = "behavioral_inference_discovery"
     BEHAVIORAL_ARBITRATION = "behavioral_arbitration"
     BEHAVIORAL_ARBITRATION_DISCOVERY = "behavioral_arbitration_discovery"
+    RESULTS_PACKAGING = "results_packaging"
+    RESULTS_PACKAGING_DISCOVERY = "results_packaging_discovery"
+    RESULTS_CSV_EXPORT = "results_csv_export"
+    RESULTS_MEDIA_EXPORT = "results_media_export"
 
 
 @dataclass(slots=True)
