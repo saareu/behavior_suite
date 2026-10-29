@@ -52,7 +52,9 @@ from tracking_correction.manual_edits import (
     apply_swap_identities,
     apply_swap_node,
     available_nodes,
+    blank_non_implanted_headstage,
     build_edit_record,
+    count_finite_headstage,
     ensure_automatic_baseline,
     frame_domain_signature,
     load_manual_corrections,
@@ -110,6 +112,7 @@ class AcceptanceResult:
     working_sha256: str
     manual_corrections_present: bool = False
     manual_correction_count: int = 0
+    non_implanted_headstage_blanked: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -883,12 +886,13 @@ def accept_tracking_result(session: TrackingReviewSession) -> AcceptanceResult:
     meta = _load_json_object(session.run_meta_path, "S3 run_meta.json")
     _reject_incomplete_run(meta, session.working_tracked_pose_path)
 
-    working_sha = _sha256(session.working_tracked_pose_path)
     accepted_at = _iso_now()
     manual_present = session.has_manual_edits
     manual_count = session.manual_edit_count
+    implanted_track = _resolve_implanted_track()
 
     if is_currently_accepted(meta.get("acceptance_state")):
+        working_sha = _sha256(session.working_tracked_pose_path)
         if not session.tracked_pose_path.is_file():
             raise TrackingCorrectionError(
                 "S3 run is marked accepted but tracked_pose.parquet is missing."
@@ -920,7 +924,30 @@ def accept_tracking_result(session: TrackingReviewSession) -> AcceptanceResult:
             manual_correction_count=int(
                 _mapping(meta.get("acceptance")).get("manual_correction_count") or 0
             ),
+            non_implanted_headstage_blanked=int(
+                _mapping(meta.get("acceptance")).get(
+                    "non_implanted_headstage_blanked"
+                )
+                or 0
+            ),
         )
+
+    working = session._require_working_pose()
+    cleaned, blanked = blank_non_implanted_headstage(
+        working, implanted_track=implanted_track
+    )
+    if blanked:
+        session._working_pose = cleaned
+        write_working_pose(session.working_tracked_pose_path, cleaned)
+        session._reload_corrected_overlay()
+    if count_finite_headstage(session._require_working_pose(), track=implanted_track) < 1:
+        raise TrackingCorrectionError(
+            f"Cannot accept tracking: implanted track {implanted_track} has no "
+            "finite headstage after blanking non-implanted headstage nodes. "
+            "Fix identity in review so the implanted mouse owns headstage."
+        )
+
+    working_sha = _sha256(session.working_tracked_pose_path)
 
     try:
         shutil.copy2(session.working_tracked_pose_path, session.tracked_pose_path)
@@ -944,6 +971,8 @@ def accept_tracking_result(session: TrackingReviewSession) -> AcceptanceResult:
         "tracked_pose_sha256": working_sha,
         "manual_corrections_present": manual_present,
         "manual_correction_count": manual_count,
+        "implanted_track": implanted_track,
+        "non_implanted_headstage_blanked": blanked,
     }
     meta["acceptance_state"] = ACCEPTANCE_ACCEPTED
     meta["acceptance"] = acceptance_block
@@ -968,6 +997,8 @@ def accept_tracking_result(session: TrackingReviewSession) -> AcceptanceResult:
         working_sha=working_sha,
         manual_corrections_present=manual_present,
         manual_correction_count=manual_count,
+        implanted_track=implanted_track,
+        non_implanted_headstage_blanked=blanked,
     )
     session.acceptance_state = ACCEPTANCE_ACCEPTED
     _assert_no_mutation(protected)
@@ -979,6 +1010,7 @@ def accept_tracking_result(session: TrackingReviewSession) -> AcceptanceResult:
         working_sha256=working_sha,
         manual_corrections_present=manual_present,
         manual_correction_count=manual_count,
+        non_implanted_headstage_blanked=blanked,
     )
 
 
@@ -1421,6 +1453,21 @@ def _assert_no_mutation(before: Mapping[Path, tuple[str, int] | None]) -> None:
             raise TrackingCorrectionError(f"Acceptance mutated protected artifact: {path}")
 
 
+def _resolve_implanted_track() -> int:
+    """Return the profile implanted track (MVP default: 0)."""
+
+    try:
+        config = load_current_profile_config()
+    except TrackingCorrectionError:
+        return 0
+    implanted = config.get("implanted_track")
+    if isinstance(implanted, bool) or not isinstance(implanted, int):
+        return 0
+    if implanted not in TRACK_COLORS_BGR:
+        return 0
+    return int(implanted)
+
+
 def _append_acceptance_log(
     path: Path,
     *,
@@ -1430,6 +1477,8 @@ def _append_acceptance_log(
     working_sha: str,
     manual_corrections_present: bool = False,
     manual_correction_count: int = 0,
+    implanted_track: int = 0,
+    non_implanted_headstage_blanked: int = 0,
 ) -> None:
     lines = [
         "",
@@ -1440,6 +1489,8 @@ def _append_acceptance_log(
         f"tracked_pose_parquet: {_path_text(tracked_path)}",
         f"manual_corrections_present: {str(manual_corrections_present).lower()}",
         f"manual_correction_count: {manual_correction_count}",
+        f"implanted_track: {implanted_track}",
+        f"non_implanted_headstage_blanked: {non_implanted_headstage_blanked}",
     ]
     _append_text_log(path, lines)
 

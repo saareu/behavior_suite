@@ -34,9 +34,28 @@ from combined_features.pose_adapter import AdaptedPose, ImplantationResolution
 # ============================================================================
 
 EPS = 1e-6
+PEARSON_CORR_ABS_LIMIT = 1.0 + 1e-6
 
 # Impute-stage codes are imported from combined_features.contracts
 # (legacy Pipeline 30 encoding: 0=none, 1=linear, 2=PCHIP, 3=Kalman).
+
+
+def sanitize_pearson_correlation(
+    values: pd.Series,
+    *,
+    abs_limit: float = PEARSON_CORR_ABS_LIMIT,
+) -> pd.Series:
+    """Keep only mathematically valid Pearson values in ``[-1, 1]``.
+
+    Undefined / non-finite / wildly out-of-range rolling correlations become
+    NaN. Tiny float overshoot within ``abs_limit`` is clipped into ``[-1, 1]``.
+    Neighbor fill is intentionally not applied: that would invent synchrony.
+    """
+
+    arr = pd.to_numeric(values, errors="coerce").to_numpy(dtype=np.float64, copy=True)
+    valid = np.isfinite(arr) & (np.abs(arr) <= float(abs_limit))
+    cleaned = np.where(valid, np.clip(arr, -1.0, 1.0), np.nan)
+    return pd.Series(cleaned, index=values.index, dtype=np.float64)
 
 # ============================================================================
 # Dataclasses
@@ -2678,11 +2697,15 @@ def build_frame_features(
     features_df["relative_speed_ratio"] = v_min / (v_max + EPS)
 
     # Speed correlation: centered 60-frame rolling Pearson correlation of speed_i and speed_j.
-    features_df["speed_correlation_60"] = grouped["speed_i"].transform(
-        lambda x: x.rolling(window=window_size_60, center=True, min_periods=2).corr(
-            features_df.loc[x.index, "speed_j"]
+    # Undefined windows (insufficient pairs / zero variance) and Inf/out-of-range
+    # numeric artifacts become NaN — never Inf, and never neighbor-filled.
+    features_df["speed_correlation_60"] = sanitize_pearson_correlation(
+        grouped["speed_i"].transform(
+            lambda x: x.rolling(window=window_size_60, center=True, min_periods=2).corr(
+                features_df.loc[x.index, "speed_j"]
+            )
         )
-    ).bfill().ffill()
+    )
 
     # Synchrony entropy: rolling angular-velocity coupling across the dyad.
     features_df["cross_velocity_correlation"] = grouped["angular_velocity_i"].transform(

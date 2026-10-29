@@ -29,9 +29,12 @@ from tracking_correction.contracts import (
 from tracking_correction.manual_edits import (
     apply_swap_identities,
     apply_swap_node,
+    blank_non_implanted_headstage,
+    count_finite_headstage,
     frame_domain_signature,
     read_working_pose,
     undo_edit,
+    write_working_pose,
 )
 from ui.controllers.tracking_review_controller import TrackingReviewController
 
@@ -490,6 +493,109 @@ def test_manual_corrections_json_provenance(tmp_path: Path) -> None:
     assert isinstance(machine, list)
 
 
+def test_blank_non_implanted_headstage_clears_partner_only() -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "frame_idx": 0,
+                "frame": 0,
+                "track": 0,
+                "node": "headstage",
+                "x": 1.0,
+                "y": 2.0,
+                "score": 0.9,
+                "was_node_blanked": np.uint8(0),
+            },
+            {
+                "frame_idx": 0,
+                "frame": 0,
+                "track": 1,
+                "node": "headstage",
+                "x": 10.0,
+                "y": 20.0,
+                "score": 0.8,
+                "was_node_blanked": np.uint8(0),
+            },
+            {
+                "frame_idx": 1,
+                "frame": 1,
+                "track": 1,
+                "node": "nose",
+                "x": 3.0,
+                "y": 4.0,
+                "score": 0.7,
+                "was_node_blanked": np.uint8(0),
+            },
+        ]
+    )
+    out, blanked = blank_non_implanted_headstage(df, implanted_track=0)
+    assert blanked == 1
+    assert count_finite_headstage(out, track=0) == 1
+    assert count_finite_headstage(out, track=1) == 0
+    partner = out[(out["track"] == 1) & (out["node"] == "headstage")].iloc[0]
+    assert pd.isna(partner["x"]) and pd.isna(partner["y"])
+    assert float(partner["score"]) == pytest.approx(0.0)
+    assert int(partner["was_node_blanked"]) == 1
+    nose = out[(out["track"] == 1) & (out["node"] == "nose")].iloc[0]
+    assert float(nose["x"]) == pytest.approx(3.0)
+
+
+def test_acceptance_blanks_non_implanted_headstage(tmp_path: Path) -> None:
+    s3_dir, s2_run, s1 = _completed_s3(tmp_path)
+    protected = _snapshot(_protected_inputs(s2_run, s1))
+    session = load_review_session(s3_dir)
+    working = read_working_pose(session.working_tracked_pose_path)
+    track_values = working["track"]
+    implanted_mask = (
+        (working["frame_idx"] == 2)
+        & (track_values == 0)
+        & (working["node"].astype(str) == "headstage")
+    )
+    stray = working.loc[implanted_mask].iloc[0]
+    extra = {column: stray[column] for column in working.columns}
+    extra["track"] = 1 if pd.api.types.is_integer_dtype(track_values) else "track_1"
+    extra["x"] = float(stray["x"]) + 50.0
+    extra["y"] = float(stray["y"]) + 50.0
+    if "score" in extra:
+        extra["score"] = 0.5
+    if "point_score" in extra:
+        extra["point_score"] = 0.5
+    if "was_node_blanked" in extra:
+        extra["was_node_blanked"] = np.uint8(0)
+    working = pd.concat([working, pd.DataFrame([extra])], ignore_index=True)
+    write_working_pose(session.working_tracked_pose_path, working)
+    session._working_pose = working
+    assert count_finite_headstage(working, track=1) == 1
+
+    result = session.accept_tracking()
+    assert result.already_accepted is False
+    assert result.non_implanted_headstage_blanked == 1
+    accepted = pd.read_parquet(s3_dir / FINAL_TRACKED_POSE_FILENAME)
+    assert count_finite_headstage(accepted, track=0) >= 1
+    assert count_finite_headstage(accepted, track=1) == 0
+    meta = json.loads((s3_dir / "run_meta.json").read_text(encoding="utf-8"))
+    assert meta["acceptance"]["non_implanted_headstage_blanked"] == 1
+    assert meta["acceptance"]["implanted_track"] == 0
+    assert _snapshot(_protected_inputs(s2_run, s1)) == protected
+
+
+def test_acceptance_rejects_when_implanted_headstage_missing(tmp_path: Path) -> None:
+    s3_dir, _s2_run, _s1 = _completed_s3(tmp_path)
+    session = load_review_session(s3_dir)
+    working = read_working_pose(session.working_tracked_pose_path)
+    hs_mask = working["node"].astype(str) == "headstage"
+    if pd.api.types.is_integer_dtype(working["track"]):
+        working.loc[hs_mask, "track"] = 1
+    else:
+        working.loc[hs_mask, "track"] = "track_1"
+    write_working_pose(session.working_tracked_pose_path, working)
+    session._working_pose = working
+    assert count_finite_headstage(working, track=0) == 0
+    assert count_finite_headstage(working, track=1) >= 1
+    with pytest.raises(TrackingCorrectionError, match="implanted track 0 has no"):
+        session.accept_tracking()
+
+
 def test_acceptance_after_manual_edits_and_invalidation(tmp_path: Path) -> None:
     s3_dir, s2_run, s1 = _completed_s3(tmp_path)
     protected = _snapshot(_protected_inputs(s2_run, s1))
@@ -498,6 +604,7 @@ def test_acceptance_after_manual_edits_and_invalidation(tmp_path: Path) -> None:
     first = session.accept_tracking()
     assert first.already_accepted is False
     assert first.manual_corrections_present is False
+    assert first.non_implanted_headstage_blanked == 0
     tracked_sha = _sha256(s3_dir / FINAL_TRACKED_POSE_FILENAME)
 
     edit = session.swap_identities(0, 0)

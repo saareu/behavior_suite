@@ -295,6 +295,81 @@ def apply_blank_node(
     return _sort_pose(out), before
 
 
+def blank_non_implanted_headstage(
+    frame: pd.DataFrame,
+    *,
+    implanted_track: int = _IMPLANTED_TRACK,
+) -> tuple[pd.DataFrame, int]:
+    """Blank finite ``headstage`` detections on every non-implanted track.
+
+    Profile invariant for ``current_lab_two_mouse_headstage_v1``: only the
+    implanted mouse may keep a headstage node. Residual headstage points on
+    the partner (false detections / ID leakage) are cleared so downstream
+    implantation resolution stays unambiguous.
+
+    Returns ``(pose, n_blanked_rows)``. Does not invent headstage on the
+    implanted track.
+    """
+
+    if "node" not in frame.columns:
+        return frame.copy(), 0
+
+    implanted = _validate_track(implanted_track)
+    out = frame.copy()
+    track_values = _track_series(out).to_numpy(dtype=int, copy=False)
+    node_values = out["node"].astype(str).to_numpy()
+    x_values = (
+        pd.to_numeric(out["x"], errors="coerce").to_numpy(dtype=float)
+        if "x" in out.columns
+        else np.full(len(out), np.nan, dtype=float)
+    )
+    y_values = (
+        pd.to_numeric(out["y"], errors="coerce").to_numpy(dtype=float)
+        if "y" in out.columns
+        else np.full(len(out), np.nan, dtype=float)
+    )
+    mask = (
+        (node_values == _HEADSTAGE_NODE)
+        & (track_values != implanted)
+        & np.isfinite(x_values)
+        & np.isfinite(y_values)
+    )
+    blank_idx = np.flatnonzero(mask)
+    if blank_idx.size == 0:
+        return out, 0
+
+    positions = out.index.to_numpy()[blank_idx]
+    if "x" in out.columns:
+        out.loc[positions, "x"] = np.nan
+    if "y" in out.columns:
+        out.loc[positions, "y"] = np.nan
+    for score_col in ("point_score", "score"):
+        if score_col in out.columns:
+            out.loc[positions, score_col] = 0.0
+    if "was_node_blanked" in out.columns:
+        out.loc[positions, "was_node_blanked"] = np.uint8(1)
+    return _sort_pose(out), int(blank_idx.size)
+
+
+def count_finite_headstage(
+    frame: pd.DataFrame,
+    *,
+    track: int,
+) -> int:
+    """Count finite ``headstage`` (x, y) detections on one track."""
+
+    if "node" not in frame.columns or "x" not in frame.columns or "y" not in frame.columns:
+        return 0
+    track_idx = _validate_track(track)
+    track_values = _track_series(frame)
+    mask = (track_values == track_idx) & (frame["node"].astype(str) == _HEADSTAGE_NODE)
+    if not bool(mask.any()):
+        return 0
+    x_values = pd.to_numeric(frame.loc[mask, "x"], errors="coerce")
+    y_values = pd.to_numeric(frame.loc[mask, "y"], errors="coerce")
+    return int((x_values.notna() & y_values.notna()).sum())
+
+
 def undo_edit(frame: pd.DataFrame, record: Mapping[str, Any]) -> pd.DataFrame:
     """Apply the inverse of one manual edit record."""
 
