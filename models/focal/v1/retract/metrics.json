@@ -1,0 +1,10 @@
+{
+  "detector_name": "retract",
+  "target_col": "y_retract",
+  "n_rows": 300727,
+  "n_pos": 32884,
+  "n_neg": 267843,
+  "precision": 0.9283392968519187,
+  "recall": 0.859992701617808,
+  "threshold_f1": 0.489166796207428
+}

@@ -42,7 +42,7 @@ def discover_model_registry(
 ) -> tuple[str, tuple[DiscoveredDetector, ...], list[str]]:
     """Discover dyadic/focal detectors from an explicitly configured root.
 
-    Returns ``(registry_status, detectors, notes)``. Never reads ``legacy/``
+    Returns ``(registry_status, detectors, notes)``. Never reads ``models/``
     unless that path is explicitly configured as ``settings.root``.
     """
 

@@ -14,7 +14,7 @@ This record is distinct from synthetic/unit tests and from the earlier Sprint 4 
 | --- | --- |
 | Session | `C:\behavior_suite\test_cases\E_full_session_integration` |
 | Eligible S6 | `combined_features__20261025T173244` (36528 samples, 2 tracks) |
-| Registry | `C:\behavior_suite\legacy\models` |
+| Registry | `C:\behavior_suite\models` |
 | Focal conflict resolution | Operator removed obsolete conflicting focal model directories; active specialists remain (`nose_body_intact` / `nose_body_occ`, `nose_to_tail`, `approach`, `retract`) |
 | Runtime | `behavior_suite_gui` with `.[s2,s7]` via `scripts\install_windows_gui.bat` |
 
@@ -78,5 +78,5 @@ Do not invent additional metrics beyond these recorded artifacts.
 
 ## Suggested registry path (this workstation)
 
-`C:\behavior_suite\legacy\models`  
-(Required for Run; not committed. Fresh clones must browse to a trusted local registry once; the path persists via QSettings.)
+`C:\behavior_suite\models`  
+(Required for Run; detector bundles are tracked under `models/`. Operators may still browse to an alternate registry; the path persists via QSettings.)

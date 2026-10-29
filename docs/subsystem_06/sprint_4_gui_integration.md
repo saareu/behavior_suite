@@ -166,7 +166,7 @@ Before the operator completed S3 acceptance and S4, the same session had eligibl
 
 - No model inference or training UI
 - No Cancel for long extraction
-- Model registry is optional and external; suite does not ship git-excluded `legacy/models`
+- Model registry is optional; detector bundles ship under tracked `models/` (SLEAP media remains gitignored)
 - Working settings are not yet persisted under `combined_features/_gui/` (defaults + per-session widgets only)
 - Numerical regression vs historical Pipeline 50 caches remains out of scope
 - DataFrame fragmentation PerformanceWarnings from vendored FF/P50 ports (formulas unchanged)

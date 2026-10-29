@@ -23,6 +23,20 @@ _SETTINGS_PREFIX = "s7/"
 REGISTRY_ROOT_KEY = _SETTINGS_PREFIX + "last_model_registry_root"
 
 
+def _remap_legacy_models_registry(path: Path) -> Path | None:
+    """Map a relocated ``.../legacy/models`` path onto ``.../models`` when present."""
+
+    parts = path.parts
+    if len(parts) < 2:
+        return None
+    if parts[-2].lower() != "legacy" or parts[-1].lower() != "models":
+        return None
+    remapped = path.parent.parent / "models"
+    if remapped.is_dir():
+        return remapped.resolve(strict=False)
+    return None
+
+
 def load_persisted_registry_root(settings: SettingsStore | None) -> Path | None:
     """Return a previously saved registry root when the path still exists."""
 
@@ -35,6 +49,10 @@ def load_persisted_registry_root(settings: SettingsStore | None) -> Path | None:
     path = Path(raw).expanduser().resolve(strict=False)
     if path.is_dir():
         return path
+    remapped = _remap_legacy_models_registry(path)
+    if remapped is not None:
+        persist_registry_root(settings, remapped)
+        return remapped
     return path  # Keep text so the GUI can show "unavailable" + recovery.
 
 
@@ -64,5 +82,5 @@ def suggest_lab_model_registry(repo_root: Path | str | None = None) -> Path | No
         base = Path(__file__).resolve().parents[2]
     else:
         base = Path(repo_root).expanduser().resolve(strict=False)
-    candidate = base / "legacy" / "models"
+    candidate = base / "models"
     return candidate if candidate.is_dir() else None

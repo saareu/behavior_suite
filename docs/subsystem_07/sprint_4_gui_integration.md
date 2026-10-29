@@ -91,7 +91,7 @@ Coverage includes Group 3 nav + S1–S6 regressions, S6 source preservation, ine
 
 **Session:** `test_cases/E_full_session_integration`  
 **S6 input:** `combined_features__20261025T173244` (classification `eligible`, 36528 samples, 2 tracks)  
-**Registry:** `legacy/models` (active dyadic/focal bundles; obsolete conflicting focal directories removed by operator)  
+**Registry:** `models/` (active dyadic/focal bundles; obsolete conflicting focal directories removed by operator)  
 **Final operator GUI run:** `behavioral_inference__20261026T163224` (`run_purpose=gui`)  
 **Prior headless lab run (same science path; still eligible):** `behavioral_inference__20261026T150000` via `run_behavioral_inference_publication`  
 **Config:** suite defaults — all active dyadic + focal detectors, `legacy_parity`
@@ -135,7 +135,7 @@ Positive counts (logical detectors only; specialists not counted as additional f
 ## Known limitations (non-MVP follow-ups)
 
 - S8 arbitration / bout generation remain out of scope.
-- Model binaries stay lab-local (not committed); fresh clones must configure a registry path once (persisted thereafter).
+- Detector bundles ship under tracked `models/`; operators may still point the registry root elsewhere (path persists thereafter).
 - Two-mouse MVP remains the default gate (`require_exactly_two_mice=true`).
 - No cooperative cancellation; unsupported JSON-expert focal bundles stay non-executable.
 - See [`mvp_scope_and_roadmap.md`](mvp_scope_and_roadmap.md) for the full non-MVP list.

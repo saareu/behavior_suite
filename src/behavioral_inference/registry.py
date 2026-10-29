@@ -1,4 +1,4 @@
-"""Explicit model-registry discovery for Subsystem 07 (no automatic legacy/)."""
+"""Explicit model-registry discovery for Subsystem 07 (no automatic models/)."""
 
 from __future__ import annotations
 
@@ -219,7 +219,7 @@ def discover_model_registry(
 ) -> RegistrySnapshot:
     """Discover dyadic/focal bundles under an explicitly configured root.
 
-    Never implies ``legacy/``. A missing / unset root yields
+    Never implies ``models/``. A missing / unset root yields
     ``status=unavailable`` without raising, so S1–S6 remain usable.
     """
 

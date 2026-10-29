@@ -1,0 +1,8 @@
+{
+  "detector_name": "mutually_disengaged",
+  "target_col": "y_mutually_disengaged",
+  "threshold_f1": 0.04694933071732521,
+  "threshold_working": 0.2,
+  "selected_policy": "manual_working",
+  "notes": "working threshold overrides max-F1 threshold for current inference/debug use"
+}

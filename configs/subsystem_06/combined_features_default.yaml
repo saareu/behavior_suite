@@ -1,6 +1,6 @@
 # Subsystem 06 default settings (Sprint 3).
 # model_registry.root must be set explicitly to a lab/local models tree.
-# The ignored legacy/ directory is never implied at runtime.
+# Tracked models/ is never implied at runtime.
 
 schema_version: combined_features_settings_v1
 smooth_win: 9

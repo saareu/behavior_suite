@@ -107,7 +107,7 @@ Full checklist: [`laboratory_acceptance_checklist.md`](laboratory_acceptance_che
 
 1. No model inference or training UI (intentional MVP boundary).
 2. No cooperative cancellation for extraction.
-3. Optional external model registry; suite does not ship `legacy/models`.
+3. Optional external model registry; detector bundles ship under tracked `models/` (SLEAP media remains gitignored).
 4. Working settings not yet persisted under `combined_features/_gui/`.
 5. No numerical regression against historical Pipeline 50 training caches.
 6. Vendored FF/P50 ports emit DataFrame fragmentation PerformanceWarnings (formulas unchanged).

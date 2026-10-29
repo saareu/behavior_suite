@@ -151,7 +151,7 @@ Adapter **must** retain `provenance[track, node, t]` (uint8) and optionally `pro
 
 ### 1.10 Non-contact model impact of dropping PCHIP / refinement
 
-Inspected all local `feature_spec.json` under `legacy/models/{dyadic,focal}/v1`.
+Inspected all local `feature_spec.json` under `models/{dyadic,focal}/v1`.
 
 | Detector class | Requires `*_is_pchip`? | Requires `nose_any_refined` / `*_was_refined`? | Requires unsuffixed `nose_any_imputed`? |
 | --- | --- | --- | --- |
@@ -381,7 +381,7 @@ Join contract: `left_on=dense_frame_idx`, prefer right key `dense_frame_idx`, `h
 
 | Location | Status |
 | --- | --- |
-| `legacy/models/**` on lab workstation | **Local reference only** (parent `legacy/` is git-excluded) |
+| `models/**` detector bundles | **Tracked** in the suite package (SLEAP `*.mp4` / `*.slp` remain gitignored) |
 | Tracked suite package today | **No** production-packaged dyadic/focal model directory |
 
 S6 MVP **must not** claim models are shipped with the suite unless/until a tracked registry path is added. Compat checking reads an **explicit configured directory** that may point at a local lab path.

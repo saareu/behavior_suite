@@ -1,0 +1,10 @@
+{
+  "detector_name": "nose_body_occ",
+  "target_col": "y_nose_to_body",
+  "n_rows": 44354,
+  "n_pos": 30221,
+  "n_neg": 14133,
+  "precision": 0.9178801164911832,
+  "recall": 0.9490420568478872,
+  "threshold_f1": 0.48245343565940857
+}

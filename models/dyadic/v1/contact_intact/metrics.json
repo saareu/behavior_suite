@@ -1,0 +1,16 @@
+{
+  "detector_name": "contact_intact",
+  "target_col": "y_contact",
+  "threshold": 0.2,
+  "auroc": 1.0,
+  "auprc": 1.0,
+  "precision": 0.9991575091575091,
+  "recall": 1.0,
+  "f1": 0.9995785770562692,
+  "tn": 9289,
+  "fp": 23,
+  "fn": 0,
+  "tp": 27277,
+  "support_pos": 27277,
+  "support_neg": 9312
+}

@@ -54,7 +54,7 @@ Do not invent additional metrics beyond these recorded artifacts.
 
 ## Suggested registry path (this workstation)
 
-`C:\behavior_suite\legacy\models`  
+`C:\behavior_suite\models`  
 (Optional — missing registry must not block extraction; this acceptance run used no registry.)
 
 ---

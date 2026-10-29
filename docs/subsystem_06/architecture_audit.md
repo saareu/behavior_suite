@@ -32,8 +32,8 @@ Pipeline 50 and helpers live under `legacy/` on this workstation:
 | `legacy/src/dynamic_train/frame_features.py` | Core directional pose features (`build_frame_features`) |
 | `legacy/src/io/path_utils.py` | Legacy artifact path templates |
 | `legacy/pipelines/30_impute.py` | Obsolete upstream of FF (not to be restored) |
-| `legacy/models/dyadic/v1/*` | Dyadic detector bundles + `feature_spec.json` |
-| `legacy/models/focal/v1/*` | Focal detector bundles + `feature_spec.json` |
+| `models/dyadic/v1/*` | Dyadic detector bundles + `feature_spec.json` |
+| `models/focal/v1/*` | Focal detector bundles + `feature_spec.json` |
 
 **Git note:** `.git/info/exclude` contains `/legacy/`, so this tree is **local-only** and not part of the tracked suite package. S6 implementation must either vendor required modules into `src/` or explicitly bring selected legacy paths into version control. Do not assume CI or other clones have these files.
 
@@ -349,7 +349,7 @@ Unresolved coordinates remain NaN in S4. Adapter must preserve NaNs so FF missin
 
 ### 4.1 Bundle inventory (local disk)
 
-All paths under `legacy/models/`.
+All paths under `models/`.
 
 #### Active dyadic design (agreed contact split)
 
@@ -379,7 +379,7 @@ All paths under `legacy/models/`.
 | `nose_to_tail` | 133 | Echo-imputed distance features + `tail_any_imputed_j` |
 | `nose_body`, `nose_tail` | 0 | Empty specs — unsupported placeholders |
 
-**Retrained suite-packaged model specs:** not present under tracked `src/` or `configs/`. Compatibility checking must read the local `legacy/models/**/feature_spec.json` paths (or a future vendored copy). Report: **no non-legacy model archive is checked into the suite package today.**
+**Retrained suite-packaged model specs:** not present under tracked `src/` or `configs/`. Compatibility checking must read the local `models/**/feature_spec.json` paths (or a future vendored copy). Report: **no non-legacy model archive is checked into the suite package today.**
 
 ### 4.2 Agreed obsolete feature policy
 
@@ -614,8 +614,8 @@ This file is the S6-A authority. Index entry added in `docs/README.md`.
 | Legacy P50 | `legacy/pipelines/50_dyadic_features.py` |
 | Legacy FF | `legacy/src/dynamic_train/frame_features.py` |
 | Legacy paths | `legacy/src/io/path_utils.py` |
-| Dyadic models | `legacy/models/dyadic/v1/*/feature_spec.json` |
-| Focal models | `legacy/models/focal/v1/*/feature_spec.json` |
+| Dyadic models | `models/dyadic/v1/*/feature_spec.json` |
+| Focal models | `models/focal/v1/*/feature_spec.json` |
 | S5 handoff notes | `docs/subsystem_05/mvp_scope_and_roadmap.md` (§ Future S6 handoff boundary) |
 
 ## Appendix B — S5 / S4 closure commits (context)

@@ -74,7 +74,7 @@ def test_artifact_digest_recorded(mini_registry: Path) -> None:
     assert intact.sha256_matches_expected is False
 
 
-def test_does_not_imply_legacy_path() -> None:
+def test_does_not_imply_models_path() -> None:
     snapshot = discover_model_registry()
     assert snapshot.status == REGISTRY_UNAVAILABLE
     assert snapshot.settings.root is None

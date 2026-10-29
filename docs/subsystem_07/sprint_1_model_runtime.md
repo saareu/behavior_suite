@@ -177,7 +177,7 @@ Routing and smoothing are **not** implemented in Sprint 1.
 
 ## 7. Models successfully loaded (lab smoke)
 
-Registry root used: workstation `legacy/models` (explicitly configured; not an
+Registry root used: workstation `models/` (explicitly configured; not an
 implicit runtime dependency for other clones).
 
 | Bundle | Features | `classes_` | `predict_proba` |
@@ -226,7 +226,7 @@ thresholds, real-model smoke marker `s7_model_smoke`).
 
 - Model binaries remain lab-local; not committed.
 - CI clones without a configured registry skip real-model smoke via
-  `pytest.skip` when `legacy/models` is absent.
+  `pytest.skip` when `models/` is absent.
 - Environments without `[s7]` skip loader paths that need unpickle; unit tests
   that mock `joblib.load` still run when deps are present.
 - Library pins are verified against current lab pickles; retrained bundles may

@@ -19,7 +19,7 @@ from combined_features.contracts import (
 
 @dataclass(frozen=True, slots=True)
 class ModelRegistrySettings:
-    """Explicit path to dyadic/focal detector bundles (never implied from legacy/)."""
+    """Explicit path to dyadic/focal detector bundles (never implied from models/)."""
 
     root: Path | None = None
     dyadic_subdir: str = "dyadic/v1"

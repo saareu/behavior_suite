@@ -1,0 +1,10 @@
+{
+  "detector_name": "nose_to_tail",
+  "target_col": "y_nose_to_tail",
+  "n_rows": 37787,
+  "n_pos": 15899,
+  "n_neg": 21888,
+  "precision": 0.980557113479155,
+  "recall": 0.9896848858418769,
+  "threshold_f1": 0.6635559797286987
+}

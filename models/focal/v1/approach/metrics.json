@@ -1,0 +1,10 @@
+{
+  "detector_name": "approach",
+  "target_col": "y_approach",
+  "n_rows": 259052,
+  "n_pos": 33326,
+  "n_neg": 225726,
+  "precision": 0.9036570284435546,
+  "recall": 0.9209025985716858,
+  "threshold_f1": 0.37660396099090576
+}

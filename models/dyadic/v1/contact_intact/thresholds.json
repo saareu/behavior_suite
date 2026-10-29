@@ -1,0 +1,8 @@
+{
+  "detector_name": "contact_intact",
+  "target_col": "y_contact",
+  "threshold_f1": 0.9615218639373779,
+  "threshold_working": 0.2,
+  "selected_policy": "manual_working",
+  "notes": "working threshold overrides max-F1 threshold for current inference/debug use"
+}

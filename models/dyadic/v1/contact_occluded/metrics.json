@@ -1,0 +1,16 @@
+{
+  "detector_name": "contact_occluded",
+  "target_col": "y_contact_occluded",
+  "threshold": 0.2,
+  "auroc": 0.9833162884552898,
+  "auprc": 0.9919858188536664,
+  "precision": 0.9486359302432873,
+  "recall": 0.9949033902132189,
+  "f1": 0.9712189438548982,
+  "tn": 9785,
+  "fp": 1670,
+  "fn": 158,
+  "tp": 30843,
+  "support_pos": 31001,
+  "support_neg": 11455
+}

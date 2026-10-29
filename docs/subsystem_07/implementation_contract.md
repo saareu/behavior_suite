@@ -712,7 +712,7 @@ src/ui/pages/behavioral_inference_page.py
 
 - S7-B accepted
 - Lab decision on optional-extra pins **or** willingness to discover pins via controlled smoke in this sprint
-- Operator-configured registry root available (local `legacy/models` or equivalent)
+- Operator-configured registry root available (local `models/` or equivalent)
 
 **Deliverables**
 
@@ -815,8 +815,8 @@ These remain open after S7-B freezes; they must not be silently decided in code:
 - `legacy/pipelines/100_behavioral_arbiter.py` (`_expand_dyadic_to_directional`, contact multiplexer boundary)
 - `legacy/configs/dyadic_inference.yaml`
 - `legacy/configs/90_focal_inference.yaml`
-- `legacy/models/dyadic/v1/*/feature_spec.json`, `thresholds.json`, `train_meta.json`, `metrics.json`, `model.joblib` presence + SHA-256
-- `legacy/models/focal/v1/*/feature_spec.json`, `metrics.json`, joblib / JSON expert presence + SHA-256
+- `models/dyadic/v1/*/feature_spec.json`, `thresholds.json`, `train_meta.json`, `metrics.json`, `model.joblib` presence + SHA-256
+- `models/focal/v1/*/feature_spec.json`, `metrics.json`, joblib / JSON expert presence + SHA-256
 
 **Tracked suite**
 

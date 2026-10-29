@@ -11,7 +11,9 @@
 | 05 — Video / Blob Feature Extraction | MVP complete / lab-validated | Consumes eligible S1; feeds S6 Combined Features |
 | 06 - Combined Features | MVP complete / lab-validated | Eligible S4 + S5 -> `dyadic_features_full.parquet` + model-compat report |
 | 07 — Behavioral Inference | MVP complete / lab-validated | Consumes eligible S6; publishes predictions for S8 |
-| 08 — Behavioral Arbitration | MVP complete / lab-validated | Consumes eligible S7 (+ linked S6 features); Group 3 beside S7; Group 4 deferred |
+| 08 — Behavioral Arbitration | MVP complete / lab-validated | Consumes eligible S7 (+ linked S6 features); Group 3 beside S7 |
+| 09 — Results Packaging & Export | Core MVP lab-accepted; optional media/CSV export under design (S9-E1) | Group 4 packaging; consumes eligible S8; S10 later |
+| 10 — Behavioral Review & Editing | Proposed / not started | Consumes S9 packages; optional manual review — not started |
 
 ## Subsystem 01 — Video Preprocessing
 
@@ -81,7 +83,7 @@ S7 MVP is complete and lab-validated. Sprints 1–4 delivered registry, unified
 dyadic/focal inference, immutable artifacts/QC/discovery, and Group 3 GUI.
 Operator laboratory GUI acceptance passed on `E_full_session_integration`
 (2026-10-26) after install/registry/responsiveness remediation and obsolete
-focal-directory cleanup. Model binaries stay lab-local (not committed). S8
+focal-directory cleanup. Detector bundles ship under tracked `models/`. S8
 arbitration remains out of S7 scope; S8 is MVP complete / lab-validated in Group 3.
 
 - [Final MVP Scope, Completion Status, and Roadmap](subsystem_07/mvp_scope_and_roadmap.md)
@@ -106,8 +108,8 @@ responsiveness remediation, scientific E-session audit (**47/47**), and operator
 laboratory GUI acceptance on `E_full_session_integration` (2026-10-28; S8 run
 `behavioral_arbitration__20261028T133953`). Documented deviations from legacy
 Pipeline 100 (invalid-evidence handling, `undefined`, no contact remultiplex)
-are preserved. Manual bout correction stays downstream (legacy Pipeline 110 /
-review). Group 4 Results/Review has **not** started.
+are preserved. Manual bout correction stays downstream (S10 / legacy Pipeline 110
+review). Group 4 packaging is delivered under Subsystem 09.
 
 - [Final MVP Scope, Completion Status, and Roadmap](subsystem_08/mvp_scope_and_roadmap.md)
 - [Architecture Audit (S8-A)](subsystem_08/architecture_audit.md)
@@ -122,6 +124,31 @@ review). Group 4 Results/Review has **not** started.
 S8 consumes eligible S7 prediction runs (plus the linked S6 feature columns for
 gates / vetoes / optical assist / stitch rescue) and publishes immutable ethogram
 states + bouts without modifying S7 outputs.
+
+## Subsystem 09 — Results Packaging & Export (Core MVP Lab-Accepted)
+
+S9-A/S9-B design is accepted. **Sprint 1** delivered headless S8 intake and
+sync-index construction. **Sprint 2** added lossless bout packaging, ethogram
+summaries, and optional `review_emit_v1`. **Sprint 3** publishes immutable S9
+runs with QC, package manifests, discovery, and current eligibility. **Sprint 4**
+adds Group 4 GUI (packaging-only; no S10). **Operator laboratory acceptance for
+the core packaging MVP has passed.** Optional media (MP4) and automated CSV
+export are under architectural design (S9-E1) before final S9 closure — stop for
+review of that audit before implementation.
+
+- [Architecture Audit (S9-A)](subsystem_09/architecture_audit.md)
+- [Implementation Contract (S9-B)](subsystem_09/implementation_contract.md)
+- [Sprint 1 — Input Validation and Synchronization Index](subsystem_09/sprint_1_intake_sync.md)
+- [Sprint 2 — Bout Packaging, Summaries and Export Profiles](subsystem_09/sprint_2_bouts_summaries_exports.md)
+- [Sprint 3 — Immutable Publication, QC and Run Discovery](subsystem_09/sprint_3_publication_qc_discovery.md)
+- [Sprint 4 — GUI Integration and Laboratory Acceptance](subsystem_09/sprint_4_gui_integration.md)
+- [Laboratory Acceptance Checklist](subsystem_09/laboratory_acceptance_checklist.md)
+- [Media and CSV Export Architecture Audit (S9-E1)](subsystem_09/media_csv_export_architecture.md)
+
+Group 4 conceptual separation: S9 packages eligible S8 outputs (plus sync /
+provenance); S10 consumes S9 packages for interactive review and optional
+versioned corrections (unimplemented). Media/CSV exports are optional derivatives
+of existing packages and must not mutate authoritative S8/S9 artifacts.
 
 ## General
 

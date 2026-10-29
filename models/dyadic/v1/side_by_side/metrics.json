@@ -1,0 +1,16 @@
+{
+  "detector_name": "side_by_side",
+  "target_col": "y_side_by_side",
+  "threshold": 0.2,
+  "auroc": 0.9889590602223818,
+  "auprc": 0.9891472828952489,
+  "precision": 0.9764680941276235,
+  "recall": 0.8740037950664137,
+  "f1": 0.9223991188545109,
+  "tn": 4360,
+  "fp": 111,
+  "fn": 664,
+  "tp": 4606,
+  "support_pos": 5270,
+  "support_neg": 4471
+}

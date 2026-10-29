@@ -1,0 +1,10 @@
+{
+  "detector_name": "nose_body_intact",
+  "target_col": "y_nose_to_body",
+  "n_rows": 40443,
+  "n_pos": 30210,
+  "n_neg": 10233,
+  "precision": 0.9854155742003147,
+  "recall": 0.9952664680569347,
+  "threshold_f1": 0.6140819787979126
+}

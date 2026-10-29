@@ -1,0 +1,16 @@
+{
+  "detector_name": "mutually_disengaged",
+  "target_col": "y_mutually_disengaged",
+  "threshold": 0.2,
+  "auroc": 0.9983945728901583,
+  "auprc": 0.9890759348877275,
+  "precision": 0.953952139231327,
+  "recall": 0.9132245748004165,
+  "f1": 0.9331441744990246,
+  "tn": 18981,
+  "fp": 127,
+  "fn": 250,
+  "tp": 2631,
+  "support_pos": 2881,
+  "support_neg": 19108
+}

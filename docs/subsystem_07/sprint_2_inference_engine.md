@@ -200,7 +200,7 @@ is not required for Sprint 2 exit. Legacy scripts write under
 `data/inference/...`, which is not present as a frozen gold artifact in this
 repo. The formula-mirror tests use the same lab `model.joblib` files and the
 E-session `dyadic_features_full.parquet` snippet when available; environments
-without `legacy/models` or `[s7]` skip those tests.
+without `models/` or `[s7]` skip those tests.
 
 ---
 

@@ -12,7 +12,7 @@ import pytest
 from behavioral_inference.loader import probe_runtime_dependencies
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-LAB_MODEL_ROOT = REPO_ROOT / "legacy" / "models"
+LAB_MODEL_ROOT = REPO_ROOT / "models"
 S6_FEATURES = (
     REPO_ROOT
     / "test_cases"

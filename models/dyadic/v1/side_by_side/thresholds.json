@@ -1,0 +1,8 @@
+{
+  "detector_name": "side_by_side",
+  "target_col": "y_side_by_side",
+  "threshold_f1": 0.009483017027378082,
+  "threshold_working": 0.2,
+  "selected_policy": "manual_working",
+  "notes": "working threshold overrides max-F1 threshold for current inference/debug use"
+}

@@ -35,13 +35,13 @@ Pipeline 70 / 90 / 100 and model binaries live under git-ignored `legacy/` on th
 | `legacy/configs/dyadic_inference.yaml` | Active dyadic detectors + working thresholds |
 | `legacy/configs/90_focal_inference.yaml` | Active focal detectors + working thresholds |
 | `legacy/configs/behavioral_arbiter.yaml` | Arbiter / post-processing config |
-| `legacy/models/dyadic/v1/*` | Dyadic detector bundles |
-| `legacy/models/focal/v1/*` | Focal detector bundles |
+| `models/dyadic/v1/*` | Dyadic detector bundles |
+| `models/focal/v1/*` | Focal detector bundles |
 | `legacy/src/io/path_utils.py` | Legacy artifact path templates |
 | `legacy/src/dynamic_train/train_binary_detector.py` | Training path (out of S7 scope) |
 | `legacy/src/dynamic_train/threshold_utils.py` | Training-time threshold helpers (not used by 70/90 at runtime) |
 
-**Smoke check performed (read-only):** pointed S6 `build_model_compat_report` at `legacy/models` against the E-session `dyadic_features_full.parquet`. No `predict_proba` execution; no model loading beyond presence/spec parsing already done by S6.
+**Smoke check performed (read-only):** pointed S6 `build_model_compat_report` at `models/` against the E-session `dyadic_features_full.parquet`. No `predict_proba` execution; no model loading beyond presence/spec parsing already done by S6.
 
 ---
 
@@ -268,7 +268,7 @@ Path: `data/inference/focal/{model_iteration}/{exp_name}/focal_predictions.parqu
 
 ## 4. Model registry and versions
 
-### 4.1 Inventory (local `legacy/models`)
+### 4.1 Inventory (local `models/`)
 
 #### Dyadic `v1` (all have `model.joblib` + `feature_spec.json` + `thresholds.json` + `train_meta.json` + `metrics.json`)
 
@@ -384,7 +384,7 @@ S6 writes a **presence / column / dtype** report only. It:
 - does **not** verify routing columns beyond ordinary feature presence;
 - may be `registry_status=unavailable` when `model_registry.root` is unset (common; E-session artifact is in this state).
 
-**Read-only smoke (2026-10-26):** with `model_registry.root=legacy/models`, all active dyadic/focal joblib detectors reported `status=compatible` and `missing_columns=[]` against the E-session feature table. Obsolete `contact` correctly `unsupported`.
+**Read-only smoke (2026-10-26):** with `model_registry.root=models/`, all active dyadic/focal joblib detectors reported `status=compatible` and `missing_columns=[]` against the E-session feature table. Obsolete `contact` correctly `unsupported`.
 
 ### 5.4 Is S6 compatibility enough to execute models?
 
@@ -626,8 +626,8 @@ Acceptance intent for S7 MVP: reproduce Pipeline 70/90 scientific outputs (withi
 
 **Model bundles**
 
-- All `legacy/models/dyadic/v1/*/feature_spec.json`, `thresholds.json`, `train_meta.json`, `metrics.json`
-- All `legacy/models/focal/v1/*/feature_spec.json`, `metrics.json`, and present binaries / JSON experts
+- All `models/dyadic/v1/*/feature_spec.json`, `thresholds.json`, `train_meta.json`, `metrics.json`
+- All `models/focal/v1/*/feature_spec.json`, `metrics.json`, and present binaries / JSON experts
 
 **Tracked suite**
 
@@ -640,4 +640,4 @@ Acceptance intent for S7 MVP: reproduce Pipeline 70/90 scientific outputs (withi
 
 **Read-only smoke**
 
-- `combined_features.model_compat.build_model_compat_report` against `legacy/models` + E-session features (no prediction).
+- `combined_features.model_compat.build_model_compat_report` against `models/` + E-session features (no prediction).

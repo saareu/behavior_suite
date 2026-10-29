@@ -99,6 +99,17 @@ def test_registry_configuration_persists_across_controller_restarts(
     assert load_persisted_registry_root(settings) == registry.resolve()
 
 
+def test_persisted_legacy_models_path_remaps_to_models(tmp_path: Path) -> None:
+    settings = _FakeSettings()
+    old = tmp_path / "legacy" / "models"
+    new = tmp_path / "models"
+    new.mkdir()
+    settings.setValue(REGISTRY_ROOT_KEY, str(old))
+    loaded = load_persisted_registry_root(settings)
+    assert loaded == new.resolve()
+    assert settings.values[REGISTRY_ROOT_KEY] == str(new.resolve())
+
+
 def test_missing_registry_does_not_crash_gui(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _patch_runtime_deps(monkeypatch)
     session = tmp_path / "session"

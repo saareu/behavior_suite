@@ -68,7 +68,7 @@ s2 = [
 
 # Subsystem 07 behavioral inference runtime (model load + predict_proba).
 # Pins verified 2026-10-26 against lab joblib XGBClassifier bundles under
-# legacy/models (booster serialization format [3, 2, 0]; successful load with
+# models/ (booster serialization format [3, 2, 0]; successful load with
 # xgboost 3.2.0 + scikit-learn 1.6.1 + joblib 1.5.3). Non-inference subsystems
 # remain usable without this extra.
 s7 = [
@@ -99,6 +99,7 @@ include = [
 "combined_features*",
 "behavioral_inference*",
 "behavioral_arbitration*",
+"results_packaging*",
 "cli*",
 "ui*",
 ]
@@ -143,6 +144,7 @@ source = [
 "combined_features",
 "behavioral_inference",
 "behavioral_arbitration",
+"results_packaging",
 "cli",
 ]
 
@@ -199,6 +201,7 @@ known-first-party = [
 "combined_features",
 "behavioral_inference",
 "behavioral_arbitration",
+"results_packaging",
 "cli",
 "ui",
 ]
@@ -216,6 +219,7 @@ packages = [
 "combined_features",
 "behavioral_inference",
 "behavioral_arbitration",
+"results_packaging",
 ]
 check_untyped_defs = true
 disallow_any_generics = true

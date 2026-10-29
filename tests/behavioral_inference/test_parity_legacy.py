@@ -1,6 +1,6 @@
 """Focused legacy parity checks vs Pipeline 70/90 formulas (lab models).
 
-When ``legacy/models`` and ``[s7]`` deps are available, score a small S6
+When ``models`` and ``[s7]`` deps are available, score a small S6
 snippet with S7 and independently re-apply the Pipeline 70/90 scoring steps
 using the same loaded estimators. Binary predictions must match exactly;
 probabilities must match within a documented float tolerance.
@@ -38,7 +38,7 @@ N_FRAMES = 48  # small focused snippet (~96 directional rows)
 
 def _skip_unless_lab() -> None:
     if not lab_registry_available():
-        pytest.skip("lab model registry (legacy/models) not available")
+        pytest.skip("lab model registry (models) not available")
     if not s7_deps_available():
         pytest.skip("optional [s7] dependencies not installed")
     if not S6_FEATURES.is_file():

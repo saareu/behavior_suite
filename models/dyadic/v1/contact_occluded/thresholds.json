@@ -1,0 +1,8 @@
+{
+  "detector_name": "contact_occluded",
+  "target_col": "y_contact_occluded",
+  "threshold_f1": 0.42950692772865295,
+  "threshold_working": 0.2,
+  "selected_policy": "manual_working",
+  "notes": "working threshold overrides max-F1 threshold for current inference/debug use"
+}

@@ -101,7 +101,7 @@ Operator-confirmed GUI acceptance on 2026-10-26 (post-remediation; not synthetic
 | Final GUI run | `behavioral_inference__20261026T163224` (`run_purpose=gui`) |
 | Prior headless lab run | `behavioral_inference__20261026T150000` (same science path; still eligible) |
 | S6 source | `combined_features__20261025T173244` |
-| Registry | `legacy/models` (obsolete conflicting focal directories removed by operator) |
+| Registry | `models/` (obsolete conflicting focal directories removed by operator) |
 | Frames / prediction rows | 36528 / 438336 |
 | QC | structural_ok; 0 warnings; 0 failures; 0 invalid routes |
 | Discovery | currently `eligible` for both completed runs |
@@ -114,7 +114,7 @@ Full checklist: [`laboratory_acceptance_checklist.md`](laboratory_acceptance_che
 
 1. No Subsystem 08 arbitration, reciprocity, hard-gap gates, or bout stitching.
 2. No cooperative cancellation for inference.
-3. Model binaries stay lab-local; suite does not ship `legacy/models`.
+3. Detector bundles ship under tracked `models/`; large SLEAP media (`*.mp4` / `*.slp`) stay gitignored.
 4. Two-mouse gate remains the MVP default (`require_exactly_two_mice=true`).
 5. Unsupported JSON-expert focal bundles (`nose_body` / `nose_tail`) stay non-executable.
 6. Optional continue-on-error across detectors is not the MVP default (fail-fast).
