@@ -21,7 +21,7 @@ This checklist is distinct from automated unit/GUI tests and from the scientific
 ## Architecture (retained)
 
 - **Group 3 — Behavioral Inference:** S7 Behavioral Inference + S8 Behavioral Arbitration.
-- **Group 4 — Results and Review:** delivered under Subsystem 09 (S9 packaging GUI); S10 remains unimplemented.
+- **Group 4 — Results and Review:** delivered as Subsystem 09 (S9 packaging/export) and Subsystem 10 (S10 behavioral review); see subsystem 09/10 docs.
 
 ---
 
@@ -54,4 +54,4 @@ After remediation, cold discovery on the E-session completes in a few seconds (n
 | Date | 2026-10-28 |
 | Session / S7 / S6 / S8 run IDs | `E_full_session_integration` / `behavioral_inference__20261026T163224` / `combined_features__20261025T173244` / `behavioral_arbitration__20261028T133953` |
 | Outcome | ☑ Pass — S8 lab-validated |
-| Blockers / notes | Sole QC warning is intentional Stage 8 morph-close disable (`max_gap_to_fill=0`). Scientific audit 47/47. No independent video ground-truth claim. Group 4 not started. |
+| Blockers / notes | Sole QC warning is intentional Stage 8 morph-close disable (`max_gap_to_fill=0`). Scientific audit 47/47. No independent video ground-truth claim. Group 4 delivered as S9+S10 (outside S8 scope). |

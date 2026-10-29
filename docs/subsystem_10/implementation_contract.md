@@ -2,7 +2,7 @@
 
 ## Implementation Contract (S10-B)
 
-**Status:** Binding design contract **accepted**. Sprint 1–4 headless APIs + Sprint 5 Group 4 GUI implemented; operator laboratory acceptance still open. Remaining deferred MVP items frozen below (U2/U3/U6/U12/U15).  
+**Status:** Binding design contract **accepted**. Sprint 1–4 headless APIs + Sprint 5 Group 4 GUI implemented; **operator laboratory acceptance passed 2026-10-29**. Remaining deferred MVP items frozen below (U2/U3/U6/U12/U15).  
 **Date:** 2026-10-29 (Sprint 5 GUI integration update)  
 **Authority:** Accepted S10-A audit (`architecture_audit.md`) + frozen upstream contracts:
 
@@ -899,6 +899,6 @@ Headless publication, QC, discovery, and `validate_s10_run_for_downstream` are i
 
 ### Sprint 5 implementation note
 
-Group 4 hosts S10 beside S9. Inspection workspace, explicit editing mode, async discovery/decode/window/publish workers with stale-request rejection, and publish/reopen UX are implemented under `src/ui/pages/behavioral_review_page.py` and `src/ui/controllers/behavioral_review_controller.py`. Operator laboratory acceptance remains open — do not mark S10 lab-validated until the checklist is completed. Do not commit or push unless explicitly requested.
+Group 4 hosts S10 beside S9. Inspection workspace, explicit editing mode, async discovery/decode/window/publish workers with stale-request rejection, and publish/reopen UX are implemented under `src/ui/pages/behavioral_review_page.py` and `src/ui/controllers/behavioral_review_controller.py`. Operator laboratory acceptance passed 2026-10-29 — S10 is lab-validated. Deferred U2/U3/U6/U15 remain frozen. Do not commit or push unless explicitly requested.
 
 _End of S10-B implementation contract._

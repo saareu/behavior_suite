@@ -1,6 +1,6 @@
 # S9 Media / CSV Export — GUI Integration (S9-E3)
 
-**Status:** Implemented for architectural / operator review. **Not lab-validated** until the operator completes interactive acceptance.
+**Status:** Implemented and **lab-validated** (operator interactive acceptance 2026-10-29; see laboratory checklist O1–O6).
 
 **Scope:** Group 4 S9 page gains distinct **Export CSV** and **Export Bout Videos** actions over existing eligible packages, plus export-job discovery and incomplete media retry. Core packaging MVP behavior is preserved.
 
@@ -56,17 +56,15 @@ Package under test: `results_package__20261028T181714`.
 
 **Environmental note (S9-E4, 2026-10-29):** eligibility restored. Recorded S7 paths under `legacy/models/...` resolve again via a local junction to validated `models/` artifacts (SHA-256 match). Package is currently eligible; new CSV/media exports are unblocked. Prior S9-E2/E4 jobs under `results_exports/` remain inspectable.
 
-Operator interactive verification (still required — see laboratory checklist):
+Operator interactive verification (completed 2026-10-29 — see laboratory checklist):
 
-- [ ] Full automated CSV: 609 rows + provenance columns
-- [ ] Representative MP4 selection (not all 609) with correct clip bounds and source playback FPS
-- [ ] Completed-job discovery + reopen
-- [ ] CSV and media provenance
-- [ ] No modification of the source S9 package
-- [ ] Ordinary S9 packaging still works when an eligible S8 source exists
-- [ ] Retry/error presentation for incomplete media jobs
-
-**Do not mark the extension lab-validated until the operator completes interactive acceptance.**
+- [x] Full automated CSV: 609 rows + provenance columns
+- [x] Representative MP4 selection (not all 609) with correct clip bounds and source playback FPS
+- [x] Completed-job discovery + reopen
+- [x] CSV and media provenance
+- [x] No modification of the source S9 package
+- [x] Ordinary S9 packaging still works when an eligible S8 source exists
+- [x] Retry/error presentation for incomplete media jobs
 
 ## 5. Non-goals (retained)
 

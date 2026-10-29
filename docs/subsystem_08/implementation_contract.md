@@ -5,7 +5,7 @@
 **Status:** Binding design contract. **S8 MVP complete / lab-validated** (Sprints 1–4 + scientific E-session audit 47/47 + GUI responsiveness remediation + operator laboratory GUI acceptance on 2026-10-28).  
 **Date:** 2026-10-26 (MVP policy appendix recorded with S8-1; S8-3 temporal/publish recorded 2026-10-28; S8-4 GUI + lab closure recorded 2026-10-28)  
 **Authority:** Accepted S8-A audit (`architecture_audit.md`) + source inspection of local `legacy/pipelines/100_behavioral_arbiter.py`, `legacy/configs/behavioral_arbiter.yaml`, Pipeline 110 consumers, S7 prediction contracts (`src/behavioral_inference/`), S6 feature contracts (`src/combined_features/`), and Group 3 GUI patterns.  
-**Follow-on:** Group 4 Results/Review and Pipeline 110 bout packaging remain deferred; no Group 4 implementation has started.
+**Follow-on:** Group 4 Results/Review is delivered as Subsystems 09–10 (packaging + review). S8 itself still does not package clips or host manual bout editing.
 
 S8 converts eligible S7 predictions (+ linked S6 feature columns) into a directional exclusive ethogram, parallel contact / side-by-side channels, and bout tables. It does **not** train models, re-run classifiers, re-fuse S7 contact specialists, overwrite S7 artifacts, package review clips, or host manual bout correction.
 
@@ -805,4 +805,4 @@ Headless entry: `run_behavioral_arbitration_publication(request)` with atomic pu
 
 ## 14. Stop point / MVP closure
 
-S8-B documentation is accepted. S8-1…S8-4 are implemented. Headless E-session extraction, scientific consistency audit (**47/47**), GUI responsiveness remediation, and **operator interactive GUI acceptance** are complete. S8 MVP is **lab-validated** and resides in **Group 3 beside S7**. Group 4 Results/Review, Pipeline 110 packaging, overlay video, and manual bout editing remain out of MVP and have **not** started.
+S8-B documentation is accepted. S8-1…S8-4 are implemented. Headless E-session extraction, scientific consistency audit (**47/47**), GUI responsiveness remediation, and **operator interactive GUI acceptance** are complete. S8 MVP is **lab-validated** and resides in **Group 3 beside S7**. Overlay video and manual bout editing remain out of S8 scope. Group 4 packaging/review is delivered as S9+S10.

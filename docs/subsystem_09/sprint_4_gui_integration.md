@@ -150,12 +150,12 @@ Cold discovery time is background computation, not GUI freeze. Page open returns
 
 ---
 
-## 9. Outstanding operator acceptance and blockers
+## 9. Operator acceptance
 
-- Interactive checklist in [laboratory_acceptance_checklist.md](laboratory_acceptance_checklist.md) is **not** signed off.
-- Do **not** mark S9 lab-validated until the operator completes that checklist.
-- Remaining MVP blockers outside Sprint 4: S10 (deferred), portable embed / clips / GIFs (U-R3/U-R4), additional export profiles.
+- Interactive checklist in [laboratory_acceptance_checklist.md](laboratory_acceptance_checklist.md) signed **Pass** on 2026-10-29 (core packaging + concise CSV/media export O1–O6).
+- S9 is **lab-validated**. S10 is delivered as a separate Group 4 page (see subsystem 10 docs).
+- Remaining non-MVP follow-ups outside Sprint 4: portable embed / clips / GIFs (U-R3/U-R4), additional export profiles.
 
 ---
 
-_End of Sprint 4 documentation. Stop for architectural review._
+_End of Sprint 4 documentation._

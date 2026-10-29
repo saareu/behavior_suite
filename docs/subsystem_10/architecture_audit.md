@@ -5,9 +5,11 @@
 **Status:** Discovery milestone (documentation only). **S10-A accepted as architecture input for S10-B.**  
 **Date:** 2026-10-29  
 **Scope:** Inventory reusable GUI / video / review infrastructure; map S9 → S10 consumption contracts (with S8/S7 evidence); propose synchronized inspection, manual-review, review-state, and immutable reviewed-output architectures; identify performance risks, scientific safeguards, unresolved decisions, and a bounded sprint roadmap. **No S10 production code in this sprint. No S9 changes, commits, or pushes.**  
-**Authority:** Tracked S9 package `src/results_packaging/` + `docs/subsystem_09/` (accepted S9-A/S9-B; core packaging lab-accepted; media/CSV export closure in progress); S8 `src/behavioral_arbitration/`; S7 `src/behavioral_inference/`; S3 `src/tracking_correction/` + tracking review UI; S1 `src/preprocess/` seek/sync; Group 1–4 GUI under `src/ui/`; local git-ignored `legacy/` Pipeline 110 + `bout_review_app` (workstation-only); E-session scale facts already recorded in S9 docs.
+**Authority:** Tracked S9 package `src/results_packaging/` + `docs/subsystem_09/` (accepted S9-A/S9-B); S8 `src/behavioral_arbitration/`; S7 `src/behavioral_inference/`; S3 `src/tracking_correction/` + tracking review UI; S1 `src/preprocess/` seek/sync; Group 1–4 GUI under `src/ui/`; local git-ignored `legacy/` Pipeline 110 + `bout_review_app` (workstation-only); E-session scale facts already recorded in S9 docs.
 
-**Follow-on:** Binding schemas, U1–U15 resolutions, and sprint gates live in **[S10-B Implementation Contract](implementation_contract.md)**. Do **not** implement S10 production code, modify S1–S9 science, redesign packaging, commit, or push until that contract is accepted.
+**Post-audit status (2026-10-29):** S10 was subsequently implemented (Sprints 1–5) and operator laboratory acceptance passed. S9 core packaging and CSV/media export are also operator lab-validated. Section 0.1 below remains the discovery-time snapshot.
+
+**Follow-on:** Binding schemas, U1–U15 resolutions, and sprint gates live in **[S10-B Implementation Contract](implementation_contract.md)**.
 
 **Legend used below:**  
 - **Fact** — observed in repository / local legacy / accepted S9–S8 contracts.  

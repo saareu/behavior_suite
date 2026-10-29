@@ -12,8 +12,8 @@
 | 06 - Combined Features | MVP complete / lab-validated | Eligible S4 + S5 -> `dyadic_features_full.parquet` + model-compat report |
 | 07 — Behavioral Inference | MVP complete / lab-validated | Consumes eligible S6; publishes predictions for S8 |
 | 08 — Behavioral Arbitration | MVP complete / lab-validated | Consumes eligible S7 (+ linked S6 features); Group 3 beside S7 |
-| 09 — Results Packaging & Export | Core MVP lab-accepted; media/CSV export backend + GUI (S9-E3) pending operator lab acceptance | Group 4 packaging; optional exports; S10 later |
-| 10 — Behavioral Review & Editing | S10-B accepted; Sprint 1–5 implemented (headless + Group 4 GUI); operator lab acceptance open | Consumes eligible S9 packages; publishes additive reviewed runs; Group 4 beside S9 |
+| 09 — Results Packaging & Export | MVP complete / lab-validated (core packaging + CSV/media export) | Group 4 packaging; optional exports; feeds S10 |
+| 10 — Behavioral Review & Editing | MVP complete / lab-validated (inspection + controlled edit + publish) | Consumes eligible S9 packages; publishes additive reviewed runs; Group 4 beside S9 |
 
 ## Subsystem 01 — Video Preprocessing
 
@@ -108,8 +108,8 @@ responsiveness remediation, scientific E-session audit (**47/47**), and operator
 laboratory GUI acceptance on `E_full_session_integration` (2026-10-28; S8 run
 `behavioral_arbitration__20261028T133953`). Documented deviations from legacy
 Pipeline 100 (invalid-evidence handling, `undefined`, no contact remultiplex)
-are preserved. Manual bout correction stays downstream (S10 / legacy Pipeline 110
-review). Group 4 packaging is delivered under Subsystem 09.
+are preserved. Manual bout correction is delivered under Subsystem 10 (Group 4 beside S9).
+Group 4 packaging is delivered under Subsystem 09.
 
 - [Final MVP Scope, Completion Status, and Roadmap](subsystem_08/mvp_scope_and_roadmap.md)
 - [Architecture Audit (S8-A)](subsystem_08/architecture_audit.md)
@@ -125,18 +125,18 @@ S8 consumes eligible S7 prediction runs (plus the linked S6 feature columns for
 gates / vetoes / optical assist / stitch rescue) and publishes immutable ethogram
 states + bouts without modifying S7 outputs.
 
-## Subsystem 09 — Results Packaging & Export (Core MVP Lab-Accepted)
+## Subsystem 09 — Results Packaging & Export (MVP Complete / Lab-Validated)
 
 S9-A/S9-B design is accepted. **Sprint 1** delivered headless S8 intake and
 sync-index construction. **Sprint 2** added lossless bout packaging, ethogram
 summaries, and optional `review_emit_v1`. **Sprint 3** publishes immutable S9
 runs with QC, package manifests, discovery, and current eligibility. **Sprint 4**
-adds Group 4 GUI (packaging-only; no S10). **Operator laboratory acceptance for
-the core packaging MVP has passed.** Optional media (MP4) and automated CSV
-export architecture (S9-E1) was accepted; **S9-E2** delivered the headless
-export backend; **S9-E3** adds Group 4 Export CSV / Bout Videos controls, frame-
-addressed encode verification, and MVP eligibility (currently eligible packages
-only). Stop for architectural review / operator lab acceptance of the extension.
+adds Group 4 GUI (packaging-only on the S9 page; S10 is a separate Group 4 page).
+**Operator laboratory acceptance passed on 2026-10-29** for core packaging and
+the concise CSV/media export path (O1–O6) on eligible E-session package
+`results_package__20261028T181714`. Optional media (MP4) and automated CSV
+export: S9-E1 architecture accepted; **S9-E2** headless backend; **S9-E3** Group 4
+Export CSV / Bout Videos controls with currently-eligible-package gates.
 
 - [Architecture Audit (S9-A)](subsystem_09/architecture_audit.md)
 - [Implementation Contract (S9-B)](subsystem_09/implementation_contract.md)
@@ -152,10 +152,10 @@ only). Stop for architectural review / operator lab acceptance of the extension.
 
 Group 4 conceptual separation: S9 packages eligible S8 outputs (plus sync /
 provenance); S10 consumes S9 packages for interactive review and optional
-versioned corrections (unimplemented). Media/CSV exports are optional derivatives
-of existing packages and must not mutate authoritative S8/S9 artifacts.
+versioned corrections. Media/CSV exports are optional derivatives of existing
+packages and must not mutate authoritative S8/S9 artifacts.
 
-## Subsystem 10 — Behavioral Review & Editing (Sprint 1–5 Implemented; Lab Acceptance Open)
+## Subsystem 10 — Behavioral Review & Editing (MVP Complete / Lab-Validated)
 
 S10-A/S10-B design is accepted. **Sprint 1** delivered headless eligible S9
 package intake, dense↔prepared synchronization via `sync_index`, prepared-video
@@ -168,11 +168,12 @@ single-writer lock, and linear undo/redo across restart. **Sprint 4** publishes
 immutable `behavioral_review__*` runs with QC, discovery, current eligibility,
 stale-parent publish blocking (U12), and automated vs reviewed source-type
 selection. **Sprint 5** adds the Group 4 Qt GUI beside S9 (inspection workspace,
-async decode/window/publish workers, editing gates, publish/reopen UX) plus the
-operator laboratory acceptance checklist. Deferred MVP items remain frozen
-(U2 reciprocal tools, U3 `uncertain`, U6 reviewed exports, U15 reject
-status-only). **Do not mark S10 lab-validated until the operator checklist
-passes.**
+async decode/window/publish workers, editing gates, publish/reopen UX).
+**Operator laboratory acceptance passed on 2026-10-29** (synchronized inspection,
+controlled editing/undo-redo, and publication/immutability). Deferred MVP items
+remain frozen (U2 reciprocal tools, U3 `uncertain`, U6 reviewed exports, U15
+reject status-only). Acceptance does **not** claim biological ground-truth
+accuracy.
 
 - [Architecture Audit (S10-A)](subsystem_10/architecture_audit.md)
 - [Implementation Contract (S10-B)](subsystem_10/implementation_contract.md)

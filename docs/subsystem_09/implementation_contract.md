@@ -2,8 +2,8 @@
 
 ## Implementation Contract (S9-B)
 
-**Status:** Binding design contract. **S9-B accepted; Sprint 1–4 implemented** (headless + Group 4 GUI). U-R1–U-R8 resolved. **Operator laboratory acceptance pending** (automated Sprint 4 evidence recorded).  
-**Date:** 2026-10-28 (Sprint 4 GUI integration)  
+**Status:** Binding design contract. **S9-B accepted; Sprint 1–4 implemented** (headless + Group 4 GUI). U-R1–U-R8 resolved. **Operator laboratory acceptance passed 2026-10-29** (core packaging + CSV/media export).  
+**Date:** 2026-10-28 (Sprint 4 GUI integration; operator sign-off 2026-10-29)  
 **Authority:** Accepted S9-A audit (`architecture_audit.md`) + source inspection of:
 
 - S8 package `src/behavioral_arbitration/` (states / bouts / QC / discovery / `validate_s8_run_for_downstream`)
@@ -16,7 +16,7 @@
 - E-session artifacts under `test_cases/E_full_session_integration/` (S8 run `behavioral_arbitration__20261028T133953` / S9 `results_package__20261028T181714`)
 - Group 3/4 GUI patterns under `src/ui/`
 
-**Follow-on:** Sprint 4 delivered Group 4 S9 packaging GUI. Stop for architectural review. Do **not** implement S10. Do not alter S1–S8 science. Do not commit/push unless explicitly requested.
+**Follow-on:** Sprint 4 delivered Group 4 S9 packaging GUI. S10 is delivered as a separate Group 4 page (subsystem 10). Do not alter S1–S8 science from S9. Do not commit/push unless explicitly requested.
 
 S9 assembles an immutable, analysis-ready package from one currently eligible S8 run plus validated synchronization and provenance references. It does **not** re-arbitrate behavior, re-collapse scientific bouts, train models, host ethogram/video review, or publish versioned manual corrections (S10).
 
@@ -720,11 +720,11 @@ Group 4 — Behavioral Results & Review navigation in `main_window.py` (**Sprint
 
 | | |
 | --- | --- |
-| **Scope** | Group 4 S9 page; task runner; discovery/reopen; lab checklist on E-session; **no S10** |
+| **Scope** | Group 4 S9 page; task runner; discovery/reopen; lab checklist on E-session; packaging-only (S10 is a separate Group 4 page) |
 | **Deliverables** | GUI page/controller; laboratory acceptance checklist doc; Sprint 4 report |
 | **Dependencies** | S9-3 |
 | **Tests** | GUI smoke; responsiveness; no video hash on poll; packaging in background; package open summary within interactive budget |
-| **Acceptance** | **Automated met (2026-10-28).** Group 4 S9 GUI packages E-session and opens package metadata/summaries without S10. **Operator interactive checklist still pending** — S9 is not lab-validated until that sign-off. |
+| **Acceptance** | **Automated met (2026-10-28).** **Operator interactive checklist Pass (2026-10-29)** — core packaging + CSV/media export. S9 is lab-validated. |
 
 Scope note: media extraction is deferred unless review reopens it after S9-3; it must not block analysis packaging. See [sprint_4_gui_integration.md](sprint_4_gui_integration.md) and [laboratory_acceptance_checklist.md](laboratory_acceptance_checklist.md).
 

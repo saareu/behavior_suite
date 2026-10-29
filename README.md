@@ -46,11 +46,25 @@ removal. Subsystem 06 Combined Features is MVP complete / lab-validated.
 
 **Subsystem 07 - Behavioral Inference** is MVP complete / lab-validated. From an eligible S6 `dyadic_features_full.parquet`, Group 3 exposes registry configuration, unified dyadic/focal detector selection, thresholds/`legacy_parity`, background inference to canonical + wide prediction artifacts, QC, and run discovery (including `stale_models` when recorded model digests are missing or changed). Operator laboratory GUI acceptance passed on session `E_full_session_integration` (2026-10-26; final GUI run `behavioral_inference__20261026T163224`). The standard Windows installer installs S2+S7 runtime libraries into `behavior_suite_gui`. Trusted model binaries remain lab-local and are configured once in the S7 registry path (persisted across launches). Documented non-MVP follow-ups remain: cooperative cancellation, multi-animal beyond two tracks, and shipping packaged models.
 
-**Subsystem 08 - Behavioral Arbitration and Bout Generation** is MVP complete / lab-validated. From an eligible full-ethogram S7 prediction run plus its exact linked S6 features, Group 3 (beside S7) exposes S8-ready source selection, scientific arbitration settings, background publication of exclusive ethogram states and bouts, QC/provenance, and run discovery. Operator laboratory GUI acceptance passed on session `E_full_session_integration` (2026-10-28) after responsiveness remediation; lab-validation run `behavioral_arbitration__20261028T133953` (36,528 samples, 73,056 directional rows, 609 bouts; scientific consistency audit 47/47). Documented deviations from legacy Pipeline 100 (invalid-evidence handling, `undefined`, no contact remultiplex; Stage 8 morph-close disabled at `max_gap_to_fill=0`) are preserved. Documented non-MVP follow-ups remain: Group 4 Results/Review, Pipeline 110 packaging, overlay video, manual bout editing, cooperative cancellation, and K>2. Group 4 implementation has not started.
+**Subsystem 08 - Behavioral Arbitration and Bout Generation** is MVP complete / lab-validated. From an eligible full-ethogram S7 prediction run plus its exact linked S6 features, Group 3 (beside S7) exposes S8-ready source selection, scientific arbitration settings, background publication of exclusive ethogram states and bouts, QC/provenance, and run discovery. Operator laboratory GUI acceptance passed on session `E_full_session_integration` (2026-10-28) after responsiveness remediation; lab-validation run `behavioral_arbitration__20261028T133953` (36,528 samples, 73,056 directional rows, 609 bouts; scientific consistency audit 47/47). Documented deviations from legacy Pipeline 100 (invalid-evidence handling, `undefined`, no contact remultiplex; Stage 8 morph-close disabled at `max_gap_to_fill=0`) are preserved. Documented non-MVP follow-ups remain: S8 overlay video, cooperative cancellation, and K>2. Group 4 is delivered as Subsystems 09–10 (see below).
 
-S1–S8 MVP progress does not make the suite a complete scientific-analysis
-pipeline. Elaborate model-optimization UI, active learning, and Group 4 review
-remain future or downstream responsibilities.
+**Subsystem 09 — Results Packaging & Export** is MVP complete / lab-validated. Group 4 exposes packaging of eligible S8 ethogram/bout outputs into immutable `results_package__*` runs (sync index, bout packaging, summaries, QC, discovery) plus optional CSV and bout-video exports under `results_exports/`. Operator laboratory acceptance passed on 2026-10-29 (core packaging + concise CSV/media export on eligible E-session package `results_package__20261028T181714`). S9 is packaging/export only: no ethogram timeline or bout editing on the S9 page.
+
+**Subsystem 10 — Behavioral Review & Editing** is MVP complete / lab-validated. Group 4 (beside S9) opens eligible S9 packages for synchronized inspection, optional controlled draft corrections with undo/redo, and immutable `behavioral_review__*` publication. Operator laboratory acceptance passed on 2026-10-29 (synchronized inspection + controlled editing/undo-redo + publication/immutability). Deferred S10 items remain frozen (reciprocal edit tool, `uncertain` status, reviewed media re-export). Acceptance does **not** claim biological ground-truth ethogram accuracy.
+
+Application navigation groups:
+
+```text
+Group 1 — Data Preparation → S1–S4
+Group 2 — Feature Processing → S5–S6
+Group 3 — Behavioral Inference → S7–S8
+Group 4 — Behavioral Results & Review → S9–S10
+```
+
+S1–S10 MVP progress does not imply numerical parity with every legacy Pipeline
+cache or independent video ground-truth validation of ethogram labels. Elaborate
+model-optimization UI and active learning remain future or downstream
+responsibilities.
 
 ---
 
@@ -63,6 +77,10 @@ git pull
 scripts\install_windows_gui.bat
 scripts\launch_windows_gui.bat
 ```
+
+**Fresh machine prerequisites** (external `sleap-nn` 0.3.x, lab SLEAP inference
+models, S7 `models/` registry, FFmpeg, session inputs, optional Git LFS): see
+[`docs/releases/installation_prerequisites.md`](docs/releases/installation_prerequisites.md).
 
 The installer recreates the dedicated `behavior_suite_gui` Conda environment
 with Python 3.12, FFmpeg 7.1.1 from conda-forge, PySide6 6.11.1 from
@@ -159,6 +177,9 @@ recorded S1 digests. Subsystem 6 combines eligible S4+S5 into
 dyadic/focal detectors from an eligible S6 run and publishes prediction
 artifacts. Subsystem 8 (Group 3, beside S7) arbitrates eligible S7 predictions
 with linked S6 features into exclusive ethogram labels and bout tables.
+Subsystem 9 (Group 4) packages eligible S8 outputs (optional CSV / bout-video
+exports). Subsystem 10 (Group 4, beside S9) inspects eligible S9 packages and
+optionally publishes reviewed runs after controlled draft edits.
 
 ---
 
@@ -195,6 +216,14 @@ Current active documentation:
   scope, laboratory acceptance evidence, and S8 boundary
 - `docs/subsystem_08/mvp_scope_and_roadmap.md` — finalized Subsystem 08 MVP
   scope, laboratory acceptance evidence, and non-MVP follow-ups
+- `docs/subsystem_09/laboratory_acceptance_checklist.md` — Subsystem 09
+  packaging/export laboratory acceptance (passed)
+- `docs/subsystem_10/laboratory_acceptance_checklist.md` — Subsystem 10 review
+  laboratory acceptance (passed)
+- `docs/releases/installation_prerequisites.md` — fresh-machine install
+  prerequisites for S1–S10 lab use
+- `docs/releases/v0.1.0.md` — internal laboratory MVP release notes
+- `docs/releases/s1_s10_mvp_readiness.md` — S1–S10 release audit / verification
 - `docs/general/development/ai_coding_guide.md` — repository-wide AI-assisted
   development guidance
 
@@ -235,9 +264,9 @@ Subsystem 05 is the video / blob feature-extraction subsystem. Its MVP
 consumes eligible S1 prepared video and background, extracts morphology and
 temporal occlusion features onto the shared 120 Hz timeline, and writes
 `blob_features.parquet` with automated QC. Combined pose+blob features (S6),
-behavioral inference (S7), and behavioral arbitration / bout generation (S8)
-are implemented and lab-validated. Group 4 Results/Review and Pipeline 110
-bout packaging remain deferred.
+behavioral inference (S7), behavioral arbitration / bout generation (S8),
+results packaging / export (S9), and behavioral review / editing (S10) are
+implemented and lab-validated across Groups 1–4.
 
 ---
 
@@ -265,6 +294,8 @@ Before making repository changes, read the applicable documentation:
   implementing Subsystem 07
 - `docs/subsystem_08/mvp_scope_and_roadmap.md` — required when changing or
   implementing Subsystem 08
+- `docs/subsystem_09/` and `docs/subsystem_10/` — required when changing or
+  implementing Group 4 packaging or review
 - `docs/general/development/ai_coding_guide.md`
 
 Keep changes scoped, preserve scientific invariants, and update tests for any

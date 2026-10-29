@@ -13,7 +13,7 @@ See also: [Implementation Contract](implementation_contract.md), [MVP Scope and 
 
 | Area | Change |
 | --- | --- |
-| Group 3 navigation | `MainWindow` adds **S8 — Behavioral Arbitration** beside S7; remembers `_last_behavior_page` (`s7`/`s8`); shared session; soft nav during S8; S2/S4 hard locks unchanged. Group 4 Results/Review is **not** implemented. |
+| Group 3 navigation | `MainWindow` adds **S8 — Behavioral Arbitration** beside S7; remembers `_last_behavior_page` (`s7`/`s8`); shared session; soft nav during S8; S2/S4 hard locks unchanged. Group 4 Results/Review is delivered separately as S9+S10. |
 | Page / controller | `BehavioralArbitrationPage` + `BehavioralArbitrationController` |
 | S7 source selection | Assessed S7 combo via `list_s7_options_for_s8` / `assess_s7_for_s8`; default newest **S8-ready**; manual selection preserved; exact linked S6 shown |
 | Scientific config | Frozen suite YAML defaults; Stage 8 morph close vs Stage 10 gap fill distinguished; immutable request snapshot |
@@ -142,10 +142,10 @@ Arbitration formulas were **not** changed for this remediation or MVP closure. T
 
 See [`laboratory_acceptance_checklist.md`](laboratory_acceptance_checklist.md). Operator signed off the remediated GUI on 2026-10-28. S8 is **MVP complete / lab-validated**.
 
-Retained architecture: S8 stays in **Group 3** beside S7. Group 4 Results/Review is deferred and has not started.
+Retained architecture: S8 stays in **Group 3** beside S7. Group 4 Results/Review is delivered as Subsystems 09–10 (see subsystem 09/10 docs).
 
 ---
 
 ## Out of scope (unchanged)
 
-Manual bout editing, video overlays, Pipeline 110, model inference/retraining, threshold optimization, new arbitration rules, Group 4 navigation.
+Manual bout editing and video overlays **inside S8**, model inference/retraining, threshold optimization, and new arbitration rules. Packaging and interactive review live in Group 4 (S9/S10), not in S8.

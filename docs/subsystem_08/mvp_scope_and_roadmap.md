@@ -28,7 +28,7 @@ MainWindow
 | Export / QC / discovery | `export`, `qc`, `results`, `run_discovery`, `runner` |
 | UI | `BehavioralArbitrationController`, `BehavioralArbitrationPage`, `MainWindow` Group 3 |
 
-S8 consumes eligible S7 predictions plus the **exact** linked S6 feature columns. It does **not** train models, re-run S7 classifiers, remultiplex contact specialists, overwrite S7 artifacts, package review clips, or host manual bout correction. Group 4 Results/Review is **not** started.
+S8 consumes eligible S7 predictions plus the **exact** linked S6 feature columns. It does **not** train models, re-run S7 classifiers, remultiplex contact specialists, overwrite S7 artifacts, package review clips, or host manual bout correction. Group 4 Results/Review is delivered as Subsystems 09–10 (see `docs/subsystem_09/` and `docs/subsystem_10/`).
 
 ---
 
@@ -121,7 +121,7 @@ Arbitration formulas and numeric thresholds were **not** changed for MVP closure
 
 ## Known limitations (non-MVP follow-ups)
 
-1. No Group 4 Results/Review navigation or Pipeline 110 bout packaging / emit floors.
+1. Group 4 packaging/review is out of S8 scope (delivered as S9+S10; see subsystem 09/10 docs).
 2. No cooperative cancellation for arbitration.
 3. No overlay video or manual bout editing inside S8.
 4. Two-mouse (K=2) gate remains the MVP default; K>2 out of scope.

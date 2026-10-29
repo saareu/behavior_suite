@@ -1,6 +1,6 @@
 # Subsystem 10 — Sprint 5: Integrated Review GUI and Laboratory Validation
 
-**Status:** Implemented (Group 4 GUI + tests + operator checklist). Stop for architectural review / operator lab acceptance.  
+**Status:** Implemented and **lab-validated** (Group 4 GUI + tests; operator laboratory acceptance signed 2026-10-29).  
 **Date:** 2026-10-29  
 **Authority:** Accepted S10-B (`implementation_contract.md`) + Sprint 1–4 headless APIs.  
 **Non-scope:** Reviewed CSV/media exports (U6), reciprocal editing (U2), `uncertain` (U3), S1–S9 science mutation, commit/push.
@@ -163,14 +163,16 @@ Measure with `scripts/_s10_gui_responsiveness_audit.py`. Exact workstation numbe
 
 ---
 
-## 10. Outstanding operator acceptance
+## 10. Operator acceptance
 
-S10 is **not** marked lab-validated until the operator completes:
+Operator laboratory acceptance signed **Pass** on 2026-10-29:
 
 [`laboratory_acceptance_checklist.md`](laboratory_acceptance_checklist.md)
+
+Covers synchronized inspection, controlled draft editing with undo/redo, and publication/immutability. Does **not** claim biological ground-truth accuracy.
 
 ---
 
 ## 11. Stop point
 
-Sprint 5 implementation is merged for operator laboratory acceptance. Operator lab acceptance remains open — do not mark S10 lab-validated until the checklist passes.
+Sprint 5 implementation is merged. S10 is **lab-validated**. Deferred MVP items (U2/U3/U6/U15) remain frozen.
