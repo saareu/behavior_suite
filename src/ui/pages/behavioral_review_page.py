@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -17,10 +18,12 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QSlider,
     QSpinBox,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -33,18 +36,23 @@ from behavioral_review import (
     CHANNEL_EXCLUSIVE,
     CHANNEL_SIDE_BY_SIDE,
     EXCLUSIVE_ETHOGRAM_LABELS,
+    GALLERY_SOURCE_AUTOMATED,
+    GALLERY_SOURCE_PUBLISHED,
     MODE_EDITING,
     SOURCE_TYPE_AUTOMATED,
     SOURCE_TYPE_REVIEWED,
     STATUS_ACCEPTED,
     STATUS_REJECTED,
     STATUS_UNREVIEWED,
+    STATUS_VOIDED,
     BehavioralReviewError,
     EditingError,
     ReviewedPublicationResult,
 )
 from behavioral_review.contracts import REVIEW_TARGET_FPS
 from ui.controllers.behavioral_review_controller import (
+    VIEW_MODE_GALLERY,
+    VIEW_MODE_TIMELINE,
     BehavioralReviewController,
     BehavioralReviewUiError,
     DecodeRequestIdentity,
@@ -66,9 +74,12 @@ from ui.tasks import (
     GuiTaskRunner,
     TaskAlreadyRunningError,
 )
+from ui.widgets.bout_gallery_view import BoutGalleryView
 from ui.widgets.ethogram_timeline_view import EthogramTimelineView
 from ui.widgets.pose_video_view import PoseVideoView
 from ui.workspace.page_binding import request_shared_session
+
+_GALLERY_PREVIEW_TICK_MS = 120
 
 _BOUT_COLUMNS = (
     "bout_id",
@@ -121,7 +132,23 @@ class BehavioralReviewPage(QWidget):
         self._playback_timer = QTimer(self)
         self._playback_timer.setInterval(_PLAYBACK_TICK_MS)
         self._playback_timer.timeout.connect(self._on_playback_tick)
+        self._gallery_preview_timer = QTimer(self)
+        self._gallery_preview_timer.setInterval(_GALLERY_PREVIEW_TICK_MS)
+        self._gallery_preview_timer.timeout.connect(self._on_gallery_preview_tick)
+        self._gallery_surface_closed = False
         self.refresh_from_state()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self.shutdown_gallery_surface()
+        self._stop_playback()
+        super().closeEvent(event)
+
+    def shutdown_gallery_surface(self) -> None:
+        """Stop preview timer/workers before this page or its cards are destroyed."""
+
+        self._gallery_surface_closed = True
+        self._gallery_preview_timer.stop()
+        self.controller.shutdown_gallery_previews()
 
     @property
     def has_running_task(self) -> bool:
@@ -175,6 +202,8 @@ class BehavioralReviewPage(QWidget):
             self._sync_scrubber()
             self._populate_bout_table()
             self._apply_timeline_from_state()
+            self._sync_view_mode_controls()
+            self._sync_gallery_from_state()
             self.evidence_text.setPlainText(state.evidence_text)
             self.provenance_text.setPlainText(state.provenance_text)
             self.reconstruction_text.setPlainText(state.reconstruction_text)
@@ -399,6 +428,87 @@ class BehavioralReviewPage(QWidget):
         bouts_layout.addLayout(filter_row)
         bouts_layout.addWidget(self.bout_table)
 
+        # Timeline vs Gallery mode (inspection surface only; editing MODE stays
+        # on the right rail). Gallery is read-only and never creates drafts.
+        view_mode_row = QHBoxLayout()
+        self.timeline_mode_radio = QRadioButton("Timeline")
+        self.gallery_mode_radio = QRadioButton("Gallery")
+        self.timeline_mode_radio.setChecked(True)
+        self.view_mode_group = QButtonGroup(self)
+        self.view_mode_group.addButton(self.timeline_mode_radio)
+        self.view_mode_group.addButton(self.gallery_mode_radio)
+        # Both radios must connect: QRadioButton.toggled(False) is ignored by
+        # `_view_mode_toggled`, so Gallery selection only fires when Gallery
+        # itself emits toggled(True).
+        self.timeline_mode_radio.toggled.connect(self._view_mode_toggled)
+        self.gallery_mode_radio.toggled.connect(self._view_mode_toggled)
+        view_mode_row.addWidget(QLabel("View"))
+        view_mode_row.addWidget(self.timeline_mode_radio)
+        view_mode_row.addWidget(self.gallery_mode_radio)
+        view_mode_row.addStretch(1)
+
+        timeline_page = QWidget()
+        timeline_page_layout = QVBoxLayout(timeline_page)
+        timeline_page_layout.setContentsMargins(0, 0, 0, 0)
+        timeline_page_layout.addWidget(timeline_group)
+        timeline_page_layout.addWidget(bouts_group)
+
+        gallery_group = QGroupBox(
+            "Behavior gallery (read-only exclusive bouts; no bulk actions yet)"
+        )
+        gallery_layout = QVBoxLayout(gallery_group)
+        gallery_filters = QHBoxLayout()
+        self.gallery_source_combo = QComboBox()
+        self.gallery_source_combo.addItem("Automated (S9)", GALLERY_SOURCE_AUTOMATED)
+        self.gallery_source_combo.addItem("Published (S10)", GALLERY_SOURCE_PUBLISHED)
+        self.gallery_source_combo.currentIndexChanged.connect(
+            self._gallery_source_changed
+        )
+        self.gallery_focal_combo = QComboBox()
+        self.gallery_focal_combo.addItem("(all mice)", None)
+        self.gallery_focal_combo.currentIndexChanged.connect(
+            self._gallery_filters_changed
+        )
+        self.gallery_label_combo = QComboBox()
+        self.gallery_label_combo.addItem("(all labels)", None)
+        self.gallery_label_combo.currentIndexChanged.connect(
+            self._gallery_filters_changed
+        )
+        self.gallery_status_combo = QComboBox()
+        self.gallery_status_combo.addItem("(all statuses)", None)
+        for status in (
+            STATUS_UNREVIEWED,
+            STATUS_ACCEPTED,
+            STATUS_REJECTED,
+            STATUS_VOIDED,
+        ):
+            self.gallery_status_combo.addItem(status, status)
+        self.gallery_status_combo.currentIndexChanged.connect(
+            self._gallery_filters_changed
+        )
+        gallery_filters.addWidget(QLabel("Source"))
+        gallery_filters.addWidget(self.gallery_source_combo)
+        gallery_filters.addWidget(QLabel("Mouse"))
+        gallery_filters.addWidget(self.gallery_focal_combo)
+        gallery_filters.addWidget(QLabel("Label"))
+        gallery_filters.addWidget(self.gallery_label_combo)
+        gallery_filters.addWidget(QLabel("Status"))
+        gallery_filters.addWidget(self.gallery_status_combo, 1)
+        self.gallery_view = BoutGalleryView()
+        self.gallery_view.card_selected.connect(self._gallery_card_selected)
+        self.gallery_view.open_in_timeline_requested.connect(
+            self._gallery_open_in_timeline
+        )
+        self.gallery_view.visible_cards_changed.connect(
+            self._gallery_visible_cards_changed
+        )
+        gallery_layout.addLayout(gallery_filters)
+        gallery_layout.addWidget(self.gallery_view, 1)
+
+        self.view_stack = QStackedWidget()
+        self.view_stack.addWidget(timeline_page)
+        self.view_stack.addWidget(gallery_group)
+
         evidence_group = QGroupBox("Evidence / provenance / reconstruction")
         evidence_layout = QVBoxLayout(evidence_group)
         self.evidence_text = QTextEdit()
@@ -521,8 +631,8 @@ class BehavioralReviewPage(QWidget):
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(viewer_group, 1)
-        left_layout.addWidget(timeline_group)
-        left_layout.addWidget(bouts_group)
+        left_layout.addLayout(view_mode_row)
+        left_layout.addWidget(self.view_stack, 2)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -766,6 +876,8 @@ class BehavioralReviewPage(QWidget):
             return
         self._last_shown_prepared_frame_idx = None
         self._last_bout_table_fingerprint = None
+        self.controller.state.gallery_index = None
+        self.controller.invalidate_gallery_previews()
         self.refresh_from_state()
         if self.controller.state.run_error:
             QMessageBox.warning(self, "Open incomplete", self.controller.state.run_error)
@@ -1057,6 +1169,22 @@ class BehavioralReviewPage(QWidget):
         self._playing = False
         self.play_button.setText("Play")
         self._playback_timer.stop()
+
+    def _start_gallery_previews(self) -> None:
+        if self._gallery_surface_closed:
+            return
+        if self.controller.state.view_mode != VIEW_MODE_GALLERY:
+            return
+        if self.controller.state.editing_session is None:
+            return
+        if self.controller.state.gallery_preview_scheduler is None:
+            return
+        if not self._gallery_preview_timer.isActive():
+            self._gallery_preview_timer.start()
+
+    def _stop_gallery_previews(self) -> None:
+        self._gallery_preview_timer.stop()
+        self.controller.pause_gallery_previews()
 
     def _on_playback_tick(self) -> None:
         if not self._playing:
@@ -1744,6 +1872,179 @@ class BehavioralReviewPage(QWidget):
             segments=timeline.segments,
             lod_level=timeline.lod_level,
         )
+        self.timeline.set_bout_highlight(
+            self.controller.state.gallery_highlight_start,
+            self.controller.state.gallery_highlight_end,
+        )
+
+    def _sync_view_mode_controls(self) -> None:
+        state = self.controller.state
+        want_gallery = state.view_mode == VIEW_MODE_GALLERY
+        with _signals_blocked(self.timeline_mode_radio, self.gallery_mode_radio):
+            self.gallery_mode_radio.setChecked(want_gallery)
+            self.timeline_mode_radio.setChecked(not want_gallery)
+        self.view_stack.setCurrentIndex(1 if want_gallery else 0)
+        if want_gallery:
+            self._start_gallery_previews()
+        else:
+            self._stop_gallery_previews()
+
+    def _sync_gallery_from_state(self) -> None:
+        state = self.controller.state
+        with _signals_blocked(
+            self.gallery_source_combo,
+            self.gallery_focal_combo,
+            self.gallery_label_combo,
+            self.gallery_status_combo,
+        ):
+            src_idx = self.gallery_source_combo.findData(state.gallery_source_kind)
+            if src_idx >= 0:
+                self.gallery_source_combo.setCurrentIndex(src_idx)
+            self._rebuild_gallery_filter_combos(state.gallery_index)
+            if state.gallery_focal_filter is not None:
+                idx = self.gallery_focal_combo.findData(int(state.gallery_focal_filter))
+                if idx >= 0:
+                    self.gallery_focal_combo.setCurrentIndex(idx)
+            if state.gallery_label_filter:
+                idx = self.gallery_label_combo.findData(str(state.gallery_label_filter))
+                if idx >= 0:
+                    self.gallery_label_combo.setCurrentIndex(idx)
+            if state.gallery_status_filter:
+                idx = self.gallery_status_combo.findData(str(state.gallery_status_filter))
+                if idx >= 0:
+                    self.gallery_status_combo.setCurrentIndex(idx)
+        if state.view_mode == VIEW_MODE_GALLERY:
+            if state.gallery_index is None and state.editing_session is not None:
+                try:
+                    self.controller.refresh_gallery_index()
+                except BehavioralReviewUiError as exc:
+                    self.status_message.emit(str(exc))
+            self.gallery_view.set_index(
+                self.controller.state.gallery_index,
+                selected_card_id=state.gallery_selected_card_id,
+            )
+        else:
+            self.gallery_view.set_selected_card(state.gallery_selected_card_id)
+
+    def _rebuild_gallery_filter_combos(self, index) -> None:
+        self.gallery_focal_combo.clear()
+        self.gallery_focal_combo.addItem("(all mice)", None)
+        self.gallery_label_combo.clear()
+        self.gallery_label_combo.addItem("(all labels)", None)
+        if index is None:
+            return
+        for focal in index.available_focal_ids:
+            self.gallery_focal_combo.addItem(f"focal {focal}", int(focal))
+        for label in index.available_labels:
+            self.gallery_label_combo.addItem(str(label), str(label))
+
+    def _view_mode_toggled(self, checked: bool) -> None:
+        if self._syncing_widgets or not checked:
+            return
+        mode = (
+            VIEW_MODE_GALLERY
+            if self.gallery_mode_radio.isChecked()
+            else VIEW_MODE_TIMELINE
+        )
+        if mode == self.controller.state.view_mode:
+            # Radios already agree with controller; avoid a redundant gallery rebuild.
+            return
+        try:
+            self.controller.set_view_mode(mode)
+        except BehavioralReviewUiError as exc:
+            self.status_message.emit(str(exc))
+            self._sync_view_mode_controls()
+            return
+        self.refresh_from_state()
+        if mode == VIEW_MODE_GALLERY:
+            self.status_message.emit(
+                "Gallery A1: read-only exclusive bout browser (no corrections)."
+            )
+
+    def _gallery_source_changed(self) -> None:
+        if self._syncing_widgets:
+            return
+        kind = self.gallery_source_combo.currentData()
+        try:
+            self.controller.set_gallery_source_kind(str(kind))
+        except BehavioralReviewUiError as exc:
+            QMessageBox.warning(self, "Gallery source", str(exc))
+            self.status_message.emit(str(exc))
+            self._sync_gallery_from_state()
+            return
+        self.refresh_from_state()
+
+    def _gallery_filters_changed(self) -> None:
+        if self._syncing_widgets:
+            return
+        focal = self.gallery_focal_combo.currentData()
+        label = self.gallery_label_combo.currentData()
+        status = self.gallery_status_combo.currentData()
+        try:
+            self.controller.set_gallery_filters(
+                focal_id=int(focal) if focal is not None else None,
+                label=str(label) if label is not None else None,
+                status=str(status) if status is not None else None,
+            )
+        except BehavioralReviewUiError as exc:
+            self.status_message.emit(str(exc))
+            return
+        self._sync_gallery_from_state()
+
+    def _gallery_card_selected(self, card_id: str) -> None:
+        # Selection alone does not leave gallery; double-click opens timeline.
+        self.controller.state.gallery_selected_card_id = str(card_id)
+        index = self.controller.state.gallery_index
+        if index is None:
+            return
+        try:
+            card = index.card_by_id(str(card_id))
+        except Exception:  # noqa: BLE001
+            return
+        self.controller.state.gallery_highlight_start = int(card.start_sample_idx)
+        self.controller.state.gallery_highlight_end = int(card.end_sample_idx)
+
+    def _gallery_open_in_timeline(self, card_id: str) -> None:
+        self._stop_playback()
+        try:
+            decode_id = self.controller.select_gallery_card(
+                str(card_id), switch_to_timeline=True
+            )
+        except BehavioralReviewUiError as exc:
+            QMessageBox.warning(self, "Cannot open bout", str(exc))
+            self.status_message.emit(str(exc))
+            return
+        self.refresh_from_state()
+        self._apply_decode_identity(decode_id)
+        self.status_message.emit(f"Opened gallery bout in timeline: {card_id}")
+
+    def _gallery_visible_cards_changed(self, card_ids: object) -> None:
+        if self._gallery_surface_closed:
+            return
+        if self.controller.state.view_mode != VIEW_MODE_GALLERY:
+            return
+        ids = tuple(card_ids) if isinstance(card_ids, (list, tuple)) else ()
+        self.controller.set_gallery_visible_cards([str(x) for x in ids])
+        self._start_gallery_previews()
+
+    def _on_gallery_preview_tick(self) -> None:
+        if self._gallery_surface_closed:
+            self._gallery_preview_timer.stop()
+            return
+        if self.controller.state.view_mode != VIEW_MODE_GALLERY:
+            self._stop_gallery_previews()
+            return
+        if self.controller.state.gallery_preview_scheduler is None:
+            self._gallery_preview_timer.stop()
+            return
+        frames = self.controller.tick_gallery_previews()
+        for frame in frames:
+            if frame.skipped_plateau:
+                continue
+            if frame.image_bgr is not None:
+                self.gallery_view.apply_preview_frame(
+                    frame.request.card_id, frame.image_bgr
+                )
 
     def _bout_table_fingerprint(
         self, rows: tuple[dict[str, object], ...]

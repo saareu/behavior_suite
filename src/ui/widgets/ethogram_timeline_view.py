@@ -42,6 +42,8 @@ class EthogramTimelineView(QWidget):
         self._lanes: tuple[EthogramLaneMeta, ...] = ()
         self._segments: tuple[TimelineSegment, ...] = ()
         self._lod = "full"
+        self._highlight_start: int | None = None
+        self._highlight_end: int | None = None
         self.setMinimumHeight(140)
         self.setMouseTracking(True)
 
@@ -75,6 +77,23 @@ class EthogramTimelineView(QWidget):
         self._playhead = 0
         self._lanes = ()
         self._segments = ()
+        self._highlight_start = None
+        self._highlight_end = None
+        self.update()
+
+    def set_bout_highlight(
+        self,
+        start_sample_idx: int | None,
+        end_sample_idx: int | None,
+    ) -> None:
+        """Highlight an inclusive dense bout span (gallery deep-link aid)."""
+
+        if start_sample_idx is None or end_sample_idx is None:
+            self._highlight_start = None
+            self._highlight_end = None
+        else:
+            self._highlight_start = int(start_sample_idx)
+            self._highlight_end = int(end_sample_idx)
         self.update()
 
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
@@ -127,6 +146,27 @@ class EthogramTimelineView(QWidget):
                     color = QColor(color.red(), color.green(), color.blue(), 180)
                 painter.fillRect(x0, lane_rect_y + 2, width, _LANE_HEIGHT - 4, color)
             y += _LANE_HEIGHT + _LANE_GAP
+
+        # Selected bout highlight (gallery deep-link; display only).
+        if (
+            self._highlight_start is not None
+            and self._highlight_end is not None
+            and self._highlight_end >= self._highlight_start
+        ):
+            hs = max(self._start, self._highlight_start)
+            he = min(self._end, self._highlight_end)
+            if he >= hs:
+                x0 = track_left + int((hs - self._start) / span * track_width)
+                x1 = track_left + int((he - self._start + 1) / span * track_width)
+                painter.fillRect(
+                    x0,
+                    4,
+                    max(2, x1 - x0),
+                    self.height() - 8,
+                    QColor(255, 235, 59, 40),
+                )
+                painter.setPen(QPen(QColor("#ffeb3b"), 1, Qt.PenStyle.DashLine))
+                painter.drawRect(x0, 4, max(2, x1 - x0), self.height() - 8)
 
         # Playhead (dense authority).
         if self._start <= self._playhead <= self._end:

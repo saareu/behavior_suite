@@ -1,9 +1,9 @@
 # Post-v0.1.1 — S10 Review Efficiency, Visualization, and PI Reporting
 
-**Status:** Architecture / design proposal only. Stop for architectural review.  
-**Date:** 2026-11-01 (**D0 revised** same date — see [`d0_workspace_architecture.md`](d0_workspace_architecture.md))  
-**Baseline:** Behavior Suite **v0.1.1** released; S1–S10 MVP lab-validated.  
-**Non-scope of this document’s follow-on coding (until accepted):** production code, scientific algorithms, S8 output schemas / arbitration / parallel-channel predictions, commits, pushes.
+**Status:** **Gallery A1 accepted (read-only).** A2 bulk actions / PI report / overlays remain deferred.  
+**Date:** 2026-11-01 (**D0 closed**; **Gallery A1** accepted same date — see also [`d0_workspace_architecture.md`](d0_workspace_architecture.md))  
+**Baseline:** Behavior Suite **v0.1.1** released; S1–S10 MVP lab-validated; D0 workspace MVP closed at `e81d530`.  
+**Non-scope of remaining follow-ons:** A2 bulk accept/reject, PI HTML report, overlay generation, subsession science, S8 schema changes.
 
 **Legend**
 
@@ -588,6 +588,55 @@ Do not globalize selected S8/S9 run ids.
 | **Tests** | Headless gallery query grouping; plateau/preview_plan bounds; bulk status journal events; GUI worker stale-token tests; no media-job prerequisite test |
 | **Dependencies** | S10 MVP (done). D0 recommended in parallel. Not blocked on B/C |
 
+#### Gallery A1 implementation record (2026-11-01) — **accepted**
+
+**Shipped (A1 read-only browser only):**
+
+| Concern | Implementation |
+| --- | --- |
+| Headless index | `src/behavioral_review/gallery.py` — `GalleryIndex` / `GalleryCard` / `GalleryQuery`; exclusive-only; group by effective label |
+| Sources | Explicit `automated` (S9 package bouts) vs `published` (S10 reviewed bouts + status parquet). **Never merged** into one row set; review status is not silently transferred onto automated cards |
+| Preview decode | `src/behavioral_review/gallery_preview.py` — `GalleryPreviewScheduler` over `PreparedFrameAccessor` + `SyncMap`/`clip_bounds`; lazy visible-only; no eager GIF/MP4 |
+| GUI | S10 page Timeline \| Gallery toggle (`QStackedWidget`); `src/ui/widgets/bout_gallery_view.py`; filters for mouse / label / status / source |
+| Deep-link | Double-click / open → dense playhead + direction + timeline highlight via `select_gallery_card` (no corrections, no draft creation) |
+| Tests | `tests/behavioral_review/test_gallery_a1.py`; `tests/ui/test_behavioral_review_gallery_radio.py`; `tests/ui/test_behavioral_review_gallery_lifecycle.py` |
+
+**Closure audit — Qt teardown / lifecycle (2026-11-01):**
+
+| Finding | Classification | Evidence / action |
+| --- | --- | --- |
+| FIX-GALLERY-RADIO | Fixed earlier | Gallery radio `toggled` wired; click-path tests green |
+| False-visible all cards under `QScrollArea` | **Gallery A1 lifecycle defect (fixed)** | Expanding preview + stretch + sync emit before layout settled marked ~538 E-session cards visible → decode thrash (`dropped_queue_count` thousands). Minimal fix: Preferred size policy, no trailing stretch, deferred visibility emit, reject collapsed widgets, page `shutdown_gallery_surface()` + scheduler closed-worker reject |
+| Windows process abort after green assertions | **Pre-existing offscreen Qt limitation** (not a remaining unexplained A1 defect) | Same class as v0.1.1 note: monolithic/offscreen UI can abort at interpreter/Qt atexit (`0xC0000409`) after tests print passed. E-session smokes with live gallery previews + ordered shutdown printed `FUNCTIONAL_OK` and exited **0**; combined suites may still abort intermittently at process exit without failing assertions |
+| E-session ordered teardown smoke | Pass | 538 exclusive cards; ~3 viewport-visible; scheduler `n_visible≈3`; `dropped_queue_count=0`; process exit code **0** |
+
+A1 is accepted for read-only gallery use. Do **not** treat intermittent post-assertion Qt atexit aborts as A1 product regressions unless a new in-session crash reproduces with non-zero functional failure.
+
+**Performance limits (A1 defaults, validated by focused tests):**
+
+| Limit | Value | Notes |
+| --- | --- | --- |
+| Max concurrent preview decodes | **4** (`GALLERY_DEFAULT_MAX_CONCURRENT_PREVIEWS`) | Chosen via `measure_preview_concurrency_capacity` helper + bounded-queue tests; not an unbounded pool |
+| Max queued preview requests | **16** | Scroll storms drop oldest pending |
+| Preview pad | **0.5 s** prepared-fps (`GALLERY_DEFAULT_PREVIEW_PAD_SEC`) | Reuses `compute_clip_bounds`; clamps at video edges |
+| Decode domain | Prepared frames only | Dense endpoints remain authority; plateau skip via `read_frame_if_changed` |
+| Source switch | Generation + `source_token` invalidate | Stale callbacks rejected; caches cleared |
+
+**Source semantics (binding for A1):**
+
+1. Automated gallery rows use packaged `behavior_bouts` identities (`package_bout_id` = `bout_id`); status defaults to `unreviewed`.
+2. Published gallery rows use reviewed bout identities (`reviewed_bout_id`); lineage fields may point at package/S8 ids for deep-link and corrected badges only.
+3. Opening Gallery never creates a draft, never appends journal events, and never requires a media_export job.
+
+**Explicitly deferred to A2 / later (not in A1):**
+
+- Bulk accept / reject / unreviewed for visible groups
+- Single-card status actions from the gallery surface
+- Outlier badges / sort-by-outlier
+- Working-draft gallery overlay as a third source kind
+- PI report export, overlay burn-in, GIF generation
+- Contact/SBS secondary gallery mode
+
 ### Increment B — PI-facing report export
 
 | Item | Content |
@@ -691,10 +740,11 @@ Defer: model-training UIs, active learning, reciprocal tool (U2), `uncertain` (U
 
 ## 10. Stop point
 
-This document is **architecture-only**. No production code, scientific algorithm, or output-contract changes were made for this task. No commit or push.
+**D0:** shared workspace MVP closed (see [`d0_workspace_architecture.md`](d0_workspace_architecture.md)).  
+**Gallery A1:** **accepted** — read-only behavior-grouped bout browser against the shared analysis target, including FIX-GALLERY-RADIO and teardown/visibility lifecycle closure above.
 
-**D0 status:** design revised and extracted to [`d0_workspace_architecture.md`](d0_workspace_architecture.md). **Stop for architectural review** of the workspace model before implementation.
+**Still deferred:** A2 bulk/single gallery status actions, PI report (B), overlays (C), subsession science processing. No release tag from this closure.
 
-**Next step after operator review:** accept/amend P1–P14 and **W1–W7**; confirm D0-A…D0-D sequence (especially whether D0-C rides with gallery); then authorize **D0-A** (+ parallel gallery A as appropriate) under a binding implementation contract without weakening S8/S9/S10 scientific freezes.
+**Next authorized increment:** **A2** (status-only bulk/single gallery actions through existing journal APIs) and/or **B** (PI HTML) using the A1 `GalleryCard` / preview_plan contracts; keep S8/S9 science schemas frozen.
 
 _End of post-v0.1.1 S10 review and visualization architecture proposal._

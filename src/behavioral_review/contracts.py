@@ -41,6 +41,14 @@ ETHOGRAM_WINDOW_SCHEMA_VERSION = "behavioral_review_ethogram_window_v1"
 BOUT_BROWSER_SCHEMA_VERSION = "behavioral_review_bout_browser_v1"
 EVIDENCE_WINDOW_SCHEMA_VERSION = "behavioral_review_evidence_window_v1"
 TIMELINE_VIEW_SCHEMA_VERSION = "behavioral_review_timeline_view_v1"
+GALLERY_INDEX_SCHEMA_VERSION = "behavioral_review_gallery_index_v1"
+GALLERY_CARD_SCHEMA_VERSION = "behavioral_review_gallery_card_v1"
+GALLERY_SOURCE_AUTOMATED = "automated"
+GALLERY_SOURCE_PUBLISHED = "published"
+# Practical A1 preview concurrency (validated by focused tests; not unbounded).
+GALLERY_DEFAULT_MAX_CONCURRENT_PREVIEWS = 4
+GALLERY_DEFAULT_MAX_QUEUED_PREVIEW_REQUESTS = 16
+GALLERY_DEFAULT_PREVIEW_PAD_SEC = 0.5
 CORRECTION_EVENTS_SCHEMA_VERSION = "behavioral_review_correction_events_v1"
 JOURNAL_CURSOR_SCHEMA_VERSION = "behavioral_review_journal_cursor_v1"
 WORKING_MANIFEST_SCHEMA_VERSION = "behavioral_review_working_manifest_v1"

@@ -7,7 +7,7 @@ correction logic stays in ``behavioral_review`` — never duplicated here.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,6 +18,10 @@ import pandas as pd
 
 from behavioral_review import (
     EXCLUSIVE_ETHOGRAM_LABELS,
+    GALLERY_DEFAULT_MAX_CONCURRENT_PREVIEWS,
+    GALLERY_DEFAULT_PREVIEW_PAD_SEC,
+    GALLERY_SOURCE_AUTOMATED,
+    GALLERY_SOURCE_PUBLISHED,
     MODE_EDITING,
     MODE_INSPECTION,
     SOURCE_TYPE_AUTOMATED,
@@ -30,6 +34,9 @@ from behavioral_review import (
     BoutFilter,
     EditingError,
     EditingSession,
+    GalleryIndex,
+    GalleryPreviewScheduler,
+    GalleryQuery,
     InspectionError,
     PublicationError,
     ReviewedProjectSummary,
@@ -37,7 +44,11 @@ from behavioral_review import (
     ReviewedRunSummary,
     SessionError,
     TimelineView,
+    build_gallery_from_automated_bouts,
+    build_gallery_from_published_review,
     classify_analysis_source,
+    deep_link_target_for_card,
+    gallery_source_kind_from_analysis,
     open_editing_session,
     reopen_reviewed_run,
     summarize_behavioral_review_project,
@@ -71,6 +82,9 @@ READINESS_OTHER = "other"
 VIEW_SOURCE_AUTOMATED = "automated"
 VIEW_SOURCE_WORKING = "working_draft"
 VIEW_SOURCE_REVIEWED = "reviewed_published"
+
+VIEW_MODE_TIMELINE = "timeline"
+VIEW_MODE_GALLERY = "gallery"
 
 
 class BehavioralReviewUiError(ValueError):
@@ -365,6 +379,20 @@ class BehavioralReviewUiState:
     unexpected_error_detail: str | None = None
     inspected_published_only: bool = False
     exclusive_labels: tuple[str, ...] = EXCLUSIVE_ETHOGRAM_LABELS
+    # Gallery A1 (read-only; never creates drafts or journal events).
+    view_mode: str = VIEW_MODE_TIMELINE
+    gallery_source_kind: str = GALLERY_SOURCE_AUTOMATED
+    gallery_index: GalleryIndex | None = None
+    gallery_selected_card_id: str | None = None
+    gallery_focal_filter: int | None = None
+    gallery_label_filter: str | None = None
+    gallery_status_filter: str | None = None
+    gallery_highlight_start: int | None = None
+    gallery_highlight_end: int | None = None
+    gallery_preview_scheduler: GalleryPreviewScheduler | None = None
+    gallery_preview_pad_sec: float = GALLERY_DEFAULT_PREVIEW_PAD_SEC
+    gallery_max_concurrent_previews: int = GALLERY_DEFAULT_MAX_CONCURRENT_PREVIEWS
+    gallery_generation: int = 0
 
 
 class BehavioralReviewController:
@@ -1659,6 +1687,276 @@ class BehavioralReviewController:
                 "Re-open the draft against the current workspace target."
             )
 
+    # --- gallery A1 (read-only) ---------------------------------------------
+
+    def set_view_mode(self, mode: str) -> str:
+        value = str(mode or "").strip().lower()
+        if value not in {VIEW_MODE_TIMELINE, VIEW_MODE_GALLERY}:
+            raise BehavioralReviewUiError(
+                f"Unknown view mode {mode!r}; expected timeline or gallery."
+            )
+        self.state.view_mode = value
+        if value == VIEW_MODE_GALLERY and self.state.editing_session is not None:
+            self.refresh_gallery_index()
+        if value == VIEW_MODE_TIMELINE:
+            # Keep index but pause previews when leaving gallery.
+            self.pause_gallery_previews()
+        return value
+
+    def set_gallery_source_kind(self, kind: str) -> str:
+        try:
+            normalized = gallery_source_kind_from_analysis(kind)
+        except InspectionError as exc:
+            raise BehavioralReviewUiError(str(exc)) from exc
+        if (
+            normalized == GALLERY_SOURCE_PUBLISHED
+            and self.state.view_source != VIEW_SOURCE_REVIEWED
+            and self.state.selected_review_run_id is None
+        ):
+            raise BehavioralReviewUiError(
+                "Open or select a published S10 review before using published gallery."
+            )
+        self.state.gallery_source_kind = normalized
+        if self.state.editing_session is not None:
+            self.refresh_gallery_index()
+        return normalized
+
+    def set_gallery_filters(
+        self,
+        *,
+        focal_id: int | None = None,
+        label: str | None = None,
+        status: str | None = None,
+    ) -> GalleryIndex | None:
+        self.state.gallery_focal_filter = focal_id
+        self.state.gallery_label_filter = label
+        self.state.gallery_status_filter = status
+        return self.refresh_gallery_index()
+
+    def refresh_gallery_index(self) -> GalleryIndex | None:
+        """Rebuild the read-only gallery index for the pinned source.
+
+        Never creates drafts, never writes journals, and never merges automated
+        bout rows with reviewed bout rows.
+        """
+
+        session = self.state.editing_session
+        if session is None:
+            self.state.gallery_index = None
+            self._close_gallery_scheduler()
+            return None
+        query = GalleryQuery(
+            focal_ids=(
+                frozenset({int(self.state.gallery_focal_filter)})
+                if self.state.gallery_focal_filter is not None
+                else None
+            ),
+            labels=(
+                frozenset({str(self.state.gallery_label_filter)})
+                if self.state.gallery_label_filter
+                else None
+            ),
+            statuses=(
+                frozenset({str(self.state.gallery_status_filter)})
+                if self.state.gallery_status_filter
+                else None
+            ),
+        )
+        sync = session.inspection.sync
+        package_run_id = str(self.state.package_run_id or session.package_run_id)
+        package_dir = (
+            str(self.state.package_dir)
+            if self.state.package_dir is not None
+            else None
+        )
+        pad = float(self.state.gallery_preview_pad_sec)
+        source_kind = self.state.gallery_source_kind
+        try:
+            if source_kind == GALLERY_SOURCE_AUTOMATED:
+                index = build_gallery_from_automated_bouts(
+                    session.inspection.source.behavior_bouts,
+                    sync,
+                    package_run_id=package_run_id,
+                    package_dir=package_dir,
+                    query=query,
+                    pre_context_sec=pad,
+                    post_context_sec=pad,
+                )
+            else:
+                payload = self._load_published_gallery_payload()
+                index = build_gallery_from_published_review(
+                    payload["reviewed_behavior_bouts"],
+                    sync,
+                    package_run_id=package_run_id,
+                    review_run_id=str(payload["review_run_id"]),
+                    review_bout_status=payload.get("review_bout_status"),
+                    automated_bouts=session.inspection.source.behavior_bouts,
+                    package_dir=package_dir,
+                    review_run_dir=str(payload["run_dir"]),
+                    query=query,
+                    pre_context_sec=pad,
+                    post_context_sec=pad,
+                )
+        except (InspectionError, BehavioralReviewError, PublicationError) as exc:
+            raise BehavioralReviewUiError(str(exc)) from exc
+        self.state.gallery_index = index
+        self.state.gallery_generation += 1
+        if (
+            self.state.gallery_selected_card_id is not None
+            and all(
+                c.card_id != self.state.gallery_selected_card_id for c in index.cards
+            )
+        ):
+            self.state.gallery_selected_card_id = None
+            self.state.gallery_highlight_start = None
+            self.state.gallery_highlight_end = None
+        self._ensure_gallery_scheduler(index)
+        return index
+
+    def select_gallery_card(
+        self,
+        card_id: str | None,
+        *,
+        switch_to_timeline: bool = True,
+    ) -> DecodeRequestIdentity | None:
+        """Deep-link a gallery card into the timeline/editor (no corrections)."""
+
+        session = self.state.editing_session
+        if session is None:
+            raise BehavioralReviewUiError("Open a package before selecting a gallery bout.")
+        if not card_id:
+            self.state.gallery_selected_card_id = None
+            self.state.gallery_highlight_start = None
+            self.state.gallery_highlight_end = None
+            return None
+        index = self.state.gallery_index
+        if index is None:
+            index = self.refresh_gallery_index()
+        if index is None:
+            raise BehavioralReviewUiError("Gallery index is empty.")
+        try:
+            card = index.card_by_id(card_id)
+        except InspectionError as exc:
+            raise BehavioralReviewUiError(str(exc)) from exc
+        target = deep_link_target_for_card(card)
+        self.state.gallery_selected_card_id = card.card_id
+        self.state.gallery_highlight_start = int(target["start_sample_idx"])
+        self.state.gallery_highlight_end = int(target["end_sample_idx"])
+        if target["focal_id"] is not None and target["partner_id"] is not None:
+            self.select_direction(int(target["focal_id"]), int(target["partner_id"]))
+        self.select_channel(str(target["channel"]))
+        decode_id: DecodeRequestIdentity | None = None
+        seek_bout_id = target.get("seek_bout_id")
+        if seek_bout_id:
+            try:
+                session.inspection.bouts.get(str(seek_bout_id))
+                decode_id = self.select_bout(str(seek_bout_id))
+            except (InspectionError, BehavioralReviewUiError, SessionError):
+                # Reviewed geometry may not match a live packaged bout id.
+                mapping = session.seek_sample(
+                    int(target["start_sample_idx"]), decode=False
+                )
+                self._apply_playhead(mapping)
+                self.state.selected_bout_id = (
+                    str(seek_bout_id) if seek_bout_id else self.state.selected_bout_id
+                )
+                decode_id = self.begin_decode_request()
+        else:
+            mapping = session.seek_sample(int(target["start_sample_idx"]), decode=False)
+            self._apply_playhead(mapping)
+            decode_id = self.begin_decode_request()
+        if switch_to_timeline:
+            self.state.view_mode = VIEW_MODE_TIMELINE
+            self.pause_gallery_previews()
+        return decode_id
+
+    def set_gallery_visible_cards(self, card_ids: Sequence[str]) -> None:
+        scheduler = self.state.gallery_preview_scheduler
+        if scheduler is None:
+            return
+        scheduler.set_visible_card_ids(tuple(card_ids))
+
+    def tick_gallery_previews(self) -> list[Any]:
+        scheduler = self.state.gallery_preview_scheduler
+        if scheduler is None or self.state.view_mode != VIEW_MODE_GALLERY:
+            return []
+        return scheduler.tick()
+
+    def pause_gallery_previews(self) -> None:
+        scheduler = self.state.gallery_preview_scheduler
+        if scheduler is not None:
+            scheduler.set_visible_card_ids(())
+
+    def shutdown_gallery_previews(self) -> None:
+        """Stop preview workers without closing the inspection session.
+
+        Safe to call from page teardown: clears visibility, drops the scheduler,
+        and does not block the GUI thread waiting for decode workers.
+        """
+
+        self.pause_gallery_previews()
+        self._close_gallery_scheduler()
+
+    def invalidate_gallery_previews(self) -> None:
+        scheduler = self.state.gallery_preview_scheduler
+        if scheduler is not None:
+            token = (
+                f"{self.state.package_run_id}:{self.state.gallery_source_kind}:"
+                f"{self.state.gallery_generation}"
+            )
+            scheduler.invalidate(new_source_token=token)
+
+    def _load_published_gallery_payload(self) -> dict[str, Any]:
+        review_dir = self.state.review_run_dir
+        if review_dir is None and self.state.selected_review_run_id:
+            for opt in self.state.review_options:
+                if opt.run_id == self.state.selected_review_run_id and not opt.is_draft:
+                    review_dir = opt.run_dir
+                    break
+        if review_dir is None:
+            raise BehavioralReviewUiError(
+                "Published gallery requires an opened or selected published review run."
+            )
+        return reopen_reviewed_run(review_dir)
+
+    def _ensure_gallery_scheduler(self, index: GalleryIndex) -> None:
+        session = self.state.editing_session
+        if session is None or session.inspection.video is None:
+            self._close_gallery_scheduler()
+            return
+        video_path = session.inspection.video.video_path
+        token = (
+            f"{self.state.package_run_id}:{index.source.source_kind}:"
+            f"{index.source.review_run_id}:{self.state.gallery_generation}"
+        )
+        scheduler = self.state.gallery_preview_scheduler
+        needs_new = (
+            scheduler is None
+            or Path(scheduler.video_path) != Path(video_path)
+            or not str(scheduler.source_token).startswith(
+                f"{self.state.package_run_id}:{index.source.source_kind}:"
+            )
+        )
+        if needs_new:
+            self._close_gallery_scheduler()
+            scheduler = GalleryPreviewScheduler(
+                video_path,
+                max_concurrent=int(self.state.gallery_max_concurrent_previews),
+                source_token=token,
+            )
+            self.state.gallery_preview_scheduler = scheduler
+        else:
+            scheduler.invalidate(new_source_token=token)
+        scheduler.register_cards(index.cards)
+        if self.state.view_mode != VIEW_MODE_GALLERY:
+            scheduler.set_visible_card_ids(())
+
+    def _close_gallery_scheduler(self) -> None:
+        scheduler = self.state.gallery_preview_scheduler
+        if scheduler is not None:
+            scheduler.close()
+        self.state.gallery_preview_scheduler = None
+
     # --- housekeeping -------------------------------------------------------
 
     def open_folder(self, path: Path | str) -> bool:
@@ -1696,6 +1994,7 @@ class BehavioralReviewController:
                     session.inspection.video.clear_cache()
             except Exception:  # noqa: BLE001
                 pass
+        self._close_gallery_scheduler()
         self.state.editing_session = None
         self.state.package_run_id = None
         self.state.package_dir = None
@@ -1732,6 +2031,11 @@ class BehavioralReviewController:
         self.state.active_window_identity = None
         self.state.active_edit_identity = None
         self.state.active_publish_identity = None
+        self.state.gallery_index = None
+        self.state.gallery_selected_card_id = None
+        self.state.gallery_highlight_start = None
+        self.state.gallery_highlight_end = None
+        self.state.view_mode = VIEW_MODE_TIMELINE
         self._pending_edit = None
 
     def _require_writable_session(self) -> EditingSession:
