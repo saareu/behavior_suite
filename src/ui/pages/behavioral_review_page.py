@@ -8,7 +8,9 @@ from uuid import uuid4
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QRadioButton,
     QScrollArea,
@@ -70,11 +73,15 @@ from ui.controllers.behavioral_review_controller import (
     WindowRequestIdentity,
     WindowSnapshot,
 )
+from ui.controllers.pi_report_controller import PiReportController, PiReportUiError
+from ui.controllers.pi_report_support import PiReportRequestIdentity, PiReportUiSettings
 from ui.tasks import (
     GuiTaskContext,
     GuiTaskKind,
+    GuiTaskProgressEvent,
     GuiTaskRunner,
     TaskAlreadyRunningError,
+    format_pipeline_progress,
 )
 from ui.widgets.bout_gallery_view import BoutGalleryView
 from ui.widgets.ethogram_timeline_view import EthogramTimelineView
@@ -94,6 +101,18 @@ _BOUT_COLUMNS = (
     "status",
 )
 
+_PI_REPORT_COLUMNS = (
+    "report_id",
+    "status",
+    "source",
+    "scope",
+    "n_bouts",
+    "zip",
+    "package",
+    "review",
+    "path",
+)
+
 _PLAYBACK_TICK_MS = 50
 
 
@@ -108,16 +127,19 @@ class BehavioralReviewPage(QWidget):
     def __init__(
         self,
         controller: BehavioralReviewController | None = None,
+        pi_report_controller: PiReportController | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.controller = controller or BehavioralReviewController()
+        self.pi_report_controller = pi_report_controller or PiReportController()
         self.discovery_runner = GuiTaskRunner(self)
         self.open_runner = GuiTaskRunner(self)
         self.decode_runner = GuiTaskRunner(self)
         self.window_runner = GuiTaskRunner(self)
         self.edit_runner = GuiTaskRunner(self)
         self.publish_runner = GuiTaskRunner(self)
+        self.pi_report_runner = GuiTaskRunner(self)
         self._syncing_widgets = False
         self._last_running_state = False
         self._playing = False
@@ -128,6 +150,7 @@ class BehavioralReviewPage(QWidget):
         self._active_window_identity: WindowRequestIdentity | None = None
         self._active_edit_identity: EditRequestIdentity | None = None
         self._active_publish_identity: PublishRequestIdentity | None = None
+        self._active_pi_report_identity: PiReportRequestIdentity | None = None
         self._last_shown_prepared_frame_idx: int | None = None
         self._last_bout_table_fingerprint: tuple[object, ...] | None = None
         self._build_ui()
@@ -155,6 +178,7 @@ class BehavioralReviewPage(QWidget):
     @property
     def has_running_task(self) -> bool:
         state = self.controller.state
+        pi_state = self.pi_report_controller.state
         return (
             self.discovery_runner.is_running
             or self.open_runner.is_running
@@ -162,6 +186,7 @@ class BehavioralReviewPage(QWidget):
             or self.window_runner.is_running
             or self.edit_runner.is_running
             or self.publish_runner.is_running
+            or self.pi_report_runner.is_running
             or state.task_running
             or state.discovery_running
             or state.open_running
@@ -169,6 +194,7 @@ class BehavioralReviewPage(QWidget):
             or state.window_running
             or state.edit_running
             or state.publish_running
+            or pi_state.task_running
         )
 
     def set_session(self, session_root: Path | str) -> None:
@@ -227,6 +253,7 @@ class BehavioralReviewPage(QWidget):
             elif state.editing_session is None:
                 self.video.set_frame(None)
                 self._last_shown_prepared_frame_idx = None
+            self._sync_pi_report_from_state()
         finally:
             self._syncing_widgets = False
         self._update_enabled()
@@ -243,7 +270,9 @@ class BehavioralReviewPage(QWidget):
             "editing requires an explicit mode toggle and reviewer identity. "
             "No reciprocal edit tool, no uncertain status, and no reviewed CSV/media "
             "export in MVP. Corrections stay in the controller — this page only "
-            "dispatches. Publishing creates an additive immutable reviewed run."
+            "dispatches. Publishing creates an additive immutable reviewed run. "
+            "Export PI Report builds an offline HTML bundle from an automated S9 "
+            "package or a published S10 review (working drafts are not eligible)."
         )
         scope.setWordWrap(True)
 
@@ -663,6 +692,95 @@ class BehavioralReviewPage(QWidget):
         publish_layout.addWidget(self.publish_blockers_label)
         publish_layout.addWidget(self.publish_button)
 
+        pi_group = QGroupBox("Export PI Report")
+        pi_form = QFormLayout(pi_group)
+        self.pi_source_combo = QComboBox()
+        self.pi_source_combo.addItem("Automated S9 package", SOURCE_TYPE_AUTOMATED)
+        self.pi_source_combo.addItem("Published S10 review", SOURCE_TYPE_REVIEWED)
+        self.pi_source_combo.currentIndexChanged.connect(self._pi_source_changed)
+        self.pi_source_identity_label = QLabel("No PI report source selected.")
+        self.pi_source_identity_label.setWordWrap(True)
+        self.pi_scope_combo = QComboBox()
+        self.pi_scope_combo.addItem("All exclusive bouts", "all_exclusive")
+        self.pi_scope_combo.addItem("Selected gallery bouts", "selected_bouts")
+        self.pi_scope_combo.currentIndexChanged.connect(self._pi_settings_changed)
+        self.pi_selected_count_label = QLabel("Selected eligible bouts: 0")
+        self.pi_pre_pad_spin = QDoubleSpinBox()
+        self.pi_pre_pad_spin.setRange(0.0, 30.0)
+        self.pi_pre_pad_spin.setDecimals(2)
+        self.pi_pre_pad_spin.setSingleStep(0.25)
+        self.pi_pre_pad_spin.setValue(0.5)
+        self.pi_pre_pad_spin.valueChanged.connect(self._pi_settings_changed)
+        self.pi_post_pad_spin = QDoubleSpinBox()
+        self.pi_post_pad_spin.setRange(0.0, 30.0)
+        self.pi_post_pad_spin.setDecimals(2)
+        self.pi_post_pad_spin.setSingleStep(0.25)
+        self.pi_post_pad_spin.setValue(0.5)
+        self.pi_post_pad_spin.valueChanged.connect(self._pi_settings_changed)
+        self.pi_write_zip_check = QCheckBox("Write ZIP archive")
+        self.pi_write_zip_check.setChecked(True)
+        self.pi_write_zip_check.toggled.connect(self._pi_settings_changed)
+        self.pi_output_label = QLabel("Output: (open a session)")
+        self.pi_output_label.setWordWrap(True)
+        self.pi_scope_note_label = QLabel(
+            "Complete exclusive report scope (all exclusive bouts)."
+        )
+        self.pi_scope_note_label.setWordWrap(True)
+        self.pi_export_button = QPushButton("Export PI Report")
+        self.pi_export_button.clicked.connect(self._export_pi_report)
+        self.pi_cancel_button = QPushButton("Cancel export")
+        self.pi_cancel_button.clicked.connect(self._cancel_pi_report)
+        self.pi_cancel_button.setEnabled(False)
+        self.pi_open_folder_button = QPushButton("Open report folder")
+        self.pi_open_folder_button.clicked.connect(self._open_pi_report_folder)
+        self.pi_open_html_button = QPushButton("Open HTML")
+        self.pi_open_html_button.clicked.connect(self._open_pi_report_html)
+        self.pi_open_zip_button = QPushButton("Open ZIP location")
+        self.pi_open_zip_button.clicked.connect(self._open_pi_report_zip)
+        self.pi_refresh_button = QPushButton("Refresh reports")
+        self.pi_refresh_button.clicked.connect(self._refresh_pi_reports)
+        pi_buttons = QHBoxLayout()
+        pi_buttons.addWidget(self.pi_export_button)
+        pi_buttons.addWidget(self.pi_cancel_button)
+        pi_open_row = QHBoxLayout()
+        pi_open_row.addWidget(self.pi_open_folder_button)
+        pi_open_row.addWidget(self.pi_open_html_button)
+        pi_open_row.addWidget(self.pi_open_zip_button)
+        pi_open_row.addWidget(self.pi_refresh_button)
+        self.pi_progress = QProgressBar()
+        self.pi_progress.setRange(0, 0)
+        self.pi_progress.setVisible(False)
+        self.pi_stage_label = QLabel("PI report: idle")
+        self.pi_stage_label.setWordWrap(True)
+        self.pi_reports_table = QTableWidget(0, len(_PI_REPORT_COLUMNS))
+        self.pi_reports_table.setHorizontalHeaderLabels(list(_PI_REPORT_COLUMNS))
+        self.pi_reports_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.pi_reports_table.setSelectionMode(
+            QTableWidget.SelectionMode.SingleSelection
+        )
+        self.pi_reports_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.pi_reports_table.horizontalHeader().setStretchLastSection(True)
+        self.pi_reports_table.itemSelectionChanged.connect(
+            self._pi_report_selection_changed
+        )
+        self.pi_reports_table.setMaximumHeight(160)
+        pi_form.addRow("Report source", self.pi_source_combo)
+        pi_form.addRow("Source identity", self.pi_source_identity_label)
+        pi_form.addRow("Bout scope", self.pi_scope_combo)
+        pi_form.addRow(self.pi_selected_count_label)
+        pi_form.addRow("Pre-context (s)", self.pi_pre_pad_spin)
+        pi_form.addRow("Post-context (s)", self.pi_post_pad_spin)
+        pi_form.addRow(self.pi_write_zip_check)
+        pi_form.addRow(self.pi_scope_note_label)
+        pi_form.addRow(self.pi_output_label)
+        pi_form.addRow(pi_buttons)
+        pi_form.addRow(pi_open_row)
+        pi_form.addRow(self.pi_progress)
+        pi_form.addRow(self.pi_stage_label)
+        pi_form.addRow(self.pi_reports_table)
+
         self.stage_label = QLabel("Not started")
         self.stage_label.setWordWrap(True)
 
@@ -683,6 +801,7 @@ class BehavioralReviewPage(QWidget):
         right_layout.addWidget(evidence_group)
         right_layout.addWidget(edits_group)
         right_layout.addWidget(publish_group)
+        right_layout.addWidget(pi_group)
         right_layout.addWidget(self.stage_label)
         right_layout.addStretch(1)
 
@@ -2051,6 +2170,7 @@ class BehavioralReviewPage(QWidget):
         primary = ids[-1] if ids else None
         self.controller.set_gallery_selection(ids, primary_card_id=primary)
         self._update_gallery_action_enabled()
+        self._sync_pi_selected_bout_labels()
 
     def _gallery_clear_selection(self) -> None:
         self.controller.clear_gallery_selection()
@@ -2357,6 +2477,34 @@ class BehavioralReviewPage(QWidget):
         self.undo_button.setEnabled(writable and not mutating and state.can_undo)
         self.redo_button.setEnabled(writable and not mutating and state.can_redo)
         self.publish_button.setEnabled(writable and not mutating)
+
+        pi_busy = (
+            self.pi_report_runner.is_running
+            or self.pi_report_controller.state.task_running
+        )
+        self.pi_source_combo.setEnabled(not pi_busy and has_session)
+        self.pi_scope_combo.setEnabled(not pi_busy and has_session)
+        self.pi_pre_pad_spin.setEnabled(not pi_busy)
+        self.pi_post_pad_spin.setEnabled(not pi_busy)
+        self.pi_write_zip_check.setEnabled(not pi_busy)
+        self.pi_export_button.setEnabled(not pi_busy and has_session)
+        self.pi_cancel_button.setEnabled(pi_busy)
+        self.pi_refresh_button.setEnabled(has_session and not pi_busy)
+        has_pi_selection = (
+            self.pi_report_controller.selected_report() is not None
+            or self.pi_report_controller.state.last_result is not None
+        )
+        self.pi_open_folder_button.setEnabled(has_pi_selection and not pi_busy)
+        self.pi_open_html_button.setEnabled(has_pi_selection and not pi_busy)
+        report = self.pi_report_controller.selected_report()
+        has_zip = bool(
+            (report is not None and report.has_zip)
+            or (
+                self.pi_report_controller.state.last_result is not None
+                and self.pi_report_controller.state.last_result.zip_path is not None
+            )
+        )
+        self.pi_open_zip_button.setEnabled(has_zip and not pi_busy)
         self._update_gallery_action_enabled()
 
     def _update_gallery_action_enabled(self) -> None:
@@ -2387,6 +2535,12 @@ class BehavioralReviewPage(QWidget):
                 f"Cannot {action} while an edit is in progress."
             )
             return False
+        if self.pi_report_runner.is_running or self.pi_report_controller.state.task_running:
+            self.status_message.emit(
+                f"Cannot {action} while a PI report export is running "
+                "(export continues with its pinned source)."
+            )
+            return False
         if self.has_running_task and (
             self.open_runner.is_running
             or self.publish_runner.is_running
@@ -2400,6 +2554,359 @@ class BehavioralReviewPage(QWidget):
             )
             return False
         return True
+
+    # ----------------------------------------------------------- PI report B2
+
+    def _read_pi_settings_from_widgets(self) -> PiReportUiSettings:
+        selected_ids = self._selected_pi_bout_ids()
+        return PiReportUiSettings(
+            source_kind=str(self.pi_source_combo.currentData() or SOURCE_TYPE_AUTOMATED),
+            bout_scope=str(self.pi_scope_combo.currentData() or "all_exclusive"),
+            selected_bout_ids=selected_ids,
+            pre_context_sec=float(self.pi_pre_pad_spin.value()),
+            post_context_sec=float(self.pi_post_pad_spin.value()),
+            write_zip=bool(self.pi_write_zip_check.isChecked()),
+        )
+
+    def _selected_pi_bout_ids(self) -> tuple[str, ...]:
+        state = self.controller.state
+        index = state.gallery_index
+        if index is None:
+            return ()
+        selected = state.gallery_selected_card_ids
+        if not selected:
+            return ()
+        by_id = {card.card_id: card.bout_id for card in index.cards}
+        return tuple(by_id[cid] for cid in selected if cid in by_id)
+
+    def _pi_source_changed(self) -> None:
+        if self._syncing_widgets:
+            return
+        self._sync_pi_source_identity()
+        self._update_enabled()
+
+    def _pi_settings_changed(self) -> None:
+        if self._syncing_widgets or self.pi_report_controller.state.task_running:
+            return
+        try:
+            settings = self._read_pi_settings_from_widgets().validated()
+            self.pi_report_controller.update_settings(settings)
+        except (ValueError, PiReportUiError):
+            pass
+        self._sync_pi_selected_bout_labels()
+        self._update_enabled()
+
+    def _sync_pi_report_from_state(self) -> None:
+        state = self.controller.state
+        pi = self.pi_report_controller.state
+        if state.session_root is not None and not pi.task_running:
+            self.pi_report_controller.refresh_discovery(state.session_root)
+        self._sync_pi_source_identity()
+        self._sync_pi_selected_bout_labels()
+        self._populate_pi_reports_table()
+        dest = pi.output_destination or (
+            str(state.session_root / "results_exports")
+            if state.session_root is not None
+            else "(open a session)"
+        )
+        self.pi_output_label.setText(f"Output: {dest}")
+        if pi.task_running:
+            self.pi_stage_label.setText(pi.run_stage)
+        elif pi.last_error:
+            self.pi_stage_label.setText(
+                f"{pi.last_outcome or 'failed'}: {pi.last_error}"
+            )
+        else:
+            self.pi_stage_label.setText(pi.run_stage)
+
+    def _sync_pi_source_identity(self) -> None:
+        state = self.controller.state
+        source_kind = str(self.pi_source_combo.currentData() or SOURCE_TYPE_AUTOMATED)
+        package = self.controller.selected_s9_option()
+        review = self.controller.selected_review_option()
+        package_run_id = package.run_id if package is not None else state.selected_s9_run_id
+        review_run_id = None
+        note = ""
+        if source_kind == SOURCE_TYPE_REVIEWED:
+            if review is None:
+                note = "Select a published S10 review (working drafts are not eligible)."
+            elif review.is_draft:
+                note = (
+                    "Selected review is a working draft and cannot be used as a "
+                    "PI report source. Publish first, or switch to Automated S9."
+                )
+                review_run_id = review.run_id
+            else:
+                review_run_id = review.run_id
+                note = self.pi_report_controller.describe_source(
+                    source_kind=source_kind,
+                    package_run_id=package_run_id,
+                    review_run_id=review_run_id,
+                    settings=self._read_pi_settings_from_widgets(),
+                )
+        else:
+            note = self.pi_report_controller.describe_source(
+                source_kind=source_kind,
+                package_run_id=package_run_id,
+                review_run_id=None,
+                settings=self._read_pi_settings_from_widgets(),
+            )
+        self.pi_source_identity_label.setText(note)
+
+    def _sync_pi_selected_bout_labels(self) -> None:
+        ids = self._selected_pi_bout_ids()
+        scope = str(self.pi_scope_combo.currentData() or "all_exclusive")
+        self.pi_selected_count_label.setText(
+            f"Selected eligible bouts: {len(ids)}"
+        )
+        if scope == "selected_bouts":
+            self.pi_scope_note_label.setText(
+                f"SUBSET scope — {len(ids)} selected exclusive bout(s) will be "
+                "recorded in the report manifest (not a complete exclusive export)."
+            )
+        else:
+            self.pi_scope_note_label.setText(
+                "Complete exclusive report scope (all exclusive bouts)."
+            )
+
+    def _populate_pi_reports_table(self) -> None:
+        rows = self.pi_report_controller.report_table_rows()
+        selected = self.pi_report_controller.state.selected_report_id
+        self.pi_reports_table.blockSignals(True)
+        self.pi_reports_table.setRowCount(len(rows))
+        selected_row = -1
+        for r, row in enumerate(rows):
+            for c, value in enumerate(row):
+                self.pi_reports_table.setItem(r, c, QTableWidgetItem(value))
+            if row and row[0] == selected:
+                selected_row = r
+        if selected_row >= 0:
+            self.pi_reports_table.selectRow(selected_row)
+        self.pi_reports_table.blockSignals(False)
+
+    def _pi_report_selection_changed(self) -> None:
+        items = self.pi_reports_table.selectedItems()
+        if not items:
+            return
+        report_id = self.pi_reports_table.item(items[0].row(), 0)
+        if report_id is None:
+            return
+        text = report_id.text()
+        if text.startswith("("):
+            return
+        self.pi_report_controller.select_report(text)
+
+    def _refresh_pi_reports(self) -> None:
+        root = self.controller.state.session_root
+        self.pi_report_controller.refresh_discovery(root)
+        self._populate_pi_reports_table()
+        self.status_message.emit("PI report discovery refreshed.")
+
+    def _export_pi_report(self) -> None:
+        if self.pi_report_runner.is_running or self.pi_report_controller.state.task_running:
+            self.status_message.emit("A PI report export is already running.")
+            return
+        state = self.controller.state
+        if state.session_root is None:
+            QMessageBox.warning(self, "No session", "Open a session first.")
+            return
+        try:
+            settings = self._read_pi_settings_from_widgets().validated()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid PI report settings", str(exc))
+            return
+
+        source_kind = settings.source_kind
+        package = self.controller.selected_s9_option()
+        review = self.controller.selected_review_option()
+        package_dir = package.run_dir if package is not None else state.package_dir
+        package_run_id = (
+            package.run_id if package is not None else state.selected_s9_run_id
+        )
+        review_run_dir = None
+        review_run_id = None
+        review_is_draft = None
+        if source_kind == SOURCE_TYPE_REVIEWED:
+            if review is None:
+                QMessageBox.warning(
+                    self,
+                    "Select published review",
+                    "Select a published S10 review as the PI report source.",
+                )
+                return
+            review_is_draft = bool(review.is_draft)
+            review_run_dir = review.run_dir
+            review_run_id = review.run_id
+            if package_dir is None and review.parent_package_run_id:
+                parent = next(
+                    (
+                        opt
+                        for opt in state.s9_options
+                        if opt.run_id == review.parent_package_run_id
+                    ),
+                    None,
+                )
+                if parent is not None:
+                    package_dir = parent.run_dir
+                    package_run_id = parent.run_id
+
+        matched = (
+            len(settings.selected_bout_ids)
+            if settings.bout_scope == "selected_bouts"
+            else None
+        )
+        try:
+            identity = self.pi_report_controller.begin_export_launch(
+                session_root=state.session_root,
+                source_kind=source_kind,
+                package_dir=package_dir,  # type: ignore[arg-type]
+                package_run_id=str(package_run_id),
+                review_run_dir=review_run_dir,
+                review_run_id=review_run_id,
+                review_is_draft=review_is_draft,
+                settings=settings,
+                matched_selected_bout_count=matched,
+            )
+        except PiReportUiError as exc:
+            QMessageBox.warning(self, "Cannot export PI report", str(exc))
+            return
+
+        self._active_pi_report_identity = identity
+        self.pi_progress.setVisible(True)
+        self.pi_progress.setRange(0, 0)
+        self.pi_stage_label.setText(self.pi_report_controller.state.run_stage)
+        self._update_enabled()
+        self._emit_running_changed()
+
+        context = GuiTaskContext(
+            task_id=uuid4().hex,
+            task_kind=GuiTaskKind.PI_REPORT_EXPORT,
+            project_dir=state.session_root,
+            raw_video_path=None,
+            generation=0,
+        )
+
+        def operation(report) -> object:
+            return self.pi_report_controller.execute_export_launch(
+                identity,
+                progress_callback=report,
+                cancellation_requested=context.is_cancellation_requested,
+            )
+
+        try:
+            self.pi_report_runner.start_progressive(
+                operation,
+                task_name="PI report export",
+                context=context,
+                on_progress=lambda event: self._on_pi_report_progress(event, identity),
+                on_success=lambda result: self._on_pi_report_success(result, identity),
+                on_error=lambda exc: self._on_pi_report_error(exc, identity),
+                on_finished=lambda: self._on_pi_report_finished(identity),
+            )
+        except TaskAlreadyRunningError as exc:
+            self.pi_report_controller.record_export_failure(
+                str(exc), expected_identity=identity
+            )
+            self._active_pi_report_identity = None
+            self.pi_progress.setVisible(False)
+            self.refresh_from_state()
+            QMessageBox.warning(self, "PI report busy", str(exc))
+
+    def _cancel_pi_report(self) -> None:
+        if not self.pi_report_runner.is_running:
+            return
+        self.pi_report_runner.request_cancellation()
+        self.pi_stage_label.setText(
+            "Cancel requested — waiting for the current bout encode to finish…"
+        )
+        self.status_message.emit("PI report cancel requested.")
+
+    def _on_pi_report_progress(
+        self, event: GuiTaskProgressEvent, identity: PiReportRequestIdentity
+    ) -> None:
+        if (
+            self._active_pi_report_identity is None
+            or identity.request_id != self._active_pi_report_identity.request_id
+        ):
+            return
+        self.pi_stage_label.setText(format_pipeline_progress(event))
+        if event.total_units is not None and event.completed_units is not None:
+            self.pi_progress.setRange(0, int(event.total_units))
+            self.pi_progress.setValue(int(event.completed_units))
+        else:
+            self.pi_progress.setRange(0, 0)
+
+    def _on_pi_report_success(
+        self, result: object, identity: PiReportRequestIdentity
+    ) -> None:
+        from behavioral_review.pi_report import PiReportResult
+
+        if not isinstance(result, PiReportResult):
+            self.pi_report_controller.record_export_failure(
+                "Unexpected PI report result type.",
+                expected_identity=identity,
+            )
+            return
+        accepted = self.pi_report_controller.record_export_success(
+            result, expected_identity=identity
+        )
+        if not accepted:
+            return
+        self.pi_report_controller.refresh_discovery(identity.session_root)
+        self.refresh_from_state()
+        self.status_message.emit(
+            f"PI report exported: {result.report_id} ({result.n_bouts} bouts)"
+        )
+
+    def _on_pi_report_error(
+        self, exc: BaseException, identity: PiReportRequestIdentity
+    ) -> None:
+        from behavioral_review.pi_report import PiReportCancelledError
+
+        canceled = isinstance(exc, PiReportCancelledError)
+        message = str(exc)
+        accepted = self.pi_report_controller.record_export_failure(
+            message, expected_identity=identity, canceled=canceled
+        )
+        if not accepted:
+            return
+        self.pi_report_controller.refresh_discovery(identity.session_root)
+        self.refresh_from_state()
+        title = "PI report canceled" if canceled else "PI report failed"
+        if canceled or isinstance(exc, (PiReportUiError, BehavioralReviewError)):
+            QMessageBox.warning(self, title, message)
+            self.status_message.emit(f"{title}: {message}")
+        else:
+            self.unexpected_error.emit(message)
+
+    def _on_pi_report_finished(self, identity: PiReportRequestIdentity) -> None:
+        if (
+            self._active_pi_report_identity is not None
+            and identity.request_id == self._active_pi_report_identity.request_id
+        ):
+            self._active_pi_report_identity = None
+        self.pi_progress.setVisible(False)
+        self._update_enabled()
+        self._emit_running_changed()
+        self.task_finished.emit()
+
+    def _open_pi_report_folder(self) -> None:
+        try:
+            self.pi_report_controller.open_selected_report_folder()
+        except PiReportUiError as exc:
+            QMessageBox.warning(self, "Open report folder", str(exc))
+
+    def _open_pi_report_html(self) -> None:
+        try:
+            self.pi_report_controller.open_selected_report_html()
+        except PiReportUiError as exc:
+            QMessageBox.warning(self, "Open HTML", str(exc))
+
+    def _open_pi_report_zip(self) -> None:
+        try:
+            self.pi_report_controller.open_selected_report_zip()
+        except PiReportUiError as exc:
+            QMessageBox.warning(self, "Open ZIP", str(exc))
 
     def _guard_edit_idle(self, action: str) -> bool:
         if self.controller.state.edit_running or self.edit_runner.is_running:

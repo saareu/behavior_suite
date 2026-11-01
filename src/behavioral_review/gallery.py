@@ -166,6 +166,7 @@ class GalleryQuery:
     focal_ids: frozenset[int] | None = None
     labels: frozenset[str] | None = None
     statuses: frozenset[str] | None = None
+    bout_ids: frozenset[str] | None = None
     sort: str = DEFAULT_GALLERY_SORT
 
     def to_dict(self) -> dict[str, Any]:
@@ -173,6 +174,7 @@ class GalleryQuery:
             "focal_ids": sorted(self.focal_ids) if self.focal_ids is not None else None,
             "labels": sorted(self.labels) if self.labels is not None else None,
             "statuses": sorted(self.statuses) if self.statuses is not None else None,
+            "bout_ids": sorted(self.bout_ids) if self.bout_ids is not None else None,
             "sort": self.sort,
         }
 
@@ -474,6 +476,8 @@ def apply_gallery_query(
         if query.labels is not None and card.effective_label not in query.labels:
             continue
         if query.statuses is not None and card.status not in query.statuses:
+            continue
+        if query.bout_ids is not None and card.bout_id not in query.bout_ids:
             continue
         filtered.append(card)
     return tuple(_sort_cards(filtered, sort=query.sort))

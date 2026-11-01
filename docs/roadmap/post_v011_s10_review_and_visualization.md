@@ -1,9 +1,9 @@
 # Post-v0.1.1 — S10 Review Efficiency, Visualization, and PI Reporting
 
-**Status:** **Gallery A2 accepted** (working-draft gallery + single/bulk status; journal durability closure). A1 remains accepted. PI report / overlays remain deferred.  
-**Date:** 2026-11-01 (**D0 closed**; **Gallery A1** accepted; **Gallery A2** accepted — see also [`d0_workspace_architecture.md`](d0_workspace_architecture.md))  
-**Baseline:** Behavior Suite **v0.1.1** released; S1–S10 MVP lab-validated; D0 workspace MVP closed at `e81d530`; A1 base `0d4b237`.  
-**Non-scope of remaining follow-ons:** PI HTML report, overlay generation, subsession science, S8 schema changes.
+**Status:** **Gallery A2 accepted**. **PI report B1 backend complete**. **PI report B2 GUI integration complete** (offline browser + published-S10 source acceptance complete). Overlays remain deferred.  
+**Date:** 2026-11-01 (**D0 closed**; **Gallery A1/A2** accepted; **B1/B2 closed** — see also [`d0_workspace_architecture.md`](d0_workspace_architecture.md))  
+**Baseline:** Behavior Suite **v0.1.1** released; S1–S10 MVP lab-validated; D0 workspace MVP closed at `e81d530`; A1 base `0d4b237`; A2/B1/B2 base `e88b1d8`.  
+**Non-scope of remaining follow-ons:** overlay generation, subsession science, S8 schema changes.
 
 **Legend**
 
@@ -391,26 +391,28 @@ Exclusive **acceptance** means “operator endorses this bout interval’s effec
 
 Ship a **portable, immutable folder** a PI can open in a normal browser (double-click `index.html`) with no server and no Python runtime. It presents the same visual browsing experience as the gallery: grouped previews, filters, bout metadata, review status, and provenance.
 
-### 4.2 Bundle layout (recommendation)
+### 4.2 Bundle layout (B1 contract)
 
 ```text
-pi_report__{timestamp}/
-  index.html                 # self-contained app shell
-  app.js / app.css           # no CDN required (vendored)
-  data/
-    manifest.json            # provenance + digests + source_type
-    bouts.jsonl|parquet→json # bout cards + group indices
-    ethogram_summary.json    # optional rollups
-    review_status.json       # if reviewed source
-  media/
-    previews/{bout_id}.mp4   # browser-friendly, generated for included set
-    # optional gifs/{bout_id}.gif  only if explicitly requested
-  qc/
-    report_qc.json
-  README.txt                 # how to open offline
+{session}/results_exports/pi_report__{run_id}/
+  index.html                 # offline app shell (relative assets only)
+  assets/
+    app.css                  # vendored; no CDN
+    app.js                   # filters + exclusive grouped muted looping <video>
+    report_embed.js          # window.PI_REPORT_DATA = {...} (file:// safe)
+  report_data.json           # machine-readable bout cards + groups + provenance
+  report_manifest.json       # pi_report_manifest_v1 digests / settings / source pins
+  media/{bout_id}.mp4        # local H.264 yuv420p +faststart previews
+  qc.json
+  run_meta.json
+  settings_used.yaml
+  processing_log.txt
+  README.txt
 ```
 
-**Immutability:** write once under a timestamped directory; never mutate after finalize. Manifest lists SHA256 of data + media files.
+Optional sibling ZIP: `pi_report__{run_id}.zip` (complete directory; relative members).
+
+**Immutability:** stage under `results_exports/_pi_report_staging/`, validate, then publish by rename. Never overwrite an existing `pi_report__*`. Manifest lists SHA256 of data + media files (manifest self-digest excluded from self-check).
 
 ### 4.3 Source selection
 
@@ -706,10 +708,10 @@ A1 is accepted for read-only gallery use. Do **not** treat intermittent post-ass
 7. Confirm contact/SBS are not bulk-accepted by exclusive gallery actions.
 8. Confirm no S8/S9 science artifact mutation.
 
-**Still deferred after A2:**
+**Still deferred after A2 (gallery):**
 
 - Outlier badges / sort-by-outlier
-- PI report export, overlay burn-in, GIF generation
+- Overlay burn-in, GIF generation (PI report B1/B2 closed without these)
 - Contact/SBS secondary gallery mode
 - Accept-all-visible-in-group convenience (explicitly rejected in favor of selection-only bulk)
 
@@ -725,6 +727,94 @@ A1 is accepted for read-only gallery use. Do **not** treat intermittent post-ass
 | **Acceptance criteria** | Offline `index.html` opens with filters + grouped muted looping videos; provenance visible; works without Python; GIF only if requested; reviewed vs automated explicitly labeled |
 | **Tests** | Manifest digest round-trip; fixture tiny bundle playwright/smoke; reject draft source; media probe counts |
 | **Dependencies** | A’s card/preview_plan contract (soft). Can prototype HTML against JSON fixtures before GUI gallery polish |
+
+#### PI report B1 implementation record (2026-11-01) — **backend complete**
+
+**Acceptance:** B1 headless backend accepted; automated S9 and published S10 sources only; working drafts rejected; immutable portable `pi_report__*` bundles with digest verification before finalize.
+
+**Shipped (B1 headless only — no GUI):**
+
+| Concern | Implementation |
+| --- | --- |
+| Module | `src/behavioral_review/pi_report/` — `source`, `media`, `bundle`, `publication`, `discovery`, contracts |
+| Sources | Explicit `automated` (eligible S9) or `reviewed` (published S10 via `validate_s10_run_for_downstream`). **Working drafts rejected.** Automated and reviewed never merged |
+| Gallery reuse | `build_gallery_from_automated_bouts` / `build_gallery_from_published_review`; exclusive-only default; contact/SBS omitted from default browsing payload |
+| Media | S9 `encode_mp4_clip` + `compute_clip_bounds`; optional `movflags=+faststart` for browser `file://`; frame-accurate trim; no overlays; no GIF |
+| Layout | `results_exports/pi_report__{run_id}/` with `index.html`, `assets/`, `report_data.json`, `media/`, `report_manifest.json`, QC/log/meta |
+| Portability | Relative media paths only; `report_embed.js` avoids `fetch()` under `file://`; optional ZIP completeness check |
+| Integrity | Temp staging → validate → atomic rename; never overwrite; failure cleans staging/final; `assert_no_upstream_writes` on S8/S9/video |
+| Tests | `tests/behavioral_review/test_pi_report_b1.py` (draft reject, auto vs published, status fidelity, endpoints/padding, relative paths, ZIP, failure cleanup, immutability, no source writes) |
+
+**B1 report contract (binding):**
+
+1. Source chooser is explicit: automated S9 package **or** published S10 review — never auto-pick latest, never draft.
+2. Effective exclusive labels + review status + dense endpoints + lineage + source digests are preserved in `report_data.json` / manifest.
+3. Default exclusive browsing view does **not** include contact/SBS rows (filters document `contact_sbs_included=false`).
+4. Rejected / unreviewed / voided bouts remain in the payload unless an explicit `GalleryQuery` filter is supplied by the caller.
+5. Report media must not embed absolute laboratory prepared-video paths.
+6. Successful finalize implies every included exclusive bout has a local MP4 preview that probes to the planned frame count.
+
+**Known limitations (B1 → carried into B2 closure):**
+
+- No overlays, no GIF path (flag reserved `gif_requested=false`).
+- Full-package exclusive encode can be large on E-session scale; B2 runs via background worker + progress.
+- Browser autoplay policies require muted looping; operator may need a click to start playback on some browsers.
+- Contact/SBS optional appendix section deferred (P4).
+- E-session full-report wall-clock not gated in unit suite (fixture-scale encode coverage only).
+
+#### PI report B2 implementation record (2026-11-01) — **GUI integration complete**
+
+**Acceptance:** B2 GUI export integration accepted on S10. Offline browser acceptance complete (`file://` HTML + ZIP). Published-S10 source acceptance complete. Working drafts remain ineligible. Selected-bout exports are explicitly marked as subset reports.
+
+**Shipped (B2 GUI + backend hooks):**
+
+| Concern | Implementation |
+| --- | --- |
+| Entry point | S10 `BehavioralReviewPage` **Export PI Report** group: Automated S9 ▾ / Published S10 ▾; working drafts explained and blocked |
+| Settings | All exclusive bouts (default) or selected gallery bouts; pre/post pad default 0.5 s; ZIP on by default; output under `results_exports/` |
+| Selected-bout scope | Requires ≥1 eligible bout; count shown; exact ids recorded in manifest/`report_data`; HTML **SUBSET REPORT** banner; never labeled as complete |
+| Worker | Dedicated `GuiTaskKind.PI_REPORT_EXPORT` via `GuiTaskRunner`; encode/hash off GUI thread; bout N/M progress; cooperative cancel between encodes; stale request-id rejection; no overlapping output dirs |
+| Integrity | Source paths/settings pinned at launch; `verify_pinned_source_integrity` before finalize; incomplete/canceled exports wipe staging (no partial publication) |
+| Discovery | `summarize_pi_report_project` table: open folder / HTML / ZIP; completed vs failed/canceled outcomes distinguished |
+| Tests | `tests/behavioral_review/test_pi_report_b2.py`, `tests/ui/test_pi_report_gui.py` |
+| Lab smoke | Temporary E-session smoke used for laboratory acceptance (not maintained as a product test) |
+
+**B2 report source semantics (binding):**
+
+1. Explicit automated S9 **or** published S10 only — drafts never eligible.
+2. Complete scope = all exclusive bouts; selected scope is always a subset report even if the operator happens to select every visible card.
+3. Export never mutates gallery/edit state or S8/S9/S10 science trees.
+4. Cancel is cooperative between bout encodes (not mid-ffmpeg); cancel before atomic rename cleans staging; after rename the report remains published.
+5. Source digest verification (`verify_pinned_source_integrity`) runs after media/bundle write and **before** atomic finalize.
+
+**Offline browser acceptance (B2 lab) — complete:**
+
+- Selected-bout E-session report (`n=3`) opened via `file://` HTML; filters/grouping assets present; muted looping JS retained; ZIP written beside the report folder; no `fetch()` of report data; no Python/server dependency for viewing.
+- Subset banner and `report_scope=selected_bouts` verified in payload.
+
+**Published-S10 source acceptance — complete:**
+
+- Published review sources export with effective labels + review status vocabulary preserved.
+- Working drafts remain rejected at source validation and again at pre-finalize integrity verification.
+
+**E-session performance observations (2026-11-01):**
+
+| Metric | Observation |
+| --- | --- |
+| Exclusive bout count | **538** on `results_package__20261028T181714` |
+| Selected (3-bout) wall-clock | ~3.0 s encode+publish (pad 0.5 s, ZIP on) |
+| Approx. bytes / bout | ~1.1 MB media |
+| Extrapolated full media | ~0.58 GiB |
+| Extrapolated full encode | ~9 minutes (**estimated** from 3-bout sample; not a measured full run) |
+| Full 538-bout encode | **Not executed** in this increment (bounded sample used); GUI worker + cancel + progress are the required controls |
+
+**Known limitations (B1+B2 closure):**
+
+- Cooperative cancellation occurs between clips (cannot interrupt an in-flight ffmpeg bout encode).
+- Full E-session encoding performance is estimated, not measured.
+- Windows staging rename can intermittently encounter `WinError 5` (Access is denied) on atomic temp→final replace under load; retry or re-export if observed.
+- GIF, overlays, and contact/SBS appendix remain deferred.
+- Browser autoplay may still require a user gesture on some engines despite muted looping.
 
 ### Increment C — Shared overlay infrastructure and selected QC artifacts
 
@@ -821,8 +911,12 @@ Defer: model-training UIs, active learning, reciprocal tool (U2), `uncertain` (U
 
 **Gallery A2:** **accepted** — working-draft source + single/bulk status-only actions through existing journal / edit-worker APIs; interrupted-append journal recovery closed with fault-injection coverage. No release tag from this acceptance.
 
-**Still deferred:** PI report (B), overlays (C), subsession science processing, outlier aids, contact/SBS secondary gallery. Targeted **R9 overlap-voiding audit** recommended as a follow-on (rules unchanged here).
+**PI report B1:** **backend complete** under `src/behavioral_review/pi_report/`.
 
-**Next authorized increment:** **B** (PI HTML) and/or outlier polish using the A1/A2 `GalleryCard` / preview_plan contracts; keep S8/S9 science schemas frozen.
+**PI report B2:** **GUI integration complete** on S10 (`Export PI Report` + `PiReportController` + `GuiTaskKind.PI_REPORT_EXPORT`). Offline browser acceptance complete. Published-S10 source acceptance complete.
+
+**Still deferred:** overlays (C), subsession science processing, outlier aids, contact/SBS secondary gallery / PI appendix, GIF generation. Targeted **R9 overlap-voiding audit** recommended as a follow-on (rules unchanged here).
+
+**Next authorized increment:** **C** (overlay design / shared compositor + selected QC artifacts); keep S8/S9 science schemas frozen.
 
 _End of post-v0.1.1 S10 review and visualization architecture proposal._

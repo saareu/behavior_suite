@@ -153,6 +153,7 @@ def encode_mp4_clip(
     codec: str = DEFAULT_CODEC,
     pixel_format: str = DEFAULT_PIXEL_FORMAT,
     verify_encoded_boundaries: bool = True,
+    movflags: str | None = None,
 ) -> Path:
     """Encode one clip with ffmpeg; atomic temp → final replace.
 
@@ -162,6 +163,9 @@ def encode_mp4_clip(
     video into memory). When ``verify_encoded_boundaries`` is True, probes the
     encoded clip and fails if frame count or playback fps diverge from the
     planned bounds — never silently approximates boundaries.
+
+    Optional ``movflags`` (e.g. ``+faststart``) is for browser-portable PI
+    reports; S9 media export leaves it unset to preserve prior job semantics.
     """
 
     if bounds.clip_frame_count <= 0:
@@ -203,10 +207,16 @@ def encode_mp4_clip(
         "-r",
         f"{fps:.9f}",
         "-an",
-        "-f",
-        "mp4",
-        str(tmp),
     ]
+    if movflags:
+        cmd.extend(["-movflags", str(movflags)])
+    cmd.extend(
+        [
+            "-f",
+            "mp4",
+            str(tmp),
+        ]
+    )
     try:
         completed = subprocess.run(
             cmd,
