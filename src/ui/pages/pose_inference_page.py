@@ -44,6 +44,7 @@ from ui.controllers.pose_inference_controller import (
     S3PoseInput,
 )
 from ui.tasks import GuiTaskRunner, TaskAlreadyRunningError, format_task_duration
+from ui.workspace.page_binding import request_shared_session
 
 
 class PoseInferencePage(QWidget):
@@ -610,7 +611,10 @@ class PoseInferencePage(QWidget):
     def _open_typed_session(self) -> None:
         if not self._guard_idle("open a session"):
             return
-        self.set_session(self.session_path.text())
+        text = self.session_path.text()
+        if request_shared_session(self, text):
+            return
+        self.set_session(text)
 
     def _browse_model(self, target: QLineEdit, title: str) -> None:
         if not self._guard_idle("browse for a model"):

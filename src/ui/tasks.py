@@ -46,6 +46,9 @@ class GuiTaskKind(StrEnum):
     BEHAVIORAL_REVIEW_WINDOW = "behavioral_review_window"
     BEHAVIORAL_REVIEW_EDIT = "behavioral_review_edit"
     BEHAVIORAL_REVIEW_PUBLISH = "behavioral_review_publish"
+    WORKSPACE_SCAN = "workspace_scan"
+    WORKSPACE_RESCAN = "workspace_rescan"
+    WORKSPACE_REBIND_PREVIEW = "workspace_rebind_preview"
 
 
 @dataclass(slots=True)

@@ -68,6 +68,7 @@ from ui.tasks import (
 )
 from ui.widgets.ethogram_timeline_view import EthogramTimelineView
 from ui.widgets.pose_video_view import PoseVideoView
+from ui.workspace.page_binding import request_shared_session
 
 _BOUT_COLUMNS = (
     "bout_id",
@@ -556,8 +557,11 @@ class BehavioralReviewPage(QWidget):
         if not self._guard_idle("browse session"):
             return
         path = QFileDialog.getExistingDirectory(self, "Select session / project root")
-        if path:
-            self.set_session(path)
+        if not path:
+            return
+        if request_shared_session(self, path):
+            return
+        self.set_session(path)
 
     def _open_typed_session(self) -> None:
         if not self._guard_idle("open session"):
@@ -565,6 +569,8 @@ class BehavioralReviewPage(QWidget):
         text = self.session_path.text().strip()
         if not text:
             QMessageBox.information(self, "Session required", "Enter a session path.")
+            return
+        if request_shared_session(self, text):
             return
         self.set_session(text)
 

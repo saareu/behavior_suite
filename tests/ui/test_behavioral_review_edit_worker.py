@@ -146,7 +146,9 @@ def test_mutation_serialization_and_duplicate_prevention(tmp_path: Path) -> None
 
 def test_publication_edit_mutual_exclusion(tmp_path: Path) -> None:
     controller, built = _controller_with_package(tmp_path)
-    _enter_and_draft(controller, tmp_path / "pub_mutex")
+    # Publish path safety requires the draft under the active session root.
+    assert controller.state.session_root is not None
+    _enter_and_draft(controller, controller.state.session_root / "behavioral_review")
     controller.set_exclusive_label(
         start_sample_idx=0, end_sample_idx=0, label="retract"
     )

@@ -23,7 +23,10 @@ from ui.controllers.behavioral_arbitration_controller import (
     BehavioralArbitrationController,
 )
 from ui.controllers.behavioral_inference_controller import BehavioralInferenceController
-from ui.controllers.behavioral_review_controller import BehavioralReviewController
+from ui.controllers.behavioral_review_controller import (
+    BehavioralReviewController,
+    BehavioralReviewUiError,
+)
 from ui.controllers.blob_features_controller import BlobFeaturesController
 from ui.controllers.combined_features_controller import CombinedFeaturesController
 from ui.controllers.pose_finalization_controller import PoseFinalizationController
@@ -44,6 +47,15 @@ from ui.pages.pose_inference_page import PoseInferencePage
 from ui.pages.results_packaging_page import ResultsPackagingPage
 from ui.pages.tracking_review_page import TrackingReviewPage
 from ui.preprocess_wizard import PreprocessWizard
+from ui.workspace.page_binding import (
+    bind_workspace_session_opener,
+    controller_session_root,
+    same_session_root,
+)
+from ui.workspace.selector_bar import WorkspaceSelectorBar
+from ui.workspace.shell_controller import WorkspaceShellController
+from workspace.context import WorkspaceContext
+from workspace.errors import WorkspaceError, WorkspaceNavigationBlocked
 
 GROUP_DATA_PREPARATION = "data_preparation"
 GROUP_FEATURE_PROCESSING = "feature_processing"
@@ -122,6 +134,19 @@ class MainWindow(QMainWindow):
         self._last_feature_page: str = "s5"
         self._last_behavior_page: str = "s7"
         self._last_results_page: str = "s9"
+        self._syncing_workspace_session = False
+        self._propagating_workspace_pages = False
+
+        # D0-D1/D2: one shared WorkspaceContext for the shell (not per-page).
+        # W4(c): recent list is loaded remember-only; nothing is auto-activated.
+        self.workspace = WorkspaceContext()
+        self.workspace_controller = WorkspaceShellController(
+            self.workspace,
+            settings=QSettings("BehaviorSuite", "BehaviorSuite"),
+            nav_probe=self._workspace_nav_probe,
+            parent=self,
+        )
+        self.workspace_selector = WorkspaceSelectorBar(self.workspace_controller)
 
         self.wizard = PreprocessWizard(controller)
         self.pose_page = PoseInferencePage(self.pose_controller)
@@ -251,6 +276,7 @@ class MainWindow(QMainWindow):
 
         central = QWidget()
         layout = QVBoxLayout(central)
+        layout.addWidget(self.workspace_selector)
         layout.addLayout(group_row)
         layout.addLayout(navigation)
         layout.addWidget(self.pages, 1)
@@ -259,6 +285,9 @@ class MainWindow(QMainWindow):
         self.wizard.unexpected_error.connect(self._show_unexpected_error)
         self.wizard.session_changed.connect(self._remember_session)
         self.wizard.preprocessing_completed.connect(self._s1_completed)
+        self.workspace_controller.status_message.connect(self.statusBar().showMessage)
+        self.workspace_controller.workspace_changed.connect(self._on_workspace_changed)
+        self.workspace_controller.error_message.connect(self._on_workspace_error)
         self.pose_page.back_to_s1_requested.connect(self.show_subsystem_1)
         self.pose_page.s3_handoff_requested.connect(self._show_s3_from_s2)
         self.pose_page.unexpected_error.connect(self._show_unexpected_error)
@@ -322,10 +351,17 @@ class MainWindow(QMainWindow):
             self._s10_task_running_changed
         )
         self.behavioral_review_page.task_finished.connect(self._s10_task_finished)
+        self._bind_page_workspace_openers()
         self._apply_group_visibility()
+        # Dual-write initial S1 project dir into workspace when present (no science).
+        if self._session_root is not None:
+            self.workspace_controller.sync_from_legacy_path(
+                self._session_root,
+                require_preprocess=False,
+            )
         self.statusBar().showMessage(
-            "Select a project in S1 or open an existing session in "
-            "S2/S5/S6/S7/S8/S9/S10."
+            "Select a workspace above, open a project in S1, or browse a session "
+            "in S2–S10. Recent sessions are remember-only (not auto-opened)."
         )
 
     def _build_s3_shell(self) -> QWidget:
@@ -546,10 +582,12 @@ class MainWindow(QMainWindow):
         self._ensure_group(GROUP_DATA_PREPARATION)
         if isinstance(session_root, Path | str) and str(session_root).strip():
             self._remember_session(session_root)
-        if self._session_root is not None:
-            self.pose_page.set_session(self._session_root)
-        else:
-            self.pose_page.refresh_from_state()
+        self._apply_shared_root_to_page(
+            self.pose_page,
+            subsystem="S2",
+            busy=self.pose_page.has_running_task,
+            force_bind=True,
+        )
         self.pages.setCurrentWidget(self.pose_page)
         self._update_navigation()
         self.statusBar().showMessage("Subsystem 2 pose inference")
@@ -560,6 +598,7 @@ class MainWindow(QMainWindow):
         if self._hard_navigation_blocked():
             return
         self._ensure_group(GROUP_DATA_PREPARATION)
+        self._apply_shared_root_to_s3(force_bind=True)
         self.pages.setCurrentWidget(self.s3_shell)
         self._update_navigation()
         self.statusBar().showMessage("Subsystem 3 tracking review")
@@ -572,10 +611,12 @@ class MainWindow(QMainWindow):
         self._ensure_group(GROUP_DATA_PREPARATION)
         if isinstance(session_root, Path | str) and str(session_root).strip():
             self._remember_session(session_root)
-        if self._session_root is not None:
-            self.finalization_page.set_session(self._session_root)
-        else:
-            self.finalization_page.refresh_from_state()
+        self._apply_shared_root_to_page(
+            self.finalization_page,
+            subsystem="S4",
+            busy=self.finalization_page.has_running_task,
+            force_bind=True,
+        )
         self.pages.setCurrentWidget(self.s4_shell)
         self._update_navigation()
         self.statusBar().showMessage("Subsystem 4 pose finalization")
@@ -588,24 +629,12 @@ class MainWindow(QMainWindow):
         self._ensure_group(GROUP_FEATURE_PROCESSING)
         if isinstance(session_root, Path | str) and str(session_root).strip():
             self._remember_session(session_root)
-        if self._session_root is not None:
-            current = self.blob_features_page.controller.state.session_root
-            target = self._session_root.resolve(strict=False)
-            same_session = (
-                current is not None and current.resolve(strict=False) == target
-            )
-            if same_session:
-                # Returning during an active S5 task must not re-load the session.
-                self.blob_features_page.refresh_from_state()
-            elif self.blob_features_page.has_running_task:
-                self.statusBar().showMessage(
-                    "Cannot change the S5 session while a Subsystem 5 task is active."
-                )
-                self.blob_features_page.refresh_from_state()
-            else:
-                self.blob_features_page.set_session(self._session_root)
-        else:
-            self.blob_features_page.refresh_from_state()
+        self._apply_shared_root_to_page(
+            self.blob_features_page,
+            subsystem="S5",
+            busy=self.blob_features_page.has_running_task,
+            force_bind=True,
+        )
         self.pages.setCurrentWidget(self.blob_features_page)
         self._last_feature_page = "s5"
         self._update_navigation()
@@ -619,23 +648,12 @@ class MainWindow(QMainWindow):
         self._ensure_group(GROUP_FEATURE_PROCESSING)
         if isinstance(session_root, Path | str) and str(session_root).strip():
             self._remember_session(session_root)
-        if self._session_root is not None:
-            current = self.combined_features_page.controller.state.session_root
-            target = self._session_root.resolve(strict=False)
-            same_session = (
-                current is not None and current.resolve(strict=False) == target
-            )
-            if same_session:
-                self.combined_features_page.refresh_from_state()
-            elif self.combined_features_page.has_running_task:
-                self.statusBar().showMessage(
-                    "Cannot change the S6 session while a Subsystem 6 task is active."
-                )
-                self.combined_features_page.refresh_from_state()
-            else:
-                self.combined_features_page.set_session(self._session_root)
-        else:
-            self.combined_features_page.refresh_from_state()
+        self._apply_shared_root_to_page(
+            self.combined_features_page,
+            subsystem="S6",
+            busy=self.combined_features_page.has_running_task,
+            force_bind=True,
+        )
         self.pages.setCurrentWidget(self.combined_features_page)
         self._last_feature_page = "s6"
         self._update_navigation()
@@ -649,24 +667,12 @@ class MainWindow(QMainWindow):
         self._ensure_group(GROUP_BEHAVIORAL_INFERENCE)
         if isinstance(session_root, Path | str) and str(session_root).strip():
             self._remember_session(session_root)
-        if self._session_root is not None:
-            current = self.behavioral_inference_page.controller.state.session_root
-            target = self._session_root.resolve(strict=False)
-            same_session = (
-                current is not None and current.resolve(strict=False) == target
-            )
-            if same_session:
-                self.behavioral_inference_page.refresh_from_state()
-            elif self.behavioral_inference_page.controller.state.task_running:
-                self.statusBar().showMessage(
-                    "Cannot change the S7 session while behavioral inference is active."
-                )
-                self.behavioral_inference_page.refresh_from_state()
-            else:
-                # Discovery may still be running; set_session supersedes it safely.
-                self.behavioral_inference_page.set_session(self._session_root)
-        else:
-            self.behavioral_inference_page.refresh_from_state()
+        self._apply_shared_root_to_page(
+            self.behavioral_inference_page,
+            subsystem="S7",
+            busy=self.behavioral_inference_page.controller.state.task_running,
+            force_bind=True,
+        )
         self.pages.setCurrentWidget(self.behavioral_inference_page)
         self._last_behavior_page = "s7"
         self._update_navigation()
@@ -680,23 +686,12 @@ class MainWindow(QMainWindow):
         self._ensure_group(GROUP_BEHAVIORAL_INFERENCE)
         if isinstance(session_root, Path | str) and str(session_root).strip():
             self._remember_session(session_root)
-        if self._session_root is not None:
-            current = self.behavioral_arbitration_page.controller.state.session_root
-            target = self._session_root.resolve(strict=False)
-            same_session = (
-                current is not None and current.resolve(strict=False) == target
-            )
-            if same_session:
-                self.behavioral_arbitration_page.refresh_from_state()
-            elif self.behavioral_arbitration_page.controller.state.task_running:
-                self.statusBar().showMessage(
-                    "Cannot change the S8 session while behavioral arbitration is active."
-                )
-                self.behavioral_arbitration_page.refresh_from_state()
-            else:
-                self.behavioral_arbitration_page.set_session(self._session_root)
-        else:
-            self.behavioral_arbitration_page.refresh_from_state()
+        self._apply_shared_root_to_page(
+            self.behavioral_arbitration_page,
+            subsystem="S8",
+            busy=self.behavioral_arbitration_page.controller.state.task_running,
+            force_bind=True,
+        )
         self.pages.setCurrentWidget(self.behavioral_arbitration_page)
         self._last_behavior_page = "s8"
         self._update_navigation()
@@ -710,23 +705,12 @@ class MainWindow(QMainWindow):
         self._ensure_group(GROUP_RESULTS_REVIEW)
         if isinstance(session_root, Path | str) and str(session_root).strip():
             self._remember_session(session_root)
-        if self._session_root is not None:
-            current = self.results_packaging_page.controller.state.session_root
-            target = self._session_root.resolve(strict=False)
-            same_session = (
-                current is not None and current.resolve(strict=False) == target
-            )
-            if same_session:
-                self.results_packaging_page.refresh_from_state()
-            elif self.results_packaging_page.controller.state.task_running:
-                self.statusBar().showMessage(
-                    "Cannot change the S9 session while results packaging is active."
-                )
-                self.results_packaging_page.refresh_from_state()
-            else:
-                self.results_packaging_page.set_session(self._session_root)
-        else:
-            self.results_packaging_page.refresh_from_state()
+        self._apply_shared_root_to_page(
+            self.results_packaging_page,
+            subsystem="S9",
+            busy=self.results_packaging_page.controller.state.task_running,
+            force_bind=True,
+        )
         self.pages.setCurrentWidget(self.results_packaging_page)
         self._last_results_page = "s9"
         self._update_navigation()
@@ -740,23 +724,15 @@ class MainWindow(QMainWindow):
         self._ensure_group(GROUP_RESULTS_REVIEW)
         if isinstance(session_root, Path | str) and str(session_root).strip():
             self._remember_session(session_root)
-        if self._session_root is not None:
-            current = self.behavioral_review_page.controller.state.session_root
-            target = self._session_root.resolve(strict=False)
-            same_session = (
-                current is not None and current.resolve(strict=False) == target
-            )
-            if same_session:
-                self.behavioral_review_page.refresh_from_state()
-            elif self.behavioral_review_page.controller.state.task_running:
-                self.statusBar().showMessage(
-                    "Cannot change the S10 session while behavioral review is active."
-                )
-                self.behavioral_review_page.refresh_from_state()
-            else:
-                self.behavioral_review_page.set_session(self._session_root)
-        else:
-            self.behavioral_review_page.refresh_from_state()
+        self._apply_shared_root_to_page(
+            self.behavioral_review_page,
+            subsystem="S10",
+            busy=(
+                self.behavioral_review_page.controller.state.task_running
+                or self.behavioral_review_controller.has_blocking_mutation()
+            ),
+            force_bind=True,
+        )
         self.pages.setCurrentWidget(self.behavioral_review_page)
         self._last_results_page = "s10"
         self._update_navigation()
@@ -789,9 +765,252 @@ class MainWindow(QMainWindow):
         self.s9_button.setVisible(results)
         self.s10_button.setVisible(results)
 
+    def _bind_page_workspace_openers(self) -> None:
+        """Route S2/S4–S10 Browse/Open through the shared workspace controller."""
+
+        opener = self._open_session_from_page_browse
+        for page in (
+            self.pose_page,
+            self.finalization_page,
+            self.blob_features_page,
+            self.combined_features_page,
+            self.behavioral_inference_page,
+            self.behavioral_arbitration_page,
+            self.results_packaging_page,
+            self.behavioral_review_page,
+        ):
+            bind_workspace_session_opener(page, opener)
+
+    def _open_session_from_page_browse(self, path: Path | str) -> None:
+        """Page Browse/Open write-back into ``MainWindow.workspace`` (authoritative)."""
+
+        try:
+            self.workspace_controller.open_session_path(
+                path,
+                require_preprocess=False,
+                persist=False,
+                remember=True,
+            )
+        except WorkspaceNavigationBlocked as exc:
+            QMessageBox.warning(self, "Cannot change workspace", str(exc))
+            self.statusBar().showMessage(str(exc))
+        except WorkspaceError as exc:
+            QMessageBox.warning(self, "Cannot open session", str(exc))
+            self.statusBar().showMessage(str(exc))
+
     def _remember_session(self, session_root: object) -> None:
         if isinstance(session_root, Path | str) and str(session_root).strip():
-            self._session_root = Path(session_root).expanduser().resolve(strict=False)
+            path = Path(session_root).expanduser().resolve(strict=False)
+            self._session_root = path
+            if not self._syncing_workspace_session:
+                # Keep shared WorkspaceContext aligned with shell/S1/S3 browse paths.
+                self.workspace_controller.sync_from_legacy_path(
+                    path,
+                    require_preprocess=False,
+                )
+
+    def _workspace_nav_probe(self) -> tuple[bool, bool, bool]:
+        """Return (hard_locked, soft_task_running, has_open_s10_draft)."""
+
+        hard_locked = (
+            self.pose_page.has_running_task or self.finalization_page.has_running_task
+        )
+        soft_running = any(
+            (
+                self.blob_features_page.has_running_task,
+                self.combined_features_page.has_running_task,
+                self.behavioral_inference_page.has_running_task,
+                self.behavioral_arbitration_page.has_running_task,
+                self.results_packaging_page.has_running_task,
+                self.behavioral_review_page.has_running_task,
+                self.behavioral_review_controller.has_blocking_mutation(),
+            )
+        )
+        review_state = self.behavioral_review_controller.state
+        has_draft = bool(
+            getattr(review_state, "draft_open", False)
+            or getattr(review_state, "editing_session", None) is not None
+        )
+        return hard_locked, soft_running, has_draft
+
+    def _on_workspace_changed(self, snap: object) -> None:
+        """Mirror discovery root and propagate to bound S1–S10 page controllers.
+
+        Same-root updates refresh UI only (preserve ``selected_*_run_id`` / open
+        S10 drafts). Different-root updates invalidate stale session-scoped GUI
+        state via ``set_session`` / S3 project reopen. Active scientific jobs keep
+        their original source identity; busy pages are skipped with a status note.
+        """
+
+        discovery = getattr(snap, "discovery_root", None)
+        prior = self._session_root
+        review_state = self.behavioral_review_controller.state
+        had_open_draft = bool(
+            getattr(review_state, "draft_open", False)
+            or getattr(review_state, "editing_session", None) is not None
+        )
+        self._syncing_workspace_session = True
+        try:
+            if isinstance(discovery, Path):
+                self._session_root = discovery
+            elif (
+                discovery is None
+                and self.workspace.project_id is None
+                and self.workspace.session_id is None
+            ):
+                self._session_root = None
+            self.behavioral_review_controller.set_workspace_discovery_root(
+                self._session_root
+            )
+            if (
+                had_open_draft
+                and prior is not None
+                and self._session_root != prior
+            ):
+                try:
+                    self.behavioral_review_controller.close_session(release_lock=True)
+                except BehavioralReviewUiError as exc:
+                    QMessageBox.warning(
+                        self,
+                        "Cannot release S10 draft",
+                        str(exc),
+                    )
+                    self.statusBar().showMessage(str(exc))
+                else:
+                    self.statusBar().showMessage(
+                        "Workspace changed; S10 draft lock released. "
+                        "Re-open the review against the new analysis target "
+                        "to continue (journal preserved on disk)."
+                    )
+            if not self._propagating_workspace_pages:
+                self._propagating_workspace_pages = True
+                try:
+                    self._sync_bound_pages_to_discovery_root(self._session_root)
+                finally:
+                    self._propagating_workspace_pages = False
+        finally:
+            self._syncing_workspace_session = False
+        self.statusBar().showMessage(self.workspace_controller.status_line())
+
+    def _sync_bound_pages_to_discovery_root(self, root: Path | None) -> None:
+        """Invalidate or refresh previously bound pages for the shared target."""
+
+        if root is None:
+            return
+        current = self.pages.currentWidget()
+        page_specs: list[tuple[object, str, bool, bool]] = [
+            (
+                self.pose_page,
+                "S2",
+                self.pose_page.has_running_task,
+                current is self.pose_page,
+            ),
+            (
+                self.finalization_page,
+                "S4",
+                self.finalization_page.has_running_task,
+                current is self.s4_shell or current is self.finalization_page,
+            ),
+            (
+                self.blob_features_page,
+                "S5",
+                self.blob_features_page.has_running_task,
+                current is self.blob_features_page,
+            ),
+            (
+                self.combined_features_page,
+                "S6",
+                self.combined_features_page.has_running_task,
+                current is self.combined_features_page,
+            ),
+            (
+                self.behavioral_inference_page,
+                "S7",
+                self.behavioral_inference_page.controller.state.task_running,
+                current is self.behavioral_inference_page,
+            ),
+            (
+                self.behavioral_arbitration_page,
+                "S8",
+                self.behavioral_arbitration_page.controller.state.task_running,
+                current is self.behavioral_arbitration_page,
+            ),
+            (
+                self.results_packaging_page,
+                "S9",
+                self.results_packaging_page.controller.state.task_running,
+                current is self.results_packaging_page,
+            ),
+            (
+                self.behavioral_review_page,
+                "S10",
+                (
+                    self.behavioral_review_page.controller.state.task_running
+                    or self.behavioral_review_controller.has_blocking_mutation()
+                ),
+                current is self.behavioral_review_page,
+            ),
+        ]
+        for page, name, busy, is_current in page_specs:
+            self._apply_shared_root_to_page(
+                page,
+                subsystem=name,
+                busy=busy,
+                force_bind=is_current,
+            )
+        self._apply_shared_root_to_s3(
+            force_bind=current is self.s3_shell or current is self.review_page
+        )
+
+    def _apply_shared_root_to_page(
+        self,
+        page: object,
+        *,
+        subsystem: str,
+        busy: bool,
+        force_bind: bool,
+    ) -> None:
+        """Apply ``_session_root`` to one page with same-root / busy guards."""
+
+        root = self._session_root
+        if root is None:
+            if hasattr(page, "refresh_from_state"):
+                page.refresh_from_state()  # type: ignore[attr-defined]
+            return
+        controller = getattr(page, "controller", None)
+        current = controller_session_root(controller) if controller is not None else None
+        if same_session_root(current, root):
+            page.refresh_from_state()  # type: ignore[attr-defined]
+            return
+        if current is None and not force_bind:
+            # Never-opened pages bind lazily when navigated to (force_bind).
+            return
+        if busy:
+            self.statusBar().showMessage(
+                f"Cannot change the {subsystem} session while a task is active."
+            )
+            if hasattr(page, "refresh_from_state"):
+                page.refresh_from_state()  # type: ignore[attr-defined]
+            return
+        page.set_session(root)  # type: ignore[attr-defined]
+
+    def _apply_shared_root_to_s3(self, *, force_bind: bool) -> None:
+        """Keep S3 project discovery aligned with the shared analysis target."""
+
+        root = self._session_root
+        if root is None:
+            return
+        current = controller_session_root(self.review_controller)
+        if same_session_root(current, root):
+            return
+        if current is None and not force_bind:
+            return
+        if self._hard_navigation_blocked():
+            return
+        self.review_page.open_project(root)
+
+    def _on_workspace_error(self, title: str, detail: str) -> None:
+        QMessageBox.warning(self, title, detail)
 
     def _s1_completed(self, session_root: object) -> None:
         """Continue directly to S2 after success without starting inference."""
@@ -1003,6 +1222,11 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Wait for non-cancellable S2/S4/S5/S6/S7/S8/S9/S10 work or cancel S1."""
+
+        # Abandon in-flight workspace discovery; never write a partial catalog.
+        self.workspace_controller.cancel_background_scan(reason="window closing")
+        self.workspace_controller.discard_pending_registration()
+        self.workspace_controller.discard_pending_rebind()
 
         if self.pose_page.has_running_task:
             event.ignore()

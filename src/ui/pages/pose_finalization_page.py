@@ -40,6 +40,7 @@ from ui.controllers.pose_finalization_controller import (
     PoseFinalizationUiSettings,
 )
 from ui.tasks import GuiTaskRunner, TaskAlreadyRunningError, format_task_duration
+from ui.workspace.page_binding import request_shared_session
 
 
 class PoseFinalizationPage(QWidget):
@@ -230,12 +231,16 @@ class PoseFinalizationPage(QWidget):
         )
         if not chosen:
             return
+        if request_shared_session(self, chosen):
+            return
         self.set_session(chosen)
 
     def _open_typed_session(self) -> None:
         text = self.session_path.text().strip()
         if not text:
             QMessageBox.information(self, "Session required", "Enter a session path.")
+            return
+        if request_shared_session(self, text):
             return
         self.set_session(text)
 

@@ -53,6 +53,7 @@ from ui.tasks import (
     format_pipeline_progress,
     format_task_duration,
 )
+from ui.workspace.page_binding import request_shared_session
 
 
 class BehavioralArbitrationPage(QWidget):
@@ -439,6 +440,8 @@ class BehavioralArbitrationPage(QWidget):
         )
         if not chosen:
             return
+        if request_shared_session(self, chosen):
+            return
         self.set_session(chosen)
 
     def _open_typed_session(self) -> None:
@@ -450,6 +453,8 @@ class BehavioralArbitrationPage(QWidget):
         text = self.session_path.text().strip()
         if not text:
             QMessageBox.information(self, "Session required", "Enter a session path.")
+            return
+        if request_shared_session(self, text):
             return
         self.set_session(text)
 

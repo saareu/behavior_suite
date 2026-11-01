@@ -54,6 +54,7 @@ from ui.tasks import (
     format_task_duration,
 )
 from ui.widgets.video_frame_view import VideoFrameView
+from ui.workspace.page_binding import request_shared_session
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -471,13 +472,18 @@ class BlobFeaturesPage(QWidget):
         chosen = QFileDialog.getExistingDirectory(
             self, "Open project/session directory", start
         )
-        if chosen:
-            self.set_session(chosen)
+        if not chosen:
+            return
+        if request_shared_session(self, chosen):
+            return
+        self.set_session(chosen)
 
     def _open_typed_session(self) -> None:
         text = self.session_path.text().strip()
         if not text:
             QMessageBox.information(self, "Session required", "Enter a session path.")
+            return
+        if request_shared_session(self, text):
             return
         self.set_session(text)
 

@@ -101,6 +101,7 @@ include = [
 "behavioral_arbitration*",
 "results_packaging*",
 "behavioral_review*",
+"workspace*",
 "cli*",
 "ui*",
 ]
@@ -147,6 +148,7 @@ source = [
 "behavioral_arbitration",
 "results_packaging",
 "behavioral_review",
+"workspace",
 "cli",
 ]
 
@@ -205,6 +207,7 @@ known-first-party = [
 "behavioral_arbitration",
 "results_packaging",
 "behavioral_review",
+"workspace",
 "cli",
 "ui",
 ]
@@ -224,6 +227,7 @@ packages = [
 "behavioral_arbitration",
 "results_packaging",
 "behavioral_review",
+"workspace",
 ]
 check_untyped_defs = true
 disallow_any_generics = true
@@ -259,3 +263,11 @@ module = [
 "combined_features.pipeline50_post",
 ]
 ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = [
+"workspace.qt_context",
+]
+disable_error_code = [
+"import-untyped",
+]

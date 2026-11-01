@@ -129,6 +129,7 @@ class PublishRequestIdentity:
     generation: int
     review_run_id: str
     parent_package_run_id: str
+    session_root: Path
 
 
 # Edit operation kinds dispatched through BEHAVIORAL_REVIEW_EDIT workers.
@@ -385,6 +386,33 @@ class BehavioralReviewController:
         self._review_discovery_fn = review_discovery_fn
         self._package_discovery_fn = package_discovery_fn
         self._pending_edit: _PendingEdit | None = None
+        # Shared MainWindow workspace discovery root (publish provenance gate).
+        self._workspace_discovery_root: Path | None = None
+
+    def set_workspace_discovery_root(self, root: Path | str | None) -> None:
+        """Mirror the shell analysis target for publish/source mismatch checks."""
+
+        if root is None or not str(root).strip():
+            self._workspace_discovery_root = None
+            return
+        self._workspace_discovery_root = Path(root).expanduser().resolve(strict=False)
+
+    @property
+    def workspace_discovery_root(self) -> Path | None:
+        return self._workspace_discovery_root
+
+    def has_blocking_mutation(self) -> bool:
+        """True when edit/publish/open workers hold the S10 session (block switch)."""
+
+        state = self.state
+        return bool(
+            state.edit_running
+            or state.publish_running
+            or state.open_running
+            or state.active_edit_identity is not None
+            or state.active_publish_identity is not None
+            or state.active_open_identity is not None
+        )
 
     # --- session / discovery -------------------------------------------------
 
@@ -1471,6 +1499,7 @@ class BehavioralReviewController:
             raise BehavioralReviewUiError("Open a writable draft before publishing.")
         if not self.state.editing_active:
             raise BehavioralReviewUiError("Editing mode must be active to publish.")
+        self._assert_publish_matches_active_target()
         report = assert_draft_publishable(
             session.draft,
             source=session.inspection.source,
@@ -1502,12 +1531,15 @@ class BehavioralReviewController:
             )
         session = self.state.editing_session
         assert session is not None and session.draft is not None
+        assert self.state.session_root is not None
+        self._assert_publish_matches_active_target()
         self.state.publish_generation += 1
         identity = PublishRequestIdentity(
             request_id=str(uuid4()),
             generation=self.state.publish_generation,
             review_run_id=session.draft.review_run_id,
             parent_package_run_id=session.package_run_id,
+            session_root=self.state.session_root.resolve(strict=False),
         )
         self.state.active_publish_identity = identity
         self.state.publish_running = True
@@ -1517,7 +1549,16 @@ class BehavioralReviewController:
         return identity
 
     def publish_worker(self, identity: PublishRequestIdentity) -> ReviewedPublicationResult:
-        del identity
+        # Reject mid-flight if the GUI session/workspace target diverged.
+        if (
+            self.state.session_root is None
+            or identity.session_root.resolve(strict=False)
+            != self.state.session_root.resolve(strict=False)
+        ):
+            raise BehavioralReviewUiError(
+                "Publication aborted: session root changed while publish was queued."
+            )
+        self._assert_publish_matches_active_target()
         session = self.state.editing_session
         assert session is not None
         if self._publish_fn is not None:
@@ -1533,6 +1574,9 @@ class BehavioralReviewController:
             active is None
             or identity.request_id != active.request_id
             or identity.generation != active.generation
+            or self.state.session_root is None
+            or identity.session_root.resolve(strict=False)
+            != self.state.session_root.resolve(strict=False)
         ):
             return False
         self.state.last_publish_result = result
@@ -1570,6 +1614,50 @@ class BehavioralReviewController:
         self.state.run_error = message
         self.state.run_stage = "Publication failed"
         return True
+
+    def _assert_publish_matches_active_target(self) -> None:
+        """Block publish when draft/package lineage ≠ active session/workspace target.
+
+        Does not auto-accept corrections or rewrite journals. Callers must reopen
+        the draft explicitly against the intended analysis target.
+        """
+
+        root = self.state.session_root
+        session = self.state.editing_session
+        if root is None:
+            raise BehavioralReviewUiError(
+                "Publication blocked: no active S10 session root."
+            )
+        if session is None or session.draft is None:
+            raise BehavioralReviewUiError(
+                "Publication blocked: no open writable draft."
+            )
+        root_r = root.resolve(strict=False)
+        package_dir = Path(session.inspection.source.package_dir).resolve(strict=False)
+        try:
+            package_dir.relative_to(root_r)
+        except ValueError as exc:
+            raise BehavioralReviewUiError(
+                "Publication blocked: open draft/package is not under the active "
+                f"S10 session root ({root_r}). Re-open the draft explicitly."
+            ) from exc
+        review_dir = self.state.review_run_dir
+        if review_dir is not None:
+            review_r = Path(review_dir).resolve(strict=False)
+            try:
+                review_r.relative_to(root_r)
+            except ValueError as exc:
+                raise BehavioralReviewUiError(
+                    "Publication blocked: draft review directory is not under the "
+                    f"active S10 session root ({root_r})."
+                ) from exc
+        expected = self._workspace_discovery_root
+        if expected is not None and expected.resolve(strict=False) != root_r:
+            raise BehavioralReviewUiError(
+                "Publication blocked: active workspace analysis target "
+                f"({expected}) does not match the open draft session ({root_r}). "
+                "Re-open the draft against the current workspace target."
+            )
 
     # --- housekeeping -------------------------------------------------------
 

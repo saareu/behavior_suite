@@ -444,7 +444,8 @@ def test_publication_blocking_and_success(tmp_path: Path) -> None:
     controller, built = _controller_with_package(tmp_path)
     controller.set_reviewer_id("publisher")
     controller.enter_editing_mode()
-    controller.create_draft(review_root=tmp_path / "gui_publish")
+    # Draft must live under the active session root for publish path safety.
+    controller.create_draft()
     controller.set_exclusive_label(
         start_sample_idx=0, end_sample_idx=0, label="retract"
     )
