@@ -17,6 +17,10 @@ import typer
 from pydantic import ValidationError
 
 import preprocess as preprocess_package
+from cli.doctor_advisories import (
+    collect_inference_advisories,
+    format_inference_advisories,
+)
 from preprocess.cage_detection import detect_cage_crop_plan
 from preprocess.config import PreCropConfig, PreprocessConfig, load_preprocess_config
 from preprocess.crop_plan import CropPlan
@@ -361,7 +365,7 @@ def _score_text(value: float | None) -> str:
 
 @app.command("doctor")
 def doctor() -> None:
-    """Check that the local runtime can run preprocessing safely."""
+    """Check FFmpeg capability and print nonblocking S2/S7 advisories."""
 
     try:
         package_version = version("behavior-suite")
@@ -375,6 +379,10 @@ def doctor() -> None:
     typer.echo(f"behavior-suite version: {package_version}")
     typer.echo(f"behavior-suite package location: {package_location}")
     typer.echo(format_preflight_summary(preflight))
+    # Capability contract is the gate; exact FFmpeg minor (e.g. 7.1.1 vs 8.x) is not.
+    typer.echo(
+        format_inference_advisories(collect_inference_advisories())
+    )
     if not preflight.supported:
         raise typer.Exit(code=1)
 

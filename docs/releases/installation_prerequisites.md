@@ -14,7 +14,7 @@ This sheet consolidates external dependencies the Windows installer does **not**
 | --- | --- |
 | OS | Windows lab/developer workstation (supported install/launch path is the `.bat` workflow below) |
 | Conda | Miniforge or Anaconda on `PATH` ([conda-forge download](https://conda-forge.org/download/) recommended by the installer) |
-| Python runtime | Dedicated Conda env `behavior_suite_gui` from `environment-gui.yml`: **Python 3.12**, **FFmpeg 7.1.1**, **PySide6 6.11.1** (conda-forge) |
+| Python runtime | Dedicated Conda env `behavior_suite_gui` from `environment-gui.yml`: **Python 3.12**, **FFmpeg 7.1.1** (YAML pin; compatible **8.x** OK if capability probe passes), **PySide6 6.11.1** (conda-forge) |
 | Package extras | Editable install `.[s2,s7]` — `sleap-io==0.8.0` (S2) plus `xgboost` / `scikit-learn` / `joblib` (S7) |
 
 Do not install into the user’s base Conda environment. The installer recreates `behavior_suite_gui` from the pinned YAML.
@@ -49,15 +49,15 @@ Post-install validation also runs `scripts\validate_windows_gui_runtime.py` (PyS
 
 ## 3. What the installer provides vs what it does not
 
-| Provided by installer | Not installed / not verified by installer or doctor |
+| Provided by installer | Not installed / not required to *launch* GUI |
 | --- | --- |
-| Conda env recreate + editable suite with `[s2,s7]` | External **`sleap-nn` 0.3.x** executable |
-| FFmpeg 7.1.1 in the GUI env | Lab **SLEAP inference model directories** (trained networks) |
+| Conda env recreate + editable suite with `[s2,s7]` | External **`sleap-nn` 0.3.x** executable (doctor **WARN** if missing) |
+| FFmpeg in the GUI env (YAML pins 7.1.1) | Lab **SLEAP inference model directories** (trained networks) |
 | PySide6 6.11.1 (conda-forge) | GPU/CUDA stack for SLEAP inference |
-| `sleap-io` 0.8.0 for reading `pose.slp` | Automatic S7 registry path (operator browses once in GUI) |
+| `sleap-io` 0.8.0 for reading `pose.slp` | Automatic S7 registry path (operator browses once in GUI; doctor advises) |
 | S7 runtime libs (`xgboost` / `scikit-learn` / `joblib`) | Session videos, project trees, or laboratory recordings |
 
-`behavior-suite doctor` checks FFmpeg/runtime preflight only. It does **not** verify `sleap-nn`, GPU, or the S7 model registry.
+`behavior-suite doctor` **hard-gates** on FFmpeg capability (modern Stage A timestamp contract). Exact FFmpeg minor version is not the gate: a conda-forge **8.x** install that passes the capability probe is acceptable. Doctor also prints **nonblocking** advisories for `sleap-nn` 0.3.x, S7 Python deps, and persisted/suggested S7 registry discovery. Missing optional inference deps must **not** prevent GUI startup.
 
 ---
 
@@ -98,7 +98,8 @@ Older S7 runs may record model paths under `legacy/models/...`. Those digests mu
 
 ## 7. Video decoding and FFmpeg
 
-- FFmpeg **7.1.1** comes from conda-forge via `environment-gui.yml` into `behavior_suite_gui`.
+- `environment-gui.yml` pins FFmpeg **7.1.1** from conda-forge into `behavior_suite_gui`.
+- Doctor accepts any resolved FFmpeg that passes the capability probe (including compatible **8.x** banners). Do not force a reinstall to 7.1.1 solely because the banner differs when capabilities pass.
 - S1 prepare and S9 bout-video export depend on that env FFmpeg.
 - Prefer decoding/writing on a writable local disk. Network/`\\` session paths may require explicit verification (S2 treats UNC paths as network).
 
@@ -138,7 +139,8 @@ If you need SLEAP training media tracked under `models/SLEAP/`, use Git LFS per 
 | --- | --- |
 | Installer fails at Conda | Install Miniforge/Anaconda; ensure `conda` is on `PATH` |
 | Launch fails missing env | Re-run `scripts\install_windows_gui.bat` |
-| Doctor fails | Repair with the installer; do not mix damaged pip PySide6 into the dedicated env |
+| Doctor fails (exit 1) | FFmpeg capability unsupported — repair with the installer; do not mix damaged pip PySide6 into the dedicated env |
+| Doctor WARN on S2/S7 | Expected when `sleap-nn`/registry/deps missing; GUI may still open — fix before inference stages |
 | GUI opens but S2 inference fails | Confirm `sleap-nn` 0.3.x resolves; confirm lab inference model paths in S2 |
 | S7 Run blocked | Browse registry root to `models/` (dyadic/focal v1 present) |
 | Old S9 package stale / exports blocked | Resolve historical `legacy/models` digests (junction/remap) or package from a new S7/S8 with `models/` |
@@ -151,5 +153,7 @@ Smoke after install: launch GUI and confirm Groups **1–4** (S1–S10) are visi
 ## Related documents
 
 - Root [`README.md`](../../README.md) — supported Windows workflow
+- [`v0.1.1_reliability_plan.md`](v0.1.1_reliability_plan.md) — reliability fixes and doctor policy
+- [`v0.1.1_fresh_pipeline_checklist.md`](v0.1.1_fresh_pipeline_checklist.md) — fresh short-clip S1→S10 smoke
 - [`s1_s10_mvp_readiness.md`](s1_s10_mvp_readiness.md) — release audit and limitations
 - [`s1_s10_p0_remediation_plan.md`](s1_s10_p0_remediation_plan.md) — P0 remediation tracking

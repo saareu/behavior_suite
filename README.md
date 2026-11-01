@@ -83,13 +83,17 @@ models, S7 `models/` registry, FFmpeg, session inputs, optional Git LFS): see
 [`docs/releases/installation_prerequisites.md`](docs/releases/installation_prerequisites.md).
 
 The installer recreates the dedicated `behavior_suite_gui` Conda environment
-with Python 3.12, FFmpeg 7.1.1 from conda-forge, PySide6 6.11.1 from
-conda-forge, and this repository installed in editable mode with the S2 and S7
-runtime extras (`sleap-io`, plus `xgboost` / `scikit-learn` / `joblib` for
-behavioral inference). Model binaries are **not** installed by the script; open
+with Python 3.12, FFmpeg 7.1.1 from conda-forge (compatible 8.x is OK when the
+doctor capability probe passes), PySide6 6.11.1 from conda-forge, and this
+repository installed in editable mode with the S2 and S7 runtime extras
+(`sleap-io`, plus `xgboost` / `scikit-learn` / `joblib` for behavioral
+inference). Model binaries are **not** installed by the script; open
 Subsystem 7 and browse to a trusted local model-registry root (saved for later
-launches). The installer does not require PowerShell activation/profile setup
-and does not modify the user's base environment.
+launches). `behavior-suite doctor` hard-gates on FFmpeg capability and prints
+nonblocking advisories for `sleap-nn` 0.3.x and the S7 registry/deps — missing
+optional inference tooling must not block GUI launch. The installer does not
+require PowerShell activation/profile setup and does not modify the user's
+base environment.
 
 If you must install S7 libraries manually into the GUI env, use a PowerShell-safe
 form (avoid double-quoted `.[s7]`, which expands `$7`):

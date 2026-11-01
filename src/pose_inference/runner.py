@@ -449,6 +449,65 @@ def _resolve_sleap_runtime(
     )
 
 
+@dataclass(frozen=True)
+class SleapNnProbeResult:
+    """Non-raising SLEAP-NN availability probe for doctor advisories."""
+
+    available: bool
+    compatible: bool
+    executable_path: Path | None
+    version: str | None
+    message: str
+
+
+def probe_sleap_nn_runtime(
+    *,
+    explicit_path: Path | None = None,
+    version_runner: SubprocessRunner | None = None,
+) -> SleapNnProbeResult:
+    """Resolve ``sleap-nn`` and check the 0.3.x contract without raising.
+
+    Missing or incompatible SLEAP-NN is advisory for launch: GUI may start,
+    but S2 inference will not be ready until a compatible executable is available.
+    """
+
+    runner = version_runner or subprocess.run
+    try:
+        runtime = _resolve_sleap_runtime(
+            explicit_path=explicit_path,
+            profile={},
+            version_runner=runner,
+        )
+    except _IncompatibleSleapVersionError as exc:
+        return SleapNnProbeResult(
+            available=True,
+            compatible=False,
+            executable_path=exc.executable_path,
+            version=exc.version,
+            message=(
+                f"S2 not ready: sleap-nn incompatible "
+                f"(found {exc.version} at {exc.executable_path}; require 0.3.x)"
+            ),
+        )
+    except PoseInferenceError as exc:
+        return SleapNnProbeResult(
+            available=False,
+            compatible=False,
+            executable_path=None,
+            version=None,
+            message=f"S2 not ready: sleap-nn missing or unusable ({exc})",
+        )
+    return SleapNnProbeResult(
+        available=True,
+        compatible=True,
+        executable_path=runtime.executable_path,
+        version=runtime.version,
+        message=(
+            f"S2 sleap-nn: ready ({runtime.version} at {runtime.executable_path})"
+        ),
+    )
+
+
 def _load_json_object(path: Path) -> Mapping[str, Any]:
     try:
         with path.open("r", encoding="utf-8") as stream:

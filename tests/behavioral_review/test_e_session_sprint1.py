@@ -149,7 +149,15 @@ def test_e_session_representative_bout_seeks(e_session) -> None:
     assert m_sbs.start.sample_idx == int(sbs["start_sample_idx"])
 
 
+def _review_run_ids(session: Path) -> frozenset[str]:
+    review_root = session / "behavioral_review"
+    if not review_root.is_dir():
+        return frozenset()
+    return frozenset(path.name for path in review_root.glob("behavioral_review__*"))
+
+
 def test_e_session_no_upstream_writes(e_source, e_session) -> None:
+    before_review_runs = _review_run_ids(SESSION)
     snaps = snapshot_upstream_fingerprints(e_source)
     e_session.seek_sample(100, decode=True)
     e_session.seek_sample(101, decode=True)  # possible plateau keep-frame
@@ -159,10 +167,11 @@ def test_e_session_no_upstream_writes(e_source, e_session) -> None:
         video_path=e_source.source_video.path,
         snapshots=snaps,
     )
-    # Opening must not create a review draft.
-    assert not (SESSION / "behavioral_review").exists() or not any(
-        (SESSION / "behavioral_review").glob("behavioral_review__*")
-    )
+    # Opening inspection must not create a new review draft/publish run.
+    # Existing laboratory published reviews are legitimate and must remain.
+    after_review_runs = _review_run_ids(SESSION)
+    assert after_review_runs == before_review_runs
+    assert after_review_runs - before_review_runs == frozenset()
 
 
 def test_e_session_packaged_bouts_match_row_count(e_source) -> None:

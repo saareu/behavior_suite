@@ -162,7 +162,15 @@ def test_e_session_windowed_performance(e_session) -> None:
     )
 
 
+def _review_run_ids(session: Path) -> frozenset[str]:
+    review_root = session / "behavioral_review"
+    if not review_root.is_dir():
+        return frozenset()
+    return frozenset(path.name for path in review_root.glob("behavioral_review__*"))
+
+
 def test_e_session_sprint2_no_writes(e_session) -> None:
+    before_review_runs = _review_run_ids(SESSION)
     source = open_review_source(PACKAGE, require_video=True, require_s8_states=True)
     snaps = snapshot_upstream_fingerprints(source)
     e_session.seek_sample(100)
@@ -175,6 +183,8 @@ def test_e_session_sprint2_no_writes(e_session) -> None:
         video_path=source.source_video.path,
         snapshots=snaps,
     )
-    assert not (SESSION / "behavioral_review").exists() or not any(
-        (SESSION / "behavioral_review").glob("behavioral_review__*")
-    )
+    # Opening inspection must not create a new review draft/publish run.
+    # Existing laboratory published reviews are legitimate and must remain.
+    after_review_runs = _review_run_ids(SESSION)
+    assert after_review_runs == before_review_runs
+    assert after_review_runs - before_review_runs == frozenset()

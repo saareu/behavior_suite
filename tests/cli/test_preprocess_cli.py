@@ -191,6 +191,16 @@ def test_doctor_exits_zero_for_supported_mocked_runtime(
         "preflight_ffmpeg_runtime",
         lambda: _runtime_preflight(supported=True),
     )
+    monkeypatch.setattr(
+        cli_module,
+        "collect_inference_advisories",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "format_inference_advisories",
+        lambda _advisories: "Inference advisories (nonblocking; GUI may still launch):\n- [WARN] S2 not ready: sleap-nn missing",
+    )
 
     result = runner.invoke(cli_module.app, ["doctor"])
 
@@ -201,6 +211,9 @@ def test_doctor_exits_zero_for_supported_mocked_runtime(
     assert "supports_fps_mode: yes" in result.output
     assert "supports_named_enc_time_base_demux: yes" in result.output
     assert "supports_modern_stage_timestamp_contract: yes" in result.output
+    # Missing optional inference deps must not fail doctor when FFmpeg is OK.
+    assert "Inference advisories" in result.output
+    assert "S2 not ready: sleap-nn missing" in result.output
 
 
 def test_doctor_exits_nonzero_for_unsupported_mocked_runtime(
@@ -210,6 +223,16 @@ def test_doctor_exits_nonzero_for_unsupported_mocked_runtime(
         cli_module,
         "preflight_ffmpeg_runtime",
         lambda: _runtime_preflight(supported=False),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "collect_inference_advisories",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "format_inference_advisories",
+        lambda _advisories: "Inference advisories: none",
     )
 
     result = runner.invoke(cli_module.app, ["doctor"])

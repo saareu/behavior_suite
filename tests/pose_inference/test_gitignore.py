@@ -4,7 +4,8 @@ from pathlib import Path
 def test_generated_pose_inference_artifacts_are_ignored() -> None:
     ignored_patterns = Path(".gitignore").read_text(encoding="utf-8")
 
-    assert "test_cases/**/preprocess/" in ignored_patterns
+    # Intentional policy: ignore the entire local laboratory test_cases/ tree.
+    assert "/test_cases/" in ignored_patterns
     assert "test_runs/" in ignored_patterns
     assert "acceptance_tests/" in ignored_patterns
     assert "bsuite_runs/" in ignored_patterns
