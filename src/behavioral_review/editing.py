@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pandas as pd  # type: ignore[import-untyped]
 
@@ -335,6 +337,50 @@ class EditingSession:
                 )
             ]
         )[0]
+
+    def set_bout_review_statuses(
+        self,
+        targets: Sequence[Mapping[str, Any]],
+        *,
+        client_op_id: str | None = None,
+    ) -> list[CorrectionEvent]:
+        """Apply multiple status-only decisions as one durable undo group.
+
+        Each target mapping requires ``target_bout_id``, ``status``, and may
+        include ``target_bout_id_kind`` / ``channel``. Validation happens before
+        any journal append so a failure leaves prior decisions unchanged.
+        """
+
+        self._require_editing_gate(require_draft=True)
+        if not targets:
+            raise EditingError("Bulk status update requires at least one target.")
+        bulk_client = client_op_id or str(uuid4())
+        events: list[CorrectionEvent] = []
+        for index, raw in enumerate(targets):
+            target_bout_id = raw.get("target_bout_id")
+            status = raw.get("status")
+            if target_bout_id is None or not str(target_bout_id).strip():
+                raise EditingError(
+                    f"Bulk status target[{index}] missing target_bout_id."
+                )
+            if status not in DECISION_STATUS_VALUES:
+                raise EditingError(
+                    f"Invalid status {status!r} at bulk target[{index}]; expected "
+                    f"one of {sorted(DECISION_STATUS_VALUES)}."
+                )
+            kind = str(raw.get("target_bout_id_kind") or BOUT_ID_KIND_SOURCE_S8)
+            channel = raw.get("channel")
+            events.append(
+                self._make_event(
+                    OP_SET_BOUT_REVIEW_STATUS,
+                    target_bout_id=str(target_bout_id),
+                    target_bout_id_kind=kind,
+                    status=str(status),
+                    channel=(str(channel) if channel is not None else None),
+                    client_op_id=f"{bulk_client}:{index}",
+                )
+            )
+        return self._commit_events(events)
 
     def add_note(
         self,

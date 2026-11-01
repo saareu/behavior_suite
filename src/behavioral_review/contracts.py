@@ -28,6 +28,7 @@ WORKING_DIRNAME = "working"
 WORKING_MANIFEST_FILENAME = "working_manifest.json"
 CORRECTION_EVENTS_FILENAME = "correction_events.jsonl"
 JOURNAL_CURSOR_FILENAME = "journal_cursor.json"
+JOURNAL_RECOVERY_BACKUPS_DIRNAME = "recovery_backups"
 REVIEW_BOUT_STATUS_FILENAME = "review_bout_status.jsonl"
 NOTES_FILENAME = "notes.jsonl"
 LOCKS_DIRNAME = "locks"
@@ -45,6 +46,7 @@ GALLERY_INDEX_SCHEMA_VERSION = "behavioral_review_gallery_index_v1"
 GALLERY_CARD_SCHEMA_VERSION = "behavioral_review_gallery_card_v1"
 GALLERY_SOURCE_AUTOMATED = "automated"
 GALLERY_SOURCE_PUBLISHED = "published"
+GALLERY_SOURCE_WORKING = "working_draft"
 # Practical A1 preview concurrency (validated by focused tests; not unbounded).
 GALLERY_DEFAULT_MAX_CONCURRENT_PREVIEWS = 4
 GALLERY_DEFAULT_MAX_QUEUED_PREVIEW_REQUESTS = 16

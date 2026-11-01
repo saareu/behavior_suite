@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,7 @@ from behavioral_review.contracts import (
     CORRECTION_EVENTS_FILENAME,
     JOURNAL_CURSOR_FILENAME,
     JOURNAL_CURSOR_SCHEMA_VERSION,
+    JOURNAL_RECOVERY_BACKUPS_DIRNAME,
     JournalError,
 )
 from behavioral_review.events import CorrectionEvent
@@ -61,12 +64,26 @@ class JournalCursor:
 
 @dataclass
 class EventJournal:
-    """Durable JSONL journal under a working draft directory."""
+    """Durable JSONL journal under a working draft directory.
+
+    Transaction commit boundary
+    ---------------------------
+    ``append_events`` fsyncs JSONL lines first, then atomically replaces
+    ``journal_cursor.json``. The cursor is the commit record. After a successful
+    append, ``redo_high_water_seq`` equals the last committed event seq. Undo
+    moves only ``cursor_event_seq`` left while leaving ``redo_high_water_seq``
+    unchanged, so legitimate redo history remains ``cursor < seq <= redo_high_water``.
+
+    Incomplete appends can leave durable JSONL lines with ``event_seq`` greater
+    than the still-old ``redo_high_water_seq``. Recovery discards only that
+    uncommitted tail; committed events and redo history are preserved.
+    """
 
     working_dir: Path
     events: list[CorrectionEvent] = field(default_factory=list)
     cursor: JournalCursor = field(default_factory=JournalCursor.empty)
     recovery_warnings: list[str] = field(default_factory=list)
+    last_recovery_backup_dir: Path | None = None
 
     @property
     def events_path(self) -> Path:
@@ -75,6 +92,10 @@ class EventJournal:
     @property
     def cursor_path(self) -> Path:
         return self.working_dir / JOURNAL_CURSOR_FILENAME
+
+    @property
+    def recovery_backups_dir(self) -> Path:
+        return self.working_dir / JOURNAL_RECOVERY_BACKUPS_DIRNAME
 
     @classmethod
     def open(cls, working_dir: Path) -> EventJournal:
@@ -86,90 +107,201 @@ class EventJournal:
 
     def _load(self) -> None:
         warnings: list[str] = []
-        events: list[CorrectionEvent] = []
-        if self.events_path.is_file():
-            raw_text = self.events_path.read_text(encoding="utf-8")
-            # Tolerate trailing partial line after crash mid-write.
-            lines = raw_text.splitlines()
-            truncated = False
-            if raw_text and not raw_text.endswith("\n") and lines:
-                # Last line may be incomplete — drop it after validation attempt.
-                candidate = lines[-1]
-                try:
-                    json.loads(candidate)
-                except json.JSONDecodeError:
-                    lines = lines[:-1]
-                    truncated = True
-                    warnings.append(
-                        "Truncated incomplete trailing journal line during recovery."
-                    )
-            last_seq = 0
-            for i, line in enumerate(lines):
-                text = line.strip()
-                if not text:
-                    continue
-                try:
-                    payload = json.loads(text)
-                    if not isinstance(payload, dict):
-                        raise JournalError("Journal line is not an object.")
-                    event = CorrectionEvent.from_dict(payload)
-                except (json.JSONDecodeError, TypeError, ValueError, KeyError) as exc:
-                    warnings.append(
-                        f"Stopped journal replay at line {i + 1}: {exc}. "
-                        "Trailing corrupt events discarded for recovery."
-                    )
-                    truncated = True
-                    break
-                if event.event_seq <= last_seq:
-                    raise JournalError(
-                        f"Non-monotonic event_seq in journal at line {i + 1} "
-                        f"({event.event_seq} after {last_seq})."
-                    )
-                if last_seq and event.event_seq != last_seq + 1:
-                    # Gaps after truncation are ok only if we already stopped; else fail.
-                    raise JournalError(
-                        f"Journal event_seq gap at line {i + 1}: "
-                        f"expected {last_seq + 1}, got {event.event_seq}."
-                    )
-                events.append(event)
-                last_seq = event.event_seq
-            if truncated:
-                # Rewrite truncated journal to last valid line (crash recovery).
-                self._rewrite_valid_prefix(events)
-        self.events = events
+        events, truncated, line_warnings = self._parse_events_file()
+        warnings.extend(line_warnings)
 
-        if self.cursor_path.is_file():
-            try:
-                cursor_raw = json.loads(self.cursor_path.read_text(encoding="utf-8"))
-                if not isinstance(cursor_raw, dict):
-                    raise JournalError("journal_cursor.json must be an object.")
-                cursor = JournalCursor.from_dict(cursor_raw)
-            except (json.JSONDecodeError, TypeError, ValueError) as exc:
-                warnings.append(f"Invalid journal_cursor.json; rebuilding ({exc}).")
-                cursor = self._rebuild_cursor_from_events(events)
-                self._atomic_write_json(self.cursor_path, cursor.to_dict())
-        else:
-            cursor = self._rebuild_cursor_from_events(events)
-            self._atomic_write_json(self.cursor_path, cursor.to_dict())
+        cursor, cursor_source, cursor_warnings = self._resolve_cursor(events)
+        warnings.extend(cursor_warnings)
+
+        # Incomplete bulk/group append: durable events may have been fsynced
+        # before the atomic cursor update. Events beyond redo_high_water_seq
+        # are not on an intentional undo/redo branch — discard for
+        # all-or-nothing recovery (cursor redo_high_water is the commit boundary).
+        committed_high = int(cursor.redo_high_water_seq)
+        orphan_count = sum(1 for e in events if int(e.event_seq) > committed_high)
+        discarded_orphans = False
+        if orphan_count:
+            # Durable primary/backup cursor establishes the commit high-water.
+            # Rebuilt-from-events cursors set redo_high_water=max_seq, so this
+            # path is only reached when a durable cursor is available.
+            warnings.append(
+                f"Discarded {orphan_count} journal event(s) beyond "
+                f"redo_high_water_seq={committed_high} after interrupted append."
+            )
+            events = [e for e in events if int(e.event_seq) <= committed_high]
+            discarded_orphans = True
 
         max_seq = events[-1].event_seq if events else 0
+        cursor_dirty = cursor_source in {"rebuilt_from_events", "recovery_backup"}
         if cursor.cursor_event_seq > max_seq:
             warnings.append(
                 f"Cursor {cursor.cursor_event_seq} beyond journal max {max_seq}; clamped."
             )
             cursor.cursor_event_seq = max_seq
+            cursor_dirty = True
         if cursor.redo_high_water_seq > max_seq:
             cursor.redo_high_water_seq = max_seq
-        if cursor.next_event_seq <= max_seq:
+            cursor_dirty = True
+        if cursor.next_event_seq != max_seq + 1:
             cursor.next_event_seq = max_seq + 1
+            cursor_dirty = True
         # Drop superseded refs that no longer exist.
-        cursor.superseded_event_seqs = [
+        pruned_superseded = [
             s for s in cursor.superseded_event_seqs if 1 <= s <= max_seq
         ]
+        if pruned_superseded != list(cursor.superseded_event_seqs):
+            cursor.superseded_event_seqs = pruned_superseded
+            cursor_dirty = True
+        else:
+            cursor.superseded_event_seqs = pruned_superseded
+
+        needs_events_rewrite = bool(truncated) or discarded_orphans
+        repairing = needs_events_rewrite or (
+            cursor_dirty and cursor_source != "rebuilt_from_events"
+        ) or (
+            cursor_dirty
+            and cursor_source == "rebuilt_from_events"
+            and self.events_path.is_file()
+        )
+        if needs_events_rewrite or cursor_dirty:
+            if repairing and (self.events_path.is_file() or self.cursor_path.is_file()):
+                backup = self._preserve_recovery_backup(
+                    reason="; ".join(warnings) if warnings else "journal_repair"
+                )
+                if backup is not None:
+                    self.last_recovery_backup_dir = backup
+                    warnings.append(f"Recovery backup preserved at {backup.name}.")
+            if needs_events_rewrite:
+                self._rewrite_valid_prefix(events)
+            if cursor_dirty:
+                self._atomic_write_json(self.cursor_path, cursor.to_dict())
+
+        self.events = events
         self.cursor = cursor
         self.recovery_warnings = warnings
-        if warnings:
-            self._atomic_write_json(self.cursor_path, cursor.to_dict())
+
+    def _parse_events_file(
+        self,
+    ) -> tuple[list[CorrectionEvent], bool, list[str]]:
+        warnings: list[str] = []
+        events: list[CorrectionEvent] = []
+        truncated = False
+        if not self.events_path.is_file():
+            return events, truncated, warnings
+
+        raw_text = self.events_path.read_text(encoding="utf-8")
+        # Tolerate trailing partial line after crash mid-write.
+        lines = raw_text.splitlines()
+        if raw_text and not raw_text.endswith("\n") and lines:
+            candidate = lines[-1]
+            try:
+                json.loads(candidate)
+            except json.JSONDecodeError:
+                lines = lines[:-1]
+                truncated = True
+                warnings.append(
+                    "Truncated incomplete trailing journal line during recovery."
+                )
+        last_seq = 0
+        for i, line in enumerate(lines):
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                payload = json.loads(text)
+                if not isinstance(payload, dict):
+                    raise JournalError("Journal line is not an object.")
+                event = CorrectionEvent.from_dict(payload)
+            except (json.JSONDecodeError, TypeError, ValueError, KeyError) as exc:
+                warnings.append(
+                    f"Stopped journal replay at line {i + 1}: {exc}. "
+                    "Trailing corrupt events discarded for recovery."
+                )
+                truncated = True
+                break
+            if event.event_seq <= last_seq:
+                raise JournalError(
+                    f"Non-monotonic event_seq in journal at line {i + 1} "
+                    f"({event.event_seq} after {last_seq})."
+                )
+            if last_seq and event.event_seq != last_seq + 1:
+                raise JournalError(
+                    f"Journal event_seq gap at line {i + 1}: "
+                    f"expected {last_seq + 1}, got {event.event_seq}."
+                )
+            events.append(event)
+            last_seq = event.event_seq
+        return events, truncated, warnings
+
+    def _resolve_cursor(
+        self, events: list[CorrectionEvent]
+    ) -> tuple[JournalCursor, str, list[str]]:
+        warnings: list[str] = []
+        if self.cursor_path.is_file():
+            try:
+                cursor_raw = json.loads(self.cursor_path.read_text(encoding="utf-8"))
+                if not isinstance(cursor_raw, dict):
+                    raise JournalError("journal_cursor.json must be an object.")
+                return JournalCursor.from_dict(cursor_raw), "primary", warnings
+            except (json.JSONDecodeError, TypeError, ValueError, JournalError) as exc:
+                warnings.append(
+                    f"Invalid journal_cursor.json ({exc}); trying recovery backup."
+                )
+
+        backup_cursor = self._load_latest_backup_cursor()
+        if backup_cursor is not None:
+            warnings.append(
+                "Restored journal cursor from immutable recovery backup "
+                "(primary cursor missing or invalid)."
+            )
+            return backup_cursor, "recovery_backup", warnings
+
+        warnings.append(
+            "journal_cursor.json missing/invalid with no usable backup; "
+            "rebuilding cursor from durable events."
+        )
+        return self._rebuild_cursor_from_events(events), "rebuilt_from_events", warnings
+
+    def _load_latest_backup_cursor(self) -> JournalCursor | None:
+        root = self.recovery_backups_dir
+        if not root.is_dir():
+            return None
+        candidates = sorted(
+            (p for p in root.iterdir() if p.is_dir()),
+            key=lambda p: p.name,
+            reverse=True,
+        )
+        for folder in candidates:
+            path = folder / JOURNAL_CURSOR_FILENAME
+            if not path.is_file():
+                continue
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    return JournalCursor.from_dict(raw)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+        return None
+
+    def _preserve_recovery_backup(self, *, reason: str) -> Path | None:
+        """Copy pre-repair journal/cursor into an immutable stamped directory."""
+
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        dest = self.recovery_backups_dir / f"recovery__{stamp}"
+        # Avoid clobbering an existing stamp (immutable backups).
+        suffix = 0
+        while dest.exists():
+            suffix += 1
+            dest = self.recovery_backups_dir / f"recovery__{stamp}_{suffix}"
+        dest.mkdir(parents=True, exist_ok=False)
+        if self.events_path.is_file():
+            shutil.copy2(self.events_path, dest / CORRECTION_EVENTS_FILENAME)
+        if self.cursor_path.is_file():
+            shutil.copy2(self.cursor_path, dest / JOURNAL_CURSOR_FILENAME)
+        (dest / "recovery_reason.txt").write_text(
+            reason.strip() + "\n", encoding="utf-8"
+        )
+        return dest
 
     @staticmethod
     def _rebuild_cursor_from_events(events: list[CorrectionEvent]) -> JournalCursor:

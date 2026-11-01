@@ -1,9 +1,9 @@
 # Post-v0.1.1 — S10 Review Efficiency, Visualization, and PI Reporting
 
-**Status:** **Gallery A1 accepted (read-only).** A2 bulk actions / PI report / overlays remain deferred.  
-**Date:** 2026-11-01 (**D0 closed**; **Gallery A1** accepted same date — see also [`d0_workspace_architecture.md`](d0_workspace_architecture.md))  
-**Baseline:** Behavior Suite **v0.1.1** released; S1–S10 MVP lab-validated; D0 workspace MVP closed at `e81d530`.  
-**Non-scope of remaining follow-ons:** A2 bulk accept/reject, PI HTML report, overlay generation, subsession science, S8 schema changes.
+**Status:** **Gallery A2 accepted** (working-draft gallery + single/bulk status; journal durability closure). A1 remains accepted. PI report / overlays remain deferred.  
+**Date:** 2026-11-01 (**D0 closed**; **Gallery A1** accepted; **Gallery A2** accepted — see also [`d0_workspace_architecture.md`](d0_workspace_architecture.md))  
+**Baseline:** Behavior Suite **v0.1.1** released; S1–S10 MVP lab-validated; D0 workspace MVP closed at `e81d530`; A1 base `0d4b237`.  
+**Non-scope of remaining follow-ons:** PI HTML report, overlay generation, subsession science, S8 schema changes.
 
 **Legend**
 
@@ -101,9 +101,15 @@ Group 4 navigation: S9 packaging/export page beside S10 review page (`MainWindow
 | R1 | Framewise-authoritative corrections; bouts regenerated via S8 `extract_behavior_bouts` only |
 | R7 | Label/interval corrections, review status, and notes are **independent** stores |
 | R8 / U15 | Reject is **status-only** — never clears labels |
-| R9 | Geometry-changing ops void prior accept/reject (`void_reason=geometry_changed`) |
+| R9 | Geometry-changing ops void prior accept/reject (`void_reason=geometry_changed`) via **interval-overlap** matching (see R9 note below) |
 | R10 | Opening a package never auto-accepts or auto-publishes |
-| R15 | Append-only journal + linear undo/redo; fsync; durable under `behavioral_review__*/working/` |
+| R15 | Append-only journal + linear undo/redo; fsync; cursor is the commit boundary; durable under `behavioral_review__*/working/` |
+
+**R9 observed voiding behavior (fact — do not change in A2 closure):**
+
+Geometry-changing corrections void active `accepted`/`rejected` decisions whose stored interval **overlaps** the edit’s touch mask on the same identity/channel (inclusive dense endpoints; opposite exclusive directions are isolated). Bout-scoped compile ops that carry `target_bout_id` void that target even without a numeric interval compare. This is broader than “only the edited bout id”: a relabel/trim/split can void another decision whose interval overlaps the touched span. Acceptance is never silently inherited onto regenerated bout identities after voiding.
+
+**Follow-on:** a **targeted R9 audit** after A2 release is warranted (precision of overlap vs identity-only voiding; operator messaging when collateral voids occur). **Do not change R9 invalidation rules in this closure.**
 
 **Channels (fact):**
 
@@ -637,6 +643,76 @@ A1 is accepted for read-only gallery use. Do **not** treat intermittent post-ass
 - PI report export, overlay burn-in, GIF generation
 - Contact/SBS secondary gallery mode
 
+#### Gallery A2 implementation record (2026-11-01) — **accepted**
+
+**Laboratory acceptance:** functional E-session acceptance passed (`tmp_s10_gallery_a2_lab/a2_acceptance_report.json`, 44/44). Journal durability defect (interrupted bulk JSONL append before cursor commit) remediated and fault-injection verified before closure.
+
+**Shipped (A2 working-draft review decisions):**
+
+| Concern | Implementation |
+| --- | --- |
+| Working-draft source | `GALLERY_SOURCE_WORKING` + `build_gallery_from_working_draft` over current regenerated exclusive bouts + live status overlay |
+| Source kinds | Explicit `automated` \| `working_draft` \| `published` — never merged into one row set |
+| Single Accept/Reject | Gallery actions call `EditingSession.set_bout_review_status` via existing edit worker (`EDIT_OP_SET_STATUS`) |
+| Explicit multi-select | Ctrl+click additive selection; selected count shown; filters never imply selection |
+| Bulk Accept/Reject | `EditingSession.set_bout_review_statuses` commits one undo group; exclusive working-draft cards only; no Accept All |
+| Contact/SBS | Excluded from default gallery bulk/single eligibility (`channel=exclusive` only) |
+| Editing entry | Inspection/gallery open never creates a draft; review actions explain enter-editing + draft workflow |
+| Correct-and-return | Open in timeline/editor → edit worker → `refresh_gallery_after_mutation` rebuilds cards; stale selections pruned |
+| Journal / undo | Reuses append-only journal; bulk = one `undo_group_id`; no independent write path |
+| Journal commit boundary | Cursor atomic replace after event fsync; recovery discards only events beyond `redo_high_water_seq`; legitimate redo preserved; repairs write immutable `working/recovery_backups/` |
+| Concurrency | Mutations only through background edit worker; GUI rebuilds gallery cards from already-projected tables |
+| Tests | `tests/behavioral_review/test_gallery_a2.py`; `tests/ui/test_behavioral_review_gallery_a2.py`; `tests/behavioral_review/test_journal_fault_injection.py` |
+
+**Working-draft gallery semantics (binding for A2):**
+
+1. Cards use **current effective exclusive labels** and **regenerated bout geometry** from the open draft projection — never stale automated intervals after a correction.
+2. Review status chips come from the live overlay (`unreviewed` / `accepted` / `rejected` / `voided`).
+3. Status-only Accept/Reject never alters predictions, labels, or geometry (R7/R8/U15).
+4. Geometry-changing corrections void prior accept/reject (`void_reason=geometry_changed`, R9); acceptance is not silently carried onto new bout identities.
+5. Automated and published gallery sources remain **read-only**.
+
+**Undo/redo behavior:**
+
+- Single gallery status → one journal event / one undo step.
+- Bulk gallery status → N events sharing one `undo_group_id` → one undo/redo restores the whole bulk.
+- Undo/redo run on the edit worker and refresh the working gallery view.
+
+**Performance notes (A2):**
+
+| Measurement | Result |
+| --- | --- |
+| Synthetic E-session regroup (~538 exclusive cards) | Card regroup/status refresh **&lt; 250 ms** in focused unit test |
+| Preview concurrency | Unchanged A1 defaults (max 4 concurrent / 16 queued) |
+| Broad decode optimization | Not undertaken (no confirmed gallery decode regression in A2) |
+
+**Known limitations:**
+
+- No outlier badges / sort-by-outlier.
+- No blanket Accept All / Accept visible group (explicit selection required).
+- Contact/SBS have no secondary gallery mode yet.
+- Working-draft gallery requires an already-open draft; switching to Working without a draft is blocked with guidance.
+- Bout cards without lineage after large geometry rewrites resolve status via reviewed id / interval key when available; operators should re-review voided intervals.
+- Intermittent offscreen Qt atexit aborts remain a pre-existing test-harness class (same as A1).
+
+**Laboratory acceptance criteria (A2):**
+
+1. Open automated gallery without creating a draft.
+2. Enter editing + create/open draft; switch gallery source to Working draft.
+3. Accept / Reject one exclusive card; confirm status chip and journal undo.
+4. Explicitly multi-select several exclusive cards; Bulk Accept; one Undo reverts all.
+5. Open a card in the timeline editor, relabel/trim, return to Gallery — geometry/labels refresh; prior acceptance does not silently stick to new identities.
+6. Restart app / reopen draft — working gallery statuses persist.
+7. Confirm contact/SBS are not bulk-accepted by exclusive gallery actions.
+8. Confirm no S8/S9 science artifact mutation.
+
+**Still deferred after A2:**
+
+- Outlier badges / sort-by-outlier
+- PI report export, overlay burn-in, GIF generation
+- Contact/SBS secondary gallery mode
+- Accept-all-visible-in-group convenience (explicitly rejected in favor of selection-only bulk)
+
 ### Increment B — PI-facing report export
 
 | Item | Content |
@@ -743,8 +819,10 @@ Defer: model-training UIs, active learning, reciprocal tool (U2), `uncertain` (U
 **D0:** shared workspace MVP closed (see [`d0_workspace_architecture.md`](d0_workspace_architecture.md)).  
 **Gallery A1:** **accepted** — read-only behavior-grouped bout browser against the shared analysis target, including FIX-GALLERY-RADIO and teardown/visibility lifecycle closure above.
 
-**Still deferred:** A2 bulk/single gallery status actions, PI report (B), overlays (C), subsession science processing. No release tag from this closure.
+**Gallery A2:** **accepted** — working-draft source + single/bulk status-only actions through existing journal / edit-worker APIs; interrupted-append journal recovery closed with fault-injection coverage. No release tag from this acceptance.
 
-**Next authorized increment:** **A2** (status-only bulk/single gallery actions through existing journal APIs) and/or **B** (PI HTML) using the A1 `GalleryCard` / preview_plan contracts; keep S8/S9 science schemas frozen.
+**Still deferred:** PI report (B), overlays (C), subsession science processing, outlier aids, contact/SBS secondary gallery. Targeted **R9 overlap-voiding audit** recommended as a follow-on (rules unchanged here).
+
+**Next authorized increment:** **B** (PI HTML) and/or outlier polish using the A1/A2 `GalleryCard` / preview_plan contracts; keep S8/S9 science schemas frozen.
 
 _End of post-v0.1.1 S10 review and visualization architecture proposal._

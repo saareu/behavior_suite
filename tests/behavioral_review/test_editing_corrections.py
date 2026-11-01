@@ -465,6 +465,92 @@ def test_journal_crash_recovery_truncates_partial_line(tmp_path: Path) -> None:
     assert all(e.event_id != "evt_partial" for e in recovered.events)
 
 
+def test_interrupted_bulk_journal_append_all_or_nothing(tmp_path: Path) -> None:
+    """Complete JSONL lines without cursor commit must not partially apply."""
+
+    from behavioral_review.contracts import BOUT_ID_KIND_SOURCE_S8
+    from behavioral_review.events import OP_SET_BOUT_REVIEW_STATUS, build_event
+
+    _, session, review_root = _open_editor(tmp_path)
+    draft = _enter_with_draft(session, review_root, reviewer="bulk_fault")
+    session.set_bout_review_status(
+        target_bout_id="bout_dir_a", status=STATUS_ACCEPTED
+    )
+    committed_hw = draft.journal.cursor.redo_high_water_seq
+    committed_cursor = draft.journal.cursor.cursor_event_seq
+    assert committed_hw == committed_cursor
+
+    # Simulate crash after fsync of a multi-event bulk append, before cursor rename.
+    seqs = draft.journal.allocate_seq_block(2)
+    orphan_events = [
+        build_event(
+            op=OP_SET_BOUT_REVIEW_STATUS,
+            reviewer_id="bulk_fault",
+            event_seq=seqs[0],
+            target_bout_id="bout_dir_b",
+            target_bout_id_kind=BOUT_ID_KIND_SOURCE_S8,
+            status=STATUS_ACCEPTED,
+            undo_group_id="interrupted-bulk",
+            client_op_id="bulk:0",
+        ),
+        build_event(
+            op=OP_SET_BOUT_REVIEW_STATUS,
+            reviewer_id="bulk_fault",
+            event_seq=seqs[1],
+            target_bout_id="bout_dir_a",
+            target_bout_id_kind=BOUT_ID_KIND_SOURCE_S8,
+            status=STATUS_REJECTED,
+            undo_group_id="interrupted-bulk",
+            client_op_id="bulk:1",
+        ),
+    ]
+    with draft.journal.events_path.open("a", encoding="utf-8", newline="\n") as handle:
+        for event in orphan_events:
+            handle.write(event.to_json_line())
+            handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    recovered = EventJournal.open(draft.working_dir)
+    assert any("interrupted append" in w for w in recovered.recovery_warnings)
+    assert [e.event_seq for e in recovered.events] == list(range(1, committed_hw + 1))
+    assert recovered.cursor.cursor_event_seq == committed_cursor
+    assert recovered.cursor.redo_high_water_seq == committed_hw
+    assert recovered.cursor.next_event_seq == committed_hw + 1
+    assert not recovered.can_redo()
+    assert all(e.event_seq <= committed_hw for e in recovered.events)
+
+    # Reopen through editing session: statuses remain pre-bulk (all-or-nothing).
+    session.close_draft(release_lock=True)
+    with patch_s9_currently_eligible(
+        source_s8_run_id=session.inspection.source.source_s8.run_id
+    ):
+        session2 = open_editing_session(
+            session.inspection.source.package_dir,
+            require_video=False,
+            require_s8_states=True,
+        )
+    session2.enter_editing_mode("bulk_fault")
+    session2.open_draft(draft.review_run_dir)
+    assert session2.overlay.status_for_source_bout("bout_dir_a") == STATUS_ACCEPTED
+    assert session2.overlay.status_for_source_bout("bout_dir_b") == "unreviewed"
+    # A fresh bulk after recovery must allocate contiguous seqs without holes.
+    events = session2.set_bout_review_statuses(
+        [
+            {"target_bout_id": "bout_dir_b", "status": STATUS_ACCEPTED},
+            {"target_bout_id": "bout_dir_a", "status": STATUS_REJECTED},
+        ],
+        client_op_id="post-recovery-bulk",
+    )
+    assert [e.event_seq for e in events] == [committed_hw + 1, committed_hw + 2]
+    assert len({e.undo_group_id for e in events}) == 1
+    undone = session2.undo()
+    assert len(undone) == 2
+    assert session2.overlay.status_for_source_bout("bout_dir_a") == STATUS_ACCEPTED
+    assert session2.overlay.status_for_source_bout("bout_dir_b") == "unreviewed"
+    session2.close_draft(release_lock=True)
+
+
 def test_concurrent_writer_rejection_and_stale_lock_recovery(tmp_path: Path) -> None:
     built, session, review_root = _open_editor(tmp_path)
     draft = _enter_with_draft(session, review_root, reviewer="alice")

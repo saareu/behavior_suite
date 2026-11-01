@@ -1,12 +1,14 @@
-"""Read-only behavior-grouped bout gallery index (S10 Gallery A1).
+"""Behavior-grouped bout gallery index (S10 Gallery A1/A2).
 
-Builds view-only cards over automated S9 or published S10 bout tables.
-Never merges automated and reviewed rows, never writes journals or science
-artifacts, and never requires eager GIF/MP4 generation.
+Builds view-only cards over automated S9, working-draft, or published S10 bout
+tables. Never merges distinct source kinds into one row set, never writes
+journals or science artifacts during index construction, and never requires
+eager GIF/MP4 generation. Gallery A2 review actions use EditingSession APIs.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -14,12 +16,16 @@ from typing import Any
 import pandas as pd  # type: ignore[import-untyped]
 
 from behavioral_review.contracts import (
+    BOUT_ID_KIND_PACKAGE,
+    BOUT_ID_KIND_REVIEWED,
+    BOUT_ID_KIND_SOURCE_S8,
     BOUT_STATUS_VALUES,
     CHANNEL_EXCLUSIVE,
     GALLERY_CARD_SCHEMA_VERSION,
     GALLERY_INDEX_SCHEMA_VERSION,
     GALLERY_SOURCE_AUTOMATED,
     GALLERY_SOURCE_PUBLISHED,
+    GALLERY_SOURCE_WORKING,
     SOURCE_TYPE_AUTOMATED,
     SOURCE_TYPE_REVIEWED,
     STATUS_ACCEPTED,
@@ -28,6 +34,7 @@ from behavioral_review.contracts import (
     STATUS_VOIDED,
     InspectionError,
 )
+from behavioral_review.regenerate import interval_key_from_row
 from behavioral_review.sync import SyncMap
 from results_packaging.media_csv_export.clip_bounds import (
     ClipBounds,
@@ -172,7 +179,7 @@ class GalleryQuery:
 
 @dataclass(frozen=True, slots=True)
 class GallerySourceRef:
-    """Pinned gallery source identity (explicit automated vs published)."""
+    """Pinned gallery source identity (automated / working_draft / published)."""
 
     source_kind: str
     package_run_id: str
@@ -394,73 +401,64 @@ def build_gallery_from_published_review(
     published status table (default unreviewed when absent).
     """
 
-    fps, n_frames = infer_prepared_timing(
-        sync, source_fps=source_fps, source_n_frames=source_n_frames
-    )
-    exclusive = _exclusive_rows(reviewed_bouts)
-    auto_by_package, auto_by_source = _automated_label_indexes(automated_bouts)
-    status_map = _status_map_from_frame(review_bout_status)
-    cards: list[GalleryCard] = []
-    for _, row in exclusive.iterrows():
-        bout_id = str(row["bout_id"])
-        effective = str(row["behavior_name"])
-        package_bout_id = _optional_str(row.get("source_package_bout_id"))
-        source_s8 = _optional_str(row.get("source_s8_bout_id"))
-        automated = None
-        if package_bout_id and package_bout_id in auto_by_package:
-            automated = auto_by_package[package_bout_id]
-        elif source_s8 and source_s8 in auto_by_source:
-            automated = auto_by_source[source_s8]
-        status, void_reason = _lookup_reviewed_status(
-            status_map,
-            reviewed_bout_id=bout_id,
-            package_bout_id=package_bout_id,
-            source_s8_bout_id=source_s8,
-        )
-        prep_start, prep_end = _prepared_endpoints(row, sync)
-        plan = build_preview_plan(
-            prepared_frame_idx_start=prep_start,
-            prepared_frame_idx_end=prep_end,
-            source_fps=fps,
-            source_n_frames=n_frames,
-            pre_context_sec=pre_context_sec,
-            post_context_sec=post_context_sec,
-        )
-        cards.append(
-            GalleryCard(
-                schema_version=GALLERY_CARD_SCHEMA_VERSION,
-                card_id=_card_id(GALLERY_SOURCE_PUBLISHED, bout_id),
-                bout_id=bout_id,
-                source_kind=GALLERY_SOURCE_PUBLISHED,
-                channel=CHANNEL_EXCLUSIVE,
-                identity_grain=str(row.get("identity_grain") or "directional"),
-                automated_label=automated,
-                effective_label=effective,
-                corrected=bool(automated is not None and automated != effective),
-                focal_id=_optional_int(row.get("focal_id")),
-                partner_id=_optional_int(row.get("partner_id")),
-                start_sample_idx=int(row["start_sample_idx"]),
-                end_sample_idx=int(row["end_sample_idx"]),
-                bout_duration_frames=int(row["bout_duration_frames"]),
-                bout_duration_sec=float(row["bout_duration_sec"]),
-                prepared_frame_idx_start=prep_start,
-                prepared_frame_idx_end=prep_end,
-                status=status,
-                void_reason=void_reason,
-                source_s8_bout_id=source_s8,
-                package_bout_id=package_bout_id,
-                reviewed_bout_id=bout_id,
-                preview_plan=plan,
-            )
-        )
-    source = GallerySourceRef(
+    return _build_gallery_from_reviewed_table(
+        reviewed_bouts,
+        sync,
         source_kind=GALLERY_SOURCE_PUBLISHED,
-        package_run_id=str(package_run_id),
-        review_run_id=str(review_run_id),
+        package_run_id=package_run_id,
+        review_run_id=review_run_id,
+        review_bout_status=review_bout_status,
+        automated_bouts=automated_bouts,
         package_dir=package_dir,
         review_run_dir=review_run_dir,
+        query=query,
+        source_fps=source_fps,
+        source_n_frames=source_n_frames,
+        pre_context_sec=pre_context_sec,
+        post_context_sec=post_context_sec,
     )
-    return _finalize_index(cards, source=source, query=query or GalleryQuery())
+
+
+def build_gallery_from_working_draft(
+    reviewed_bouts: pd.DataFrame,
+    sync: SyncMap,
+    *,
+    package_run_id: str,
+    review_run_id: str,
+    review_bout_status: pd.DataFrame | None = None,
+    automated_bouts: pd.DataFrame | None = None,
+    package_dir: str | None = None,
+    review_run_dir: str | None = None,
+    query: GalleryQuery | None = None,
+    source_fps: float | None = None,
+    source_n_frames: int | None = None,
+    pre_context_sec: float = DEFAULT_PREVIEW_PAD_SEC,
+    post_context_sec: float = DEFAULT_PREVIEW_PAD_SEC,
+) -> GalleryIndex:
+    """Build gallery cards from the current working-draft exclusive projection.
+
+    Uses regenerated reviewed bout geometry and the live status overlay. Does
+    not fall back to stale automated bout intervals after corrections. Does not
+    merge automated rows into the card list; automated labels join by lineage
+    for the corrected badge only.
+    """
+
+    return _build_gallery_from_reviewed_table(
+        reviewed_bouts,
+        sync,
+        source_kind=GALLERY_SOURCE_WORKING,
+        package_run_id=package_run_id,
+        review_run_id=review_run_id,
+        review_bout_status=review_bout_status,
+        automated_bouts=automated_bouts,
+        package_dir=package_dir,
+        review_run_dir=review_run_dir,
+        query=query,
+        source_fps=source_fps,
+        source_n_frames=source_n_frames,
+        pre_context_sec=pre_context_sec,
+        post_context_sec=post_context_sec,
+    )
 
 
 def apply_gallery_query(
@@ -519,6 +517,13 @@ def gallery_source_kind_from_analysis(source_type: str) -> str:
     }:
         return GALLERY_SOURCE_AUTOMATED
     if value in {
+        GALLERY_SOURCE_WORKING,
+        "working",
+        "draft",
+        "working_draft",
+    }:
+        return GALLERY_SOURCE_WORKING
+    if value in {
         GALLERY_SOURCE_PUBLISHED,
         SOURCE_TYPE_REVIEWED,
         "s10",
@@ -528,7 +533,8 @@ def gallery_source_kind_from_analysis(source_type: str) -> str:
     }:
         return GALLERY_SOURCE_PUBLISHED
     raise InspectionError(
-        f"Unknown gallery source_type={source_type!r}; expected automated or published."
+        "Unknown gallery source_type="
+        f"{source_type!r}; expected automated, working_draft, or published."
     )
 
 
@@ -557,6 +563,150 @@ def deep_link_target_for_card(card: GalleryCard) -> dict[str, Any]:
         "effective_label": card.effective_label,
         "status": card.status,
     }
+
+
+def gallery_card_is_review_eligible(card: GalleryCard) -> bool:
+    """True when a card may receive default exclusive gallery Accept/Reject."""
+
+    return (
+        card.source_kind == GALLERY_SOURCE_WORKING
+        and card.channel == CHANNEL_EXCLUSIVE
+    )
+
+
+def gallery_status_target_for_card(card: GalleryCard) -> tuple[str, str]:
+    """Resolve ``(target_bout_id, target_bout_id_kind)`` for status-only writes.
+
+    Prefer stable lineage ids so status survives review-id regeneration when the
+    automated interval is unchanged. Fall back to reviewed bout id after
+    geometry changes that break lineage.
+    """
+
+    if not gallery_card_is_review_eligible(card):
+        raise InspectionError(
+            "Gallery review actions apply only to working-draft exclusive bouts "
+            f"(got source={card.source_kind!r}, channel={card.channel!r})."
+        )
+    if card.source_s8_bout_id:
+        return str(card.source_s8_bout_id), BOUT_ID_KIND_SOURCE_S8
+    if card.package_bout_id:
+        return str(card.package_bout_id), BOUT_ID_KIND_PACKAGE
+    reviewed = card.reviewed_bout_id or card.bout_id
+    return str(reviewed), BOUT_ID_KIND_REVIEWED
+
+
+def filter_eligible_gallery_review_cards(
+    cards: Sequence[GalleryCard],
+    *,
+    selected_card_ids: Sequence[str] | None = None,
+) -> tuple[GalleryCard, ...]:
+    """Return explicit selected (or all provided) exclusive working-draft cards.
+
+    Selection is never inferred from filters: callers must pass the explicit
+    selected card ids for bulk operations. Contact/SBS cards are excluded.
+    """
+
+    by_id = {c.card_id: c for c in cards}
+    if selected_card_ids is None:
+        ordered = list(cards)
+    else:
+        ordered = []
+        for card_id in selected_card_ids:
+            card = by_id.get(str(card_id))
+            if card is not None:
+                ordered.append(card)
+    return tuple(c for c in ordered if gallery_card_is_review_eligible(c))
+
+
+def _build_gallery_from_reviewed_table(
+    reviewed_bouts: pd.DataFrame,
+    sync: SyncMap,
+    *,
+    source_kind: str,
+    package_run_id: str,
+    review_run_id: str,
+    review_bout_status: pd.DataFrame | None = None,
+    automated_bouts: pd.DataFrame | None = None,
+    package_dir: str | None = None,
+    review_run_dir: str | None = None,
+    query: GalleryQuery | None = None,
+    source_fps: float | None = None,
+    source_n_frames: int | None = None,
+    pre_context_sec: float = DEFAULT_PREVIEW_PAD_SEC,
+    post_context_sec: float = DEFAULT_PREVIEW_PAD_SEC,
+) -> GalleryIndex:
+    if source_kind not in {GALLERY_SOURCE_PUBLISHED, GALLERY_SOURCE_WORKING}:
+        raise InspectionError(
+            f"Reviewed gallery builder does not support source_kind={source_kind!r}."
+        )
+    fps, n_frames = infer_prepared_timing(
+        sync, source_fps=source_fps, source_n_frames=source_n_frames
+    )
+    exclusive = _exclusive_rows(reviewed_bouts)
+    auto_by_package, auto_by_source = _automated_label_indexes(automated_bouts)
+    status_map = _status_map_from_frame(review_bout_status)
+    cards: list[GalleryCard] = []
+    for _, row in exclusive.iterrows():
+        bout_id = str(row["bout_id"])
+        effective = str(row["behavior_name"])
+        package_bout_id = _optional_str(row.get("source_package_bout_id"))
+        source_s8 = _optional_str(row.get("source_s8_bout_id"))
+        automated = None
+        if package_bout_id and package_bout_id in auto_by_package:
+            automated = auto_by_package[package_bout_id]
+        elif source_s8 and source_s8 in auto_by_source:
+            automated = auto_by_source[source_s8]
+        status, void_reason = _lookup_reviewed_status(
+            status_map,
+            reviewed_bout_id=bout_id,
+            package_bout_id=package_bout_id,
+            source_s8_bout_id=source_s8,
+            interval_key=_interval_key_lookup(row),
+        )
+        prep_start, prep_end = _prepared_endpoints(row, sync)
+        plan = build_preview_plan(
+            prepared_frame_idx_start=prep_start,
+            prepared_frame_idx_end=prep_end,
+            source_fps=fps,
+            source_n_frames=n_frames,
+            pre_context_sec=pre_context_sec,
+            post_context_sec=post_context_sec,
+        )
+        cards.append(
+            GalleryCard(
+                schema_version=GALLERY_CARD_SCHEMA_VERSION,
+                card_id=_card_id(source_kind, bout_id),
+                bout_id=bout_id,
+                source_kind=source_kind,
+                channel=CHANNEL_EXCLUSIVE,
+                identity_grain=str(row.get("identity_grain") or "directional"),
+                automated_label=automated,
+                effective_label=effective,
+                corrected=bool(automated is not None and automated != effective),
+                focal_id=_optional_int(row.get("focal_id")),
+                partner_id=_optional_int(row.get("partner_id")),
+                start_sample_idx=int(row["start_sample_idx"]),
+                end_sample_idx=int(row["end_sample_idx"]),
+                bout_duration_frames=int(row["bout_duration_frames"]),
+                bout_duration_sec=float(row["bout_duration_sec"]),
+                prepared_frame_idx_start=prep_start,
+                prepared_frame_idx_end=prep_end,
+                status=status,
+                void_reason=void_reason,
+                source_s8_bout_id=source_s8,
+                package_bout_id=package_bout_id,
+                reviewed_bout_id=bout_id,
+                preview_plan=plan,
+            )
+        )
+    source = GallerySourceRef(
+        source_kind=source_kind,
+        package_run_id=str(package_run_id),
+        review_run_id=str(review_run_id),
+        package_dir=package_dir,
+        review_run_dir=review_run_dir,
+    )
+    return _finalize_index(cards, source=source, query=query or GalleryQuery())
 
 
 def _finalize_index(
@@ -741,6 +891,10 @@ def _status_map_from_frame(
                 if key is not None:
                     out[f"{key_col}:{key}"] = (status, void_reason)
                     out[key] = (status, void_reason)
+        interval_key = row.get("interval_key") if "interval_key" in row.index else None
+        encoded = _encode_interval_key(interval_key)
+        if encoded is not None:
+            out[encoded] = (status, void_reason)
     return out
 
 
@@ -750,6 +904,7 @@ def _lookup_reviewed_status(
     reviewed_bout_id: str,
     package_bout_id: str | None,
     source_s8_bout_id: str | None,
+    interval_key: str | None = None,
 ) -> tuple[str, str | None]:
     for key in (
         f"reviewed_bout_id:{reviewed_bout_id}",
@@ -758,8 +913,28 @@ def _lookup_reviewed_status(
         package_bout_id,
         f"source_s8_bout_id:{source_s8_bout_id}" if source_s8_bout_id else None,
         source_s8_bout_id,
+        interval_key,
     ):
         if key and key in status_map:
             return status_map[key]
     return STATUS_UNREVIEWED, None
+
+
+def _encode_interval_key(value: Any) -> str | None:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if isinstance(value, tuple):
+        payload = list(value)
+    elif isinstance(value, list):
+        payload = value
+    else:
+        return None
+    return "interval_key:" + json.dumps(payload, sort_keys=False)
+
+
+def _interval_key_lookup(row: pd.Series) -> str | None:
+    try:
+        return _encode_interval_key(interval_key_from_row(row))
+    except Exception:  # noqa: BLE001
+        return None
 

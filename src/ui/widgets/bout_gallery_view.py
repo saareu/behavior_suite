@@ -1,4 +1,4 @@
-"""Read-only behavior-grouped bout gallery grid (S10 Gallery A1)."""
+"""Behavior-grouped bout gallery grid (S10 Gallery A1/A2)."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from ui.widgets.video_frame_view import fit_image_target_rect
 _SOURCE_COLORS = {
     "automated": "#455a64",
     "published": "#2e7d32",
+    "working_draft": "#1565c0",
 }
 
 _STATUS_COLORS = {
@@ -78,7 +79,7 @@ class _PreviewPane(QWidget):
 class BoutGalleryCardWidget(QFrame):
     """One bout preview card with identity / label / status metadata."""
 
-    clicked = Signal(str)
+    clicked = Signal(str, bool)  # card_id, additive (Ctrl)
     open_requested = Signal(str)
 
     def __init__(self, card: GalleryCard, parent: QWidget | None = None) -> None:
@@ -128,8 +129,8 @@ class BoutGalleryCardWidget(QFrame):
         chips.addStretch(1)
         layout.addLayout(chips)
         self.setToolTip(
-            "Click to select · Double-click to open in timeline/editor "
-            "(read-only gallery; no corrections applied)."
+            "Click to select · Ctrl+click to multi-select · "
+            "Double-click to open in timeline/editor."
         )
 
     def set_selected(self, selected: bool) -> None:
@@ -144,7 +145,8 @@ class BoutGalleryCardWidget(QFrame):
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit(self.card_id)
+            additive = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+            self.clicked.emit(self.card_id, additive)
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
@@ -154,22 +156,26 @@ class BoutGalleryCardWidget(QFrame):
 
 
 class BoutGalleryView(QWidget):
-    """Scrollable label-grouped gallery grid."""
+    """Scrollable label-grouped gallery grid with explicit multi-selection."""
 
     card_selected = Signal(str)
+    selection_changed = Signal(object)  # tuple[str, ...]
     open_in_timeline_requested = Signal(str)
     visible_cards_changed = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._cards: dict[str, BoutGalleryCardWidget] = {}
-        self._selected_card_id: str | None = None
+        self._selected_card_ids: tuple[str, ...] = ()
         self._columns = 3
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         self.summary_label = QLabel("No gallery loaded.")
         self.summary_label.setWordWrap(True)
         root.addWidget(self.summary_label)
+        self.selection_label = QLabel("Selected: 0")
+        self.selection_label.setStyleSheet("color: #90a4ae;")
+        root.addWidget(self.selection_label)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.verticalScrollBar().valueChanged.connect(self._emit_visible)
@@ -189,6 +195,7 @@ class BoutGalleryView(QWidget):
         self,
         index: GalleryIndex | None,
         *,
+        selected_card_ids: tuple[str, ...] | None = None,
         selected_card_id: str | None = None,
     ) -> None:
         while self.grid.count():
@@ -197,10 +204,16 @@ class BoutGalleryView(QWidget):
             if widget is not None:
                 widget.deleteLater()
         self._cards.clear()
-        self._selected_card_id = selected_card_id
+        if selected_card_ids is not None:
+            self._selected_card_ids = tuple(selected_card_ids)
+        elif selected_card_id:
+            self._selected_card_ids = (selected_card_id,)
+        else:
+            self._selected_card_ids = ()
         if index is None:
             self.content.setMinimumHeight(0)
             self.summary_label.setText("No gallery loaded.")
+            self._update_selection_label()
             self.visible_cards_changed.emit(())
             return
         src = index.source.source_kind
@@ -215,10 +228,13 @@ class BoutGalleryView(QWidget):
         )
         for group in index.groups:
             self._add_group(group)
-        # Do not addStretch(1): an expanding stretch lets QScrollArea compress
-        # cards into the viewport and falsely mark every bout as visible.
-        if selected_card_id and selected_card_id in self._cards:
-            self._cards[selected_card_id].set_selected(True)
+        known = set(self._cards)
+        self._selected_card_ids = tuple(
+            cid for cid in self._selected_card_ids if cid in known
+        )
+        for card_id in self._selected_card_ids:
+            self._cards[card_id].set_selected(True)
+        self._update_selection_label()
         self._refresh_content_geometry()
         # Emit after the event loop applies scroll-area geometry. A synchronous
         # emit here can still see collapsed cards and mark every bout visible.
@@ -238,12 +254,24 @@ class BoutGalleryView(QWidget):
             # Underlying C++ object gone between isValid and paint path.
             self._cards.pop(card_id, None)
 
-    def set_selected_card(self, card_id: str | None) -> None:
-        if self._selected_card_id and self._selected_card_id in self._cards:
-            self._cards[self._selected_card_id].set_selected(False)
-        self._selected_card_id = card_id
-        if card_id and card_id in self._cards:
+    def set_selected_cards(self, card_ids: tuple[str, ...] | None) -> None:
+        for card_id in self._selected_card_ids:
+            if card_id in self._cards:
+                self._cards[card_id].set_selected(False)
+        ordered = tuple(card_ids or ())
+        self._selected_card_ids = tuple(cid for cid in ordered if cid in self._cards)
+        for card_id in self._selected_card_ids:
             self._cards[card_id].set_selected(True)
+        self._update_selection_label()
+
+    def set_selected_card(self, card_id: str | None) -> None:
+        if card_id:
+            self.set_selected_cards((card_id,))
+        else:
+            self.set_selected_cards(())
+
+    def selected_card_ids(self) -> tuple[str, ...]:
+        return self._selected_card_ids
 
     def visible_card_ids(self) -> tuple[str, ...]:
         visible: list[str] = []
@@ -291,9 +319,21 @@ class BoutGalleryView(QWidget):
             grid.addWidget(widget, i // self._columns, i % self._columns)
         self.grid.addWidget(wrap)
 
-    def _on_card_clicked(self, card_id: str) -> None:
-        self.set_selected_card(card_id)
+    def _on_card_clicked(self, card_id: str, additive: bool) -> None:
+        if additive:
+            current = list(self._selected_card_ids)
+            if card_id in current:
+                current = [c for c in current if c != card_id]
+            else:
+                current.append(card_id)
+            self.set_selected_cards(tuple(current))
+        else:
+            self.set_selected_cards((card_id,))
         self.card_selected.emit(card_id)
+        self.selection_changed.emit(self._selected_card_ids)
+
+    def _update_selection_label(self) -> None:
+        self.selection_label.setText(f"Selected: {len(self._selected_card_ids)}")
 
     def _emit_visible(self, *_args: object) -> None:
         self.visible_cards_changed.emit(self.visible_card_ids())

@@ -22,6 +22,7 @@ from behavioral_review import (
     GALLERY_DEFAULT_PREVIEW_PAD_SEC,
     GALLERY_SOURCE_AUTOMATED,
     GALLERY_SOURCE_PUBLISHED,
+    GALLERY_SOURCE_WORKING,
     MODE_EDITING,
     MODE_INSPECTION,
     SOURCE_TYPE_AUTOMATED,
@@ -34,6 +35,7 @@ from behavioral_review import (
     BoutFilter,
     EditingError,
     EditingSession,
+    GalleryCard,
     GalleryIndex,
     GalleryPreviewScheduler,
     GalleryQuery,
@@ -46,14 +48,18 @@ from behavioral_review import (
     TimelineView,
     build_gallery_from_automated_bouts,
     build_gallery_from_published_review,
+    build_gallery_from_working_draft,
     classify_analysis_source,
     deep_link_target_for_card,
+    filter_eligible_gallery_review_cards,
     gallery_source_kind_from_analysis,
+    gallery_status_target_for_card,
     open_editing_session,
     reopen_reviewed_run,
     summarize_behavioral_review_project,
 )
 from behavioral_review.contracts import (
+    BOUT_ID_KIND_SOURCE_S8,
     CHANNEL_CONTACT,
     CHANNEL_EXCLUSIVE,
     CHANNEL_SIDE_BY_SIDE,
@@ -154,9 +160,16 @@ EDIT_OP_SET_PARALLEL_PRED = "set_parallel_pred"
 EDIT_OP_TRIM_BOUT = "trim_bout"
 EDIT_OP_SPLIT_BOUT = "split_bout"
 EDIT_OP_SET_STATUS = "set_bout_status"
+EDIT_OP_SET_STATUS_BULK = "set_bout_status_bulk"
 EDIT_OP_ADD_NOTE = "add_note"
 EDIT_OP_UNDO = "undo"
 EDIT_OP_REDO = "redo"
+
+GALLERY_EDIT_REQUIRES_DRAFT_MESSAGE = (
+    "Gallery review actions require an explicitly selected reviewer and an open "
+    "working draft. Use Enter editing mode, then Create draft (or open an "
+    "existing draft). Opening the gallery for inspection does not create a draft."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,11 +392,12 @@ class BehavioralReviewUiState:
     unexpected_error_detail: str | None = None
     inspected_published_only: bool = False
     exclusive_labels: tuple[str, ...] = EXCLUSIVE_ETHOGRAM_LABELS
-    # Gallery A1 (read-only; never creates drafts or journal events).
+    # Gallery A1/A2 (inspection never creates drafts; A2 writes via edit worker).
     view_mode: str = VIEW_MODE_TIMELINE
     gallery_source_kind: str = GALLERY_SOURCE_AUTOMATED
     gallery_index: GalleryIndex | None = None
     gallery_selected_card_id: str | None = None
+    gallery_selected_card_ids: tuple[str, ...] = ()
     gallery_focal_filter: int | None = None
     gallery_label_filter: str | None = None
     gallery_status_filter: str | None = None
@@ -1371,9 +1385,98 @@ class BehavioralReviewController:
             {
                 "target_bout_id": target,
                 "status": status,
+                "target_bout_id_kind": BOUT_ID_KIND_SOURCE_S8,
                 "client_op_id": str(uuid4()),
             },
             stage=f"Setting bout status to {status}…",
+        )
+
+    def begin_gallery_set_status(
+        self, card_id: str, status: str
+    ) -> EditRequestIdentity:
+        """Single exclusive working-draft gallery Accept/Reject/Unreviewed."""
+
+        self._require_gallery_review_writable()
+        if status not in (STATUS_ACCEPTED, STATUS_REJECTED, STATUS_UNREVIEWED):
+            raise BehavioralReviewUiError(
+                "Status must be accepted, rejected, or unreviewed."
+            )
+        card = self._gallery_card_or_raise(card_id)
+        try:
+            target_id, target_kind = gallery_status_target_for_card(card)
+        except InspectionError as exc:
+            raise BehavioralReviewUiError(str(exc)) from exc
+        return self._begin_edit(
+            EDIT_OP_SET_STATUS,
+            {
+                "target_bout_id": target_id,
+                "target_bout_id_kind": target_kind,
+                "status": status,
+                "channel": CHANNEL_EXCLUSIVE,
+                "client_op_id": str(uuid4()),
+            },
+            stage=f"Gallery: set {card.bout_id} → {status}…",
+        )
+
+    def begin_gallery_bulk_status(
+        self,
+        status: str,
+        *,
+        card_ids: Sequence[str] | None = None,
+    ) -> EditRequestIdentity:
+        """Bulk Accept/Reject over explicitly selected working-draft exclusive cards.
+
+        Never infers selection from filters and never includes contact/SBS.
+        """
+
+        self._require_gallery_review_writable()
+        if status not in (STATUS_ACCEPTED, STATUS_REJECTED, STATUS_UNREVIEWED):
+            raise BehavioralReviewUiError(
+                "Status must be accepted, rejected, or unreviewed."
+            )
+        index = self.state.gallery_index
+        if index is None:
+            raise BehavioralReviewUiError("Refresh the gallery before bulk review.")
+        if self.state.gallery_source_kind != GALLERY_SOURCE_WORKING:
+            raise BehavioralReviewUiError(
+                "Bulk gallery review is available only for the working-draft source."
+            )
+        selected = (
+            tuple(str(x) for x in card_ids)
+            if card_ids is not None
+            else self.state.gallery_selected_card_ids
+        )
+        if not selected:
+            raise BehavioralReviewUiError(
+                "Select one or more working-draft exclusive bout cards first. "
+                "Bulk review never accepts an entire filter automatically."
+            )
+        eligible = filter_eligible_gallery_review_cards(
+            index.cards, selected_card_ids=selected
+        )
+        if not eligible:
+            raise BehavioralReviewUiError(
+                "No eligible working-draft exclusive bouts in the current selection. "
+                "Contact/SBS cards are excluded from default bulk review."
+            )
+        targets: list[dict[str, Any]] = []
+        for card in eligible:
+            target_id, target_kind = gallery_status_target_for_card(card)
+            targets.append(
+                {
+                    "target_bout_id": target_id,
+                    "target_bout_id_kind": target_kind,
+                    "status": status,
+                    "channel": CHANNEL_EXCLUSIVE,
+                }
+            )
+        return self._begin_edit(
+            EDIT_OP_SET_STATUS_BULK,
+            {
+                "targets": targets,
+                "client_op_id": str(uuid4()),
+            },
+            stage=f"Gallery bulk {status} ({len(targets)} exclusive bouts)…",
         )
 
     def begin_add_note(
@@ -1437,6 +1540,12 @@ class BehavioralReviewController:
         elif op == EDIT_OP_SET_STATUS:
             session.set_bout_review_status(**kwargs)
             stage = f"Bout status set to {kwargs.get('status')}"
+        elif op == EDIT_OP_SET_STATUS_BULK:
+            committed = session.set_bout_review_statuses(
+                kwargs["targets"],
+                client_op_id=kwargs.get("client_op_id"),
+            )
+            stage = f"Bulk bout status applied ({len(committed)} events)"
         elif op == EDIT_OP_ADD_NOTE:
             session.add_note(**kwargs)
             stage = "Reviewer note added"
@@ -1490,6 +1599,9 @@ class BehavioralReviewController:
         self.state.run_stage = snapshot.run_stage
         self.state.run_error = None
         self._finish_edit_request(success_stage=snapshot.run_stage)
+        # Refresh gallery views from the already-projected working state (worker
+        # thread performed journal apply / projection; GUI only rebuilds cards).
+        self.refresh_gallery_after_mutation()
         return True
 
     def fail_edit(self, identity: EditRequestIdentity, message: str) -> bool:
@@ -1687,7 +1799,7 @@ class BehavioralReviewController:
                 "Re-open the draft against the current workspace target."
             )
 
-    # --- gallery A1 (read-only) ---------------------------------------------
+    # --- gallery A1/A2 ------------------------------------------------------
 
     def set_view_mode(self, mode: str) -> str:
         value = str(mode or "").strip().lower()
@@ -1716,7 +1828,16 @@ class BehavioralReviewController:
             raise BehavioralReviewUiError(
                 "Open or select a published S10 review before using published gallery."
             )
+        if normalized == GALLERY_SOURCE_WORKING and not self.state.draft_open:
+            raise BehavioralReviewUiError(
+                "Working-draft gallery requires an open working draft. "
+                "Enter editing mode and create/open a draft first; inspection "
+                "never creates a draft automatically."
+            )
+        previous = self.state.gallery_source_kind
         self.state.gallery_source_kind = normalized
+        if previous != normalized:
+            self.clear_gallery_selection()
         if self.state.editing_session is not None:
             self.refresh_gallery_index()
         return normalized
@@ -1731,19 +1852,65 @@ class BehavioralReviewController:
         self.state.gallery_focal_filter = focal_id
         self.state.gallery_label_filter = label
         self.state.gallery_status_filter = status
+        # Filters never imply review selection.
         return self.refresh_gallery_index()
 
+    def clear_gallery_selection(self) -> None:
+        self.state.gallery_selected_card_id = None
+        self.state.gallery_selected_card_ids = ()
+        self.state.gallery_highlight_start = None
+        self.state.gallery_highlight_end = None
+
+    def set_gallery_selection(
+        self,
+        card_ids: Sequence[str],
+        *,
+        primary_card_id: str | None = None,
+    ) -> tuple[str, ...]:
+        """Set explicit multi-selection (never inferred from filters)."""
+
+        index = self.state.gallery_index
+        known = {c.card_id for c in index.cards} if index is not None else set()
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for card_id in card_ids:
+            value = str(card_id)
+            if value in known and value not in seen:
+                ordered.append(value)
+                seen.add(value)
+        self.state.gallery_selected_card_ids = tuple(ordered)
+        if primary_card_id and primary_card_id in seen:
+            self.state.gallery_selected_card_id = str(primary_card_id)
+        elif ordered:
+            self.state.gallery_selected_card_id = ordered[-1]
+        else:
+            self.state.gallery_selected_card_id = None
+        return self.state.gallery_selected_card_ids
+
+    def toggle_gallery_card_selection(self, card_id: str) -> tuple[str, ...]:
+        current = list(self.state.gallery_selected_card_ids)
+        value = str(card_id)
+        if value in current:
+            current = [c for c in current if c != value]
+            primary = current[-1] if current else None
+        else:
+            current.append(value)
+            primary = value
+        return self.set_gallery_selection(current, primary_card_id=primary)
+
     def refresh_gallery_index(self) -> GalleryIndex | None:
-        """Rebuild the read-only gallery index for the pinned source.
+        """Rebuild the gallery index for the pinned source.
 
         Never creates drafts, never writes journals, and never merges automated
-        bout rows with reviewed bout rows.
+        bout rows with reviewed bout rows. Working-draft cards use the current
+        regenerated exclusive projection + live status overlay.
         """
 
         session = self.state.editing_session
         if session is None:
             self.state.gallery_index = None
             self._close_gallery_scheduler()
+            self.clear_gallery_selection()
             return None
         query = GalleryQuery(
             focal_ids=(
@@ -1782,6 +1949,14 @@ class BehavioralReviewController:
                     pre_context_sec=pad,
                     post_context_sec=pad,
                 )
+            elif source_kind == GALLERY_SOURCE_WORKING:
+                index = self._build_working_gallery_index(
+                    session,
+                    package_run_id=package_run_id,
+                    package_dir=package_dir,
+                    query=query,
+                    pad=pad,
+                )
             else:
                 payload = self._load_published_gallery_payload()
                 index = build_gallery_from_published_review(
@@ -1797,37 +1972,58 @@ class BehavioralReviewController:
                     pre_context_sec=pad,
                     post_context_sec=pad,
                 )
-        except (InspectionError, BehavioralReviewError, PublicationError) as exc:
+        except (InspectionError, BehavioralReviewError, PublicationError, EditingError) as exc:
             raise BehavioralReviewUiError(str(exc)) from exc
         self.state.gallery_index = index
         self.state.gallery_generation += 1
-        if (
-            self.state.gallery_selected_card_id is not None
-            and all(
-                c.card_id != self.state.gallery_selected_card_id for c in index.cards
-            )
-        ):
-            self.state.gallery_selected_card_id = None
-            self.state.gallery_highlight_start = None
-            self.state.gallery_highlight_end = None
+        self._prune_gallery_selection(index)
         self._ensure_gallery_scheduler(index)
         return index
+
+    def refresh_gallery_after_mutation(self) -> GalleryIndex | None:
+        """Refresh gallery cards after a durable edit/undo/redo on the worker.
+
+        Rebuilds the in-memory gallery view only (no second projection rebuild).
+        Invalidates stale bout selections when identities change.
+        """
+
+        if self.state.editing_session is None:
+            return None
+        if (
+            self.state.view_mode != VIEW_MODE_GALLERY
+            and self.state.gallery_source_kind != GALLERY_SOURCE_WORKING
+            and self.state.gallery_index is None
+        ):
+            return None
+        # Preserve reviewer/draft identity; only refresh the view.
+        try:
+            return self.refresh_gallery_index()
+        except BehavioralReviewUiError:
+            # Source may no longer be available after retarget; drop stale index.
+            self.state.gallery_index = None
+            self.clear_gallery_selection()
+            self._close_gallery_scheduler()
+            return None
 
     def select_gallery_card(
         self,
         card_id: str | None,
         *,
         switch_to_timeline: bool = True,
+        create_draft: bool = False,
     ) -> DecodeRequestIdentity | None:
-        """Deep-link a gallery card into the timeline/editor (no corrections)."""
+        """Deep-link a gallery card into the timeline/editor.
 
+        Never creates a draft. ``create_draft`` is accepted only to make the
+        inspection-only contract explicit for callers/tests.
+        """
+
+        del create_draft  # Opening / deep-linking never creates drafts.
         session = self.state.editing_session
         if session is None:
             raise BehavioralReviewUiError("Open a package before selecting a gallery bout.")
         if not card_id:
-            self.state.gallery_selected_card_id = None
-            self.state.gallery_highlight_start = None
-            self.state.gallery_highlight_end = None
+            self.clear_gallery_selection()
             return None
         index = self.state.gallery_index
         if index is None:
@@ -1839,7 +2035,7 @@ class BehavioralReviewController:
         except InspectionError as exc:
             raise BehavioralReviewUiError(str(exc)) from exc
         target = deep_link_target_for_card(card)
-        self.state.gallery_selected_card_id = card.card_id
+        self.set_gallery_selection((card.card_id,), primary_card_id=card.card_id)
         self.state.gallery_highlight_start = int(target["start_sample_idx"])
         self.state.gallery_highlight_end = int(target["end_sample_idx"])
         if target["focal_id"] is not None and target["partner_id"] is not None:
@@ -1906,6 +2102,79 @@ class BehavioralReviewController:
             )
             scheduler.invalidate(new_source_token=token)
 
+    def _build_working_gallery_index(
+        self,
+        session: EditingSession,
+        *,
+        package_run_id: str,
+        package_dir: str | None,
+        query: GalleryQuery,
+        pad: float,
+    ) -> GalleryIndex:
+        if session.draft is None:
+            raise BehavioralReviewUiError(
+                "Working-draft gallery requires an open working draft."
+            )
+        # Use the already-projected reviewed table when present; do not force a
+        # second projection rebuild on the GUI thread.
+        reviewed = session.current_reviewed_bouts()
+        statuses = session.current_statuses()
+        return build_gallery_from_working_draft(
+            reviewed,
+            session.inspection.sync,
+            package_run_id=package_run_id,
+            review_run_id=str(session.draft.review_run_id),
+            review_bout_status=statuses,
+            automated_bouts=session.inspection.source.behavior_bouts,
+            package_dir=package_dir,
+            review_run_dir=str(session.draft.review_run_dir),
+            query=query,
+            pre_context_sec=pad,
+            post_context_sec=pad,
+        )
+
+    def _prune_gallery_selection(self, index: GalleryIndex) -> None:
+        known = {c.card_id for c in index.cards}
+        kept = tuple(cid for cid in self.state.gallery_selected_card_ids if cid in known)
+        self.state.gallery_selected_card_ids = kept
+        if (
+            self.state.gallery_selected_card_id is not None
+            and self.state.gallery_selected_card_id not in known
+        ):
+            self.state.gallery_selected_card_id = kept[-1] if kept else None
+            self.state.gallery_highlight_start = None
+            self.state.gallery_highlight_end = None
+        elif self.state.gallery_selected_card_id is None and kept:
+            self.state.gallery_selected_card_id = kept[-1]
+
+    def _gallery_card_or_raise(self, card_id: str) -> GalleryCard:
+        index = self.state.gallery_index
+        if index is None:
+            index = self.refresh_gallery_index()
+        if index is None:
+            raise BehavioralReviewUiError("Gallery index is empty.")
+        try:
+            return index.card_by_id(str(card_id))
+        except InspectionError as exc:
+            raise BehavioralReviewUiError(str(exc)) from exc
+
+    def _require_gallery_review_writable(self) -> EditingSession:
+        session = self.state.editing_session
+        if session is None:
+            raise BehavioralReviewUiError("Open a package first.")
+        if (
+            not self.state.editing_active
+            or not self.state.draft_open
+            or session.draft is None
+        ):
+            raise BehavioralReviewUiError(GALLERY_EDIT_REQUIRES_DRAFT_MESSAGE)
+        if self.state.gallery_source_kind != GALLERY_SOURCE_WORKING:
+            raise BehavioralReviewUiError(
+                "Automated and published gallery sources are read-only. "
+                "Switch to Working draft before Accept/Reject."
+            )
+        return self._require_writable_session()
+
     def _load_published_gallery_payload(self) -> dict[str, Any]:
         review_dir = self.state.review_run_dir
         if review_dir is None and self.state.selected_review_run_id:
@@ -1946,7 +2215,9 @@ class BehavioralReviewController:
             )
             self.state.gallery_preview_scheduler = scheduler
         else:
+            assert scheduler is not None
             scheduler.invalidate(new_source_token=token)
+        assert scheduler is not None
         scheduler.register_cards(index.cards)
         if self.state.view_mode != VIEW_MODE_GALLERY:
             scheduler.set_visible_card_ids(())
@@ -2033,6 +2304,7 @@ class BehavioralReviewController:
         self.state.active_publish_identity = None
         self.state.gallery_index = None
         self.state.gallery_selected_card_id = None
+        self.state.gallery_selected_card_ids = ()
         self.state.gallery_highlight_start = None
         self.state.gallery_highlight_end = None
         self.state.view_mode = VIEW_MODE_TIMELINE
@@ -2044,7 +2316,9 @@ class BehavioralReviewController:
             raise BehavioralReviewUiError("Open a package first.")
         if not self.state.editing_active or not self.state.draft_open:
             raise BehavioralReviewUiError(
-                "Editing requires active editing mode and an open working draft."
+                "Editing requires an explicitly selected reviewer and an open "
+                "working draft. Use Enter editing mode, then Create draft "
+                "(or open an existing draft)."
             )
         return session
 

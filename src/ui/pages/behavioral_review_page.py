@@ -38,6 +38,7 @@ from behavioral_review import (
     EXCLUSIVE_ETHOGRAM_LABELS,
     GALLERY_SOURCE_AUTOMATED,
     GALLERY_SOURCE_PUBLISHED,
+    GALLERY_SOURCE_WORKING,
     MODE_EDITING,
     SOURCE_TYPE_AUTOMATED,
     SOURCE_TYPE_REVIEWED,
@@ -51,6 +52,7 @@ from behavioral_review import (
 )
 from behavioral_review.contracts import REVIEW_TARGET_FPS
 from ui.controllers.behavioral_review_controller import (
+    GALLERY_EDIT_REQUIRES_DRAFT_MESSAGE,
     VIEW_MODE_GALLERY,
     VIEW_MODE_TIMELINE,
     BehavioralReviewController,
@@ -454,12 +456,15 @@ class BehavioralReviewPage(QWidget):
         timeline_page_layout.addWidget(bouts_group)
 
         gallery_group = QGroupBox(
-            "Behavior gallery (read-only exclusive bouts; no bulk actions yet)"
+            "Behavior gallery (exclusive bouts; working-draft Accept/Reject)"
         )
         gallery_layout = QVBoxLayout(gallery_group)
         gallery_filters = QHBoxLayout()
         self.gallery_source_combo = QComboBox()
         self.gallery_source_combo.addItem("Automated (S9)", GALLERY_SOURCE_AUTOMATED)
+        self.gallery_source_combo.addItem(
+            "Working draft (S10)", GALLERY_SOURCE_WORKING
+        )
         self.gallery_source_combo.addItem("Published (S10)", GALLERY_SOURCE_PUBLISHED)
         self.gallery_source_combo.currentIndexChanged.connect(
             self._gallery_source_changed
@@ -494,8 +499,41 @@ class BehavioralReviewPage(QWidget):
         gallery_filters.addWidget(self.gallery_label_combo)
         gallery_filters.addWidget(QLabel("Status"))
         gallery_filters.addWidget(self.gallery_status_combo, 1)
+        gallery_actions = QHBoxLayout()
+        self.gallery_accept_button = QPushButton("Accept")
+        self.gallery_accept_button.clicked.connect(
+            lambda: self._gallery_set_status(STATUS_ACCEPTED)
+        )
+        self.gallery_reject_button = QPushButton("Reject")
+        self.gallery_reject_button.clicked.connect(
+            lambda: self._gallery_set_status(STATUS_REJECTED)
+        )
+        self.gallery_bulk_accept_button = QPushButton("Bulk Accept selected")
+        self.gallery_bulk_accept_button.clicked.connect(
+            lambda: self._gallery_bulk_status(STATUS_ACCEPTED)
+        )
+        self.gallery_bulk_reject_button = QPushButton("Bulk Reject selected")
+        self.gallery_bulk_reject_button.clicked.connect(
+            lambda: self._gallery_bulk_status(STATUS_REJECTED)
+        )
+        self.gallery_clear_selection_button = QPushButton("Clear selection")
+        self.gallery_clear_selection_button.clicked.connect(
+            self._gallery_clear_selection
+        )
+        self.gallery_open_editor_button = QPushButton("Open selected in editor")
+        self.gallery_open_editor_button.clicked.connect(
+            self._gallery_open_selected_in_editor
+        )
+        gallery_actions.addWidget(self.gallery_accept_button)
+        gallery_actions.addWidget(self.gallery_reject_button)
+        gallery_actions.addWidget(self.gallery_bulk_accept_button)
+        gallery_actions.addWidget(self.gallery_bulk_reject_button)
+        gallery_actions.addWidget(self.gallery_clear_selection_button)
+        gallery_actions.addWidget(self.gallery_open_editor_button)
+        gallery_actions.addStretch(1)
         self.gallery_view = BoutGalleryView()
         self.gallery_view.card_selected.connect(self._gallery_card_selected)
+        self.gallery_view.selection_changed.connect(self._gallery_selection_changed)
         self.gallery_view.open_in_timeline_requested.connect(
             self._gallery_open_in_timeline
         )
@@ -503,6 +541,7 @@ class BehavioralReviewPage(QWidget):
             self._gallery_visible_cards_changed
         )
         gallery_layout.addLayout(gallery_filters)
+        gallery_layout.addLayout(gallery_actions)
         gallery_layout.addWidget(self.gallery_view, 1)
 
         self.view_stack = QStackedWidget()
@@ -1921,10 +1960,12 @@ class BehavioralReviewPage(QWidget):
                     self.status_message.emit(str(exc))
             self.gallery_view.set_index(
                 self.controller.state.gallery_index,
+                selected_card_ids=state.gallery_selected_card_ids,
                 selected_card_id=state.gallery_selected_card_id,
             )
+            self._update_gallery_action_enabled()
         else:
-            self.gallery_view.set_selected_card(state.gallery_selected_card_id)
+            self.gallery_view.set_selected_cards(state.gallery_selected_card_ids)
 
     def _rebuild_gallery_filter_combos(self, index) -> None:
         self.gallery_focal_combo.clear()
@@ -1958,7 +1999,8 @@ class BehavioralReviewPage(QWidget):
         self.refresh_from_state()
         if mode == VIEW_MODE_GALLERY:
             self.status_message.emit(
-                "Gallery A1: read-only exclusive bout browser (no corrections)."
+                "Gallery A2: exclusive bout browser; working-draft Accept/Reject "
+                "requires explicit editing mode + draft."
             )
 
     def _gallery_source_changed(self) -> None:
@@ -1993,7 +2035,7 @@ class BehavioralReviewPage(QWidget):
 
     def _gallery_card_selected(self, card_id: str) -> None:
         # Selection alone does not leave gallery; double-click opens timeline.
-        self.controller.state.gallery_selected_card_id = str(card_id)
+        # Multi-select state is applied via selection_changed.
         index = self.controller.state.gallery_index
         if index is None:
             return
@@ -2003,6 +2045,104 @@ class BehavioralReviewPage(QWidget):
             return
         self.controller.state.gallery_highlight_start = int(card.start_sample_idx)
         self.controller.state.gallery_highlight_end = int(card.end_sample_idx)
+
+    def _gallery_selection_changed(self, card_ids: object) -> None:
+        ids = tuple(str(x) for x in card_ids) if isinstance(card_ids, (list, tuple)) else ()
+        primary = ids[-1] if ids else None
+        self.controller.set_gallery_selection(ids, primary_card_id=primary)
+        self._update_gallery_action_enabled()
+
+    def _gallery_clear_selection(self) -> None:
+        self.controller.clear_gallery_selection()
+        self.gallery_view.set_selected_cards(())
+        self._update_gallery_action_enabled()
+
+    def _gallery_open_selected_in_editor(self) -> None:
+        card_id = self.controller.state.gallery_selected_card_id
+        if not card_id:
+            QMessageBox.information(
+                self, "Select a bout", "Select a gallery bout card first."
+            )
+            return
+        self._gallery_open_in_timeline(card_id)
+
+    def _gallery_offer_enter_editing(self, title: str) -> None:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle(title)
+        box.setText(GALLERY_EDIT_REQUIRES_DRAFT_MESSAGE)
+        enter = box.addButton("Enter editing…", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() is enter:
+            self._enter_editing()
+
+    def _gallery_set_status(self, status: str) -> None:
+        if not self._guard_edit_idle("gallery status update"):
+            return
+        card_id = self.controller.state.gallery_selected_card_id
+        if not card_id:
+            QMessageBox.information(
+                self, "Select a bout", "Select one gallery bout card first."
+            )
+            return
+        if (
+            not self.controller.state.editing_active
+            or not self.controller.state.draft_open
+        ):
+            self._gallery_offer_enter_editing("Editing required")
+            return
+        try:
+            identity = self.controller.begin_gallery_set_status(card_id, status)
+        except BehavioralReviewUiError as exc:
+            if GALLERY_EDIT_REQUIRES_DRAFT_MESSAGE[:40] in str(exc):
+                self._gallery_offer_enter_editing("Editing required")
+            else:
+                QMessageBox.warning(self, "Gallery status update failed", str(exc))
+            self.status_message.emit(str(exc))
+            return
+        self._start_edit_task(identity)
+
+    def _gallery_bulk_status(self, status: str) -> None:
+        if not self._guard_edit_idle("gallery bulk status"):
+            return
+        selected = self.controller.state.gallery_selected_card_ids
+        if not selected:
+            QMessageBox.information(
+                self,
+                "Select bouts",
+                "Explicitly select one or more working-draft exclusive bout cards. "
+                "Bulk review never accepts an entire filter automatically.",
+            )
+            return
+        if (
+            not self.controller.state.editing_active
+            or not self.controller.state.draft_open
+        ):
+            self._gallery_offer_enter_editing("Editing required")
+            return
+        verb = "accept" if status == STATUS_ACCEPTED else "reject"
+        confirm = QMessageBox.question(
+            self,
+            f"Bulk {verb} selected",
+            f"{verb.capitalize()} {len(selected)} explicitly selected exclusive "
+            f"bout(s)? Contact/SBS cards are excluded. One undo undoes the whole "
+            f"bulk operation.",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            identity = self.controller.begin_gallery_bulk_status(
+                status, card_ids=selected
+            )
+        except BehavioralReviewUiError as exc:
+            if GALLERY_EDIT_REQUIRES_DRAFT_MESSAGE[:40] in str(exc):
+                self._gallery_offer_enter_editing("Editing required")
+            else:
+                QMessageBox.warning(self, "Bulk gallery review failed", str(exc))
+            self.status_message.emit(str(exc))
+            return
+        self._start_edit_task(identity)
 
     def _gallery_open_in_timeline(self, card_id: str) -> None:
         self._stop_playback()
@@ -2016,7 +2156,9 @@ class BehavioralReviewPage(QWidget):
             return
         self.refresh_from_state()
         self._apply_decode_identity(decode_id)
-        self.status_message.emit(f"Opened gallery bout in timeline: {card_id}")
+        self.status_message.emit(
+            f"Opened gallery bout in timeline (correct-and-return): {card_id}"
+        )
 
     def _gallery_visible_cards_changed(self, card_ids: object) -> None:
         if self._gallery_surface_closed:
@@ -2215,6 +2357,29 @@ class BehavioralReviewPage(QWidget):
         self.undo_button.setEnabled(writable and not mutating and state.can_undo)
         self.redo_button.setEnabled(writable and not mutating and state.can_redo)
         self.publish_button.setEnabled(writable and not mutating)
+        self._update_gallery_action_enabled()
+
+    def _update_gallery_action_enabled(self) -> None:
+        state = self.controller.state
+        mutating = bool(
+            state.edit_running
+            or self.edit_runner.is_running
+            or state.publish_running
+            or self.publish_runner.is_running
+        )
+        working = state.gallery_source_kind == GALLERY_SOURCE_WORKING
+        has_primary = bool(state.gallery_selected_card_id)
+        has_multi = bool(state.gallery_selected_card_ids)
+        # Buttons stay clickable so we can explain the enter-editing workflow.
+        enabled = (not mutating) and state.editing_session is not None
+        self.gallery_accept_button.setEnabled(enabled and working and has_primary)
+        self.gallery_reject_button.setEnabled(enabled and working and has_primary)
+        self.gallery_bulk_accept_button.setEnabled(enabled and working and has_multi)
+        self.gallery_bulk_reject_button.setEnabled(enabled and working and has_multi)
+        self.gallery_clear_selection_button.setEnabled(has_multi and not mutating)
+        self.gallery_open_editor_button.setEnabled(
+            has_primary and state.editing_session is not None and not mutating
+        )
 
     def _guard_idle(self, action: str) -> bool:
         if self.controller.state.edit_running or self.edit_runner.is_running:
