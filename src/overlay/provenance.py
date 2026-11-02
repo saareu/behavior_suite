@@ -109,6 +109,7 @@ def build_overlay_artifact_manifest(
     output_fps: float | None = None,
     notes: Sequence[str] = (),
     extra: Mapping[str, Any] | None = None,
+    renderer_version: str | None = None,
 ) -> OverlayArtifactManifest:
     """Build ``overlay_artifact_manifest_v1`` from composition inputs."""
 
@@ -145,7 +146,7 @@ def build_overlay_artifact_manifest(
 
     return OverlayArtifactManifest(
         schema_version=OVERLAY_ARTIFACT_MANIFEST_SCHEMA,
-        renderer_version=OVERLAY_RENDERER_VERSION,
+        renderer_version=renderer_version or OVERLAY_RENDERER_VERSION,
         source_runs=source_runs,
         source_digests=digests,
         prepared_video=prepared_video.to_dict(),

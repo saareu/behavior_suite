@@ -1,4 +1,4 @@
-"""Overlay compositor contracts for Increment C1/C2-A.
+"""Overlay compositor contracts for Increment C1/C2-A/C2-B.
 
 Defines layer ids, frame-domain / plateau-policy enums, unavailable markers,
 and schema stamps. Scientific schemas are not modified here.
@@ -11,12 +11,18 @@ from typing import Final
 
 OVERLAY_PACKAGE_NAME: Final[str] = "overlay"
 OVERLAY_RENDERER_VERSION: Final[str] = "overlay_renderer_c2a_v1"
+OVERLAY_S4_POSE_RENDERER_VERSION: Final[str] = "overlay_renderer_c2b_v1"
 OVERLAY_ARTIFACT_MANIFEST_SCHEMA: Final[str] = "overlay_artifact_manifest_v1"
 OVERLAY_QC_EXPORT_DIRNAME: Final[str] = "results_exports"
 OVERLAY_QC_JOB_PREFIX: Final[str] = "overlay_qc_behavioral__"
 OVERLAY_QC_VIDEO_FILENAME: Final[str] = "behavioral_qc.mp4"
 OVERLAY_QC_MANIFEST_FILENAME: Final[str] = "overlay_artifact_manifest.json"
 OVERLAY_QC_STAGING_DIRNAME: Final[str] = "_overlay_qc_staging"
+OVERLAY_QC_S4_POSE_JOB_PREFIX: Final[str] = "overlay_qc_s4_pose__"
+OVERLAY_QC_S4_POSE_VIDEO_FILENAME: Final[str] = "s4_pose_qc.mp4"
+OVERLAY_QC_PROCESSING_LOG_FILENAME: Final[str] = "processing_log.txt"
+OVERLAY_QC_RUN_META_FILENAME: Final[str] = "run_meta.json"
+OVERLAY_QC_SETTINGS_FILENAME: Final[str] = "settings_used.yaml"
 
 # Pixel domain for composed frames (OpenCV / existing draw helpers).
 PIXEL_FORMAT_BGR: Final[str] = "bgr"
@@ -138,19 +144,51 @@ S4_PROVENANCE_NAMES: Final[dict[int, str]] = {
     S4_PROVENANCE_PROTECTED_MANUAL_BLANK: "protected_manual_blank",
 }
 
-# Observed vs reconstructed visual classes (styling fleshed out in C2).
+# Observed / reconstructed / resampled visual classes (C2-B; O3 third class).
 S4_OBSERVED_PROVENANCE: frozenset[int] = frozenset(
     {S4_PROVENANCE_ORIGINAL, S4_PROVENANCE_IDENTITY_CORRECTED}
 )
+S4_TEMPORAL_RESAMPLE_PROVENANCE: frozenset[int] = frozenset(
+    {S4_PROVENANCE_TEMPORAL_RESAMPLE}
+)
+S4_GAP_FILL_PROVENANCE: frozenset[int] = frozenset(
+    {S4_PROVENANCE_LINEAR_GAP_FILL, S4_PROVENANCE_KALMAN_GAP_FILL}
+)
+# Legacy umbrella (observed vs any non-observed reconstruction). Prefer the
+# three-way visual-class map for drawing; keep this for adapters/tests.
 S4_RECONSTRUCTED_PROVENANCE: frozenset[int] = frozenset(
-    {
-        S4_PROVENANCE_TEMPORAL_RESAMPLE,
-        S4_PROVENANCE_LINEAR_GAP_FILL,
-        S4_PROVENANCE_KALMAN_GAP_FILL,
-    }
+    S4_TEMPORAL_RESAMPLE_PROVENANCE | S4_GAP_FILL_PROVENANCE
 )
 S4_UNAVAILABLE_PROVENANCE: frozenset[int] = frozenset(
     {S4_PROVENANCE_MISSING, S4_PROVENANCE_PROTECTED_MANUAL_BLANK}
+)
+
+
+class S4ProvenanceVisualClass(StrEnum):
+    """Per-keypoint visual class for S4 QC (not a scientific category)."""
+
+    OBSERVED = "observed"
+    TEMPORAL_RESAMPLE = "temporal_resample"
+    GAP_FILL = "gap_fill"
+    UNAVAILABLE = "unavailable"
+
+
+S4_PROVENANCE_VISUAL_CLASS_BY_CODE: Final[dict[int, S4ProvenanceVisualClass]] = {
+    S4_PROVENANCE_MISSING: S4ProvenanceVisualClass.UNAVAILABLE,
+    S4_PROVENANCE_ORIGINAL: S4ProvenanceVisualClass.OBSERVED,
+    S4_PROVENANCE_IDENTITY_CORRECTED: S4ProvenanceVisualClass.OBSERVED,
+    S4_PROVENANCE_TEMPORAL_RESAMPLE: S4ProvenanceVisualClass.TEMPORAL_RESAMPLE,
+    S4_PROVENANCE_LINEAR_GAP_FILL: S4ProvenanceVisualClass.GAP_FILL,
+    S4_PROVENANCE_KALMAN_GAP_FILL: S4ProvenanceVisualClass.GAP_FILL,
+    S4_PROVENANCE_PROTECTED_MANUAL_BLANK: S4ProvenanceVisualClass.UNAVAILABLE,
+}
+
+# S4 pose QC default layers (C2-B; no behavioral HUD required).
+C2B_S4_POSE_QC_LAYERS: frozenset[LayerId] = frozenset(
+    {
+        LayerId.S4_POSE_FINAL,
+        LayerId.DEBUG_FRAME_COUNTER,
+    }
 )
 
 
@@ -245,3 +283,29 @@ def default_behavioral_qc_layers(
     if include_frame_counter:
         layers.append(LayerId.DEBUG_FRAME_COUNTER)
     return validate_layer_selection(layers)
+
+
+def default_s4_pose_qc_layers(
+    *,
+    include_frame_counter: bool = True,
+) -> tuple[LayerId, ...]:
+    """Build the default C2-B S4 finalized-pose QC layer selection."""
+
+    layers: list[LayerId] = [LayerId.S4_POSE_FINAL]
+    if include_frame_counter:
+        layers.append(LayerId.DEBUG_FRAME_COUNTER)
+    return validate_layer_selection(layers)
+
+
+def s4_provenance_visual_class(code: int) -> S4ProvenanceVisualClass:
+    """Map an exact S4 provenance code to its C2-B visual class.
+
+    Unknown codes raise — never invent categories or confidence.
+    """
+
+    try:
+        return S4_PROVENANCE_VISUAL_CLASS_BY_CODE[int(code)]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise OverlayContractError(
+            f"Unknown S4 provenance code {code!r}; refusing to invent a visual class."
+        ) from exc

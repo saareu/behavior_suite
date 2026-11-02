@@ -24,6 +24,7 @@ from overlay.adapters.pose import (
     S4FinalPoseAdapter,
     make_s2_inferred_pose_adapter,
     make_s3_tracked_pose_adapter,
+    make_s4_final_pose_adapter,
 )
 
 __all__ = [
@@ -37,6 +38,7 @@ __all__ = [
     "behavior_source_kind_label",
     "make_s2_inferred_pose_adapter",
     "make_s3_tracked_pose_adapter",
+    "make_s4_final_pose_adapter",
     "make_s5_segmentation_stub",
     "make_s8_contact",
     "make_s8_exclusive_a_to_b",

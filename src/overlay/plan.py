@@ -1,4 +1,4 @@
-"""Export plan contracts for C2-A behavioral QC clips.
+"""Export plan contracts for C2-A behavioral and C2-B S4 pose QC clips.
 
 Prepared-frame intervals are inclusive on both ends. Dense bout endpoints remain
 scientific authority; prepared seek uses SyncMap / packaged prepared columns.
@@ -18,6 +18,7 @@ from overlay.contracts import (
     OverlayExportScopeKind,
     PlateauPolicy,
     default_behavioral_qc_layers,
+    default_s4_pose_qc_layers,
     validate_layer_selection,
 )
 from overlay.style import DrawConfig
@@ -271,3 +272,101 @@ def dense_sample_window_for_prepared_interval(
     if not samples:
         return None
     return int(min(samples)), int(max(samples))
+
+
+@dataclass(frozen=True, slots=True)
+class S4PoseQcExportPlan:
+    """Explicit offline prepared-rate S4 finalized-pose QC export plan."""
+
+    scope_kind: OverlayExportScopeKind
+    prepared_interval: PreparedFrameInterval
+    selected_layers: tuple[LayerId, ...]
+    plateau_policy: PlateauPolicy = PlateauPolicy.LAST_IN_PLATEAU
+    frame_domain: FrameDomain = FrameDomain.PREPARED
+    draw_skeleton: bool = True
+    include_frame_counter: bool = True
+    style: DrawConfig = field(default_factory=DrawConfig)
+    pre_context_sec: float = 0.0
+    post_context_sec: float = 0.0
+    clip_bounds: ClipBounds | None = None
+    notes: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "scope_kind": self.scope_kind.value,
+            "prepared_interval": self.prepared_interval.to_dict(),
+            "selected_layers": [x.value for x in self.selected_layers],
+            "plateau_policy": self.plateau_policy.value,
+            "frame_domain": self.frame_domain.value,
+            "draw_skeleton": self.draw_skeleton,
+            "include_frame_counter": self.include_frame_counter,
+            "pre_context_sec": self.pre_context_sec,
+            "post_context_sec": self.post_context_sec,
+            "clip_bounds": None if self.clip_bounds is None else self.clip_bounds.to_dict(),
+            "style": self.style.to_dict(),
+            "notes": list(self.notes),
+        }
+
+
+def plan_s4_prepared_interval(
+    *,
+    prepared_frame_idx_start: int,
+    prepared_frame_idx_end: int,
+    source_fps: float,
+    source_n_frames: int,
+    include_frame_counter: bool = True,
+    draw_skeleton: bool = True,
+    selected_layers: list[str | LayerId] | tuple[str | LayerId, ...] | None = None,
+    plateau_policy: PlateauPolicy = PlateauPolicy.LAST_IN_PLATEAU,
+    pre_context_sec: float = 0.0,
+    post_context_sec: float = 0.0,
+    style: DrawConfig | None = None,
+    notes: tuple[str, ...] = (),
+) -> S4PoseQcExportPlan:
+    """Build an S4 pose QC plan from an inclusive prepared-frame interval."""
+
+    interval = PreparedFrameInterval(
+        start=int(prepared_frame_idx_start),
+        end=int(prepared_frame_idx_end),
+    )
+    bounds = compute_clip_bounds(
+        prepared_frame_idx_start=interval.start,
+        prepared_frame_idx_end=interval.end,
+        source_fps=float(source_fps),
+        source_n_frames=int(source_n_frames),
+        pre_context_sec=float(pre_context_sec),
+        post_context_sec=float(post_context_sec),
+    )
+    export_interval = PreparedFrameInterval(
+        start=int(bounds.clip_frame_idx_start),
+        end=int(bounds.clip_frame_idx_end),
+    )
+    layers = (
+        validate_layer_selection(list(selected_layers))
+        if selected_layers is not None
+        else default_s4_pose_qc_layers(include_frame_counter=include_frame_counter)
+    )
+    if LayerId.S4_POSE_FINAL not in layers:
+        raise OverlayContractError(
+            "S4 pose QC plan requires the s4.pose_final layer."
+        )
+    draw_style = style or DrawConfig(
+        darken_alpha=0.90,
+        draw_skeleton=draw_skeleton,
+        node_radius=5,
+        edge_thickness=2,
+        legend_text=True,
+    )
+    return S4PoseQcExportPlan(
+        scope_kind=OverlayExportScopeKind.PREPARED_INTERVAL,
+        prepared_interval=export_interval,
+        selected_layers=layers,
+        plateau_policy=plateau_policy,
+        draw_skeleton=draw_skeleton,
+        include_frame_counter=include_frame_counter,
+        style=draw_style,
+        pre_context_sec=float(pre_context_sec),
+        post_context_sec=float(post_context_sec),
+        clip_bounds=bounds,
+        notes=notes,
+    )

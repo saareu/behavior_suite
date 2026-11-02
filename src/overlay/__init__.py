@@ -1,7 +1,9 @@
-"""Shared headless overlay compositor (Increment C1 foundation + C2-A QC export).
+"""Shared headless overlay compositor (C1 foundation + C2-A/C2-B QC export).
 
-Overlays are opt-in. This package never mutates scientific artifacts and does
-not wire the unused S8 ``generate_overlay_video`` flag.
+Overlays are opt-in. This package never mutates scientific artifacts.
+S8 ``execution.generate_overlay_video`` is deprecated and unsupported (O4
+closed); it remains parsed but unwired. Use ``export_behavioral_qc_clip`` /
+``export_s4_pose_qc_clip`` instead.
 """
 
 from overlay.adapters import (
@@ -14,6 +16,7 @@ from overlay.adapters import (
     UnavailableAdapter,
     make_s2_inferred_pose_adapter,
     make_s3_tracked_pose_adapter,
+    make_s4_final_pose_adapter,
     make_s5_segmentation_stub,
     make_s8_contact,
     make_s8_exclusive_a_to_b,
@@ -29,6 +32,7 @@ from overlay.context import OverlayContext, OverlayEvidenceBundle, OverlayObserv
 from overlay.contracts import (
     OVERLAY_ARTIFACT_MANIFEST_SCHEMA,
     OVERLAY_RENDERER_VERSION,
+    OVERLAY_S4_POSE_RENDERER_VERSION,
     BehaviorSourceKind,
     FrameDomain,
     HudDirectionMode,
@@ -43,22 +47,30 @@ from overlay.contracts import (
     OverlaySourceError,
     OverlayTimingError,
     PlateauPolicy,
+    S4ProvenanceVisualClass,
     default_behavioral_qc_layers,
+    default_s4_pose_qc_layers,
     layers_for_hud_mode,
+    s4_provenance_visual_class,
     validate_layer_selection,
 )
 from overlay.evidence import collect_evidence
 from overlay.export import (
     OverlayQcExportResult,
+    OverlayS4PoseQcExportResult,
     build_behavioral_adapters,
+    build_s4_pose_adapters,
     export_behavioral_qc_clip,
+    export_s4_pose_qc_clip,
 )
 from overlay.plan import (
     BehavioralQcExportPlan,
     PreparedFrameInterval,
+    S4PoseQcExportPlan,
     dense_sample_window_for_prepared_interval,
     plan_bout_span,
     plan_prepared_interval,
+    plan_s4_prepared_interval,
 )
 from overlay.provenance import (
     OverlayArtifactManifest,
@@ -71,12 +83,18 @@ from overlay.source import (
     resolve_overlay_qc_source,
     verify_overlay_qc_source_integrity,
 )
+from overlay.source_s4 import (
+    OverlayS4QcSource,
+    resolve_overlay_s4_qc_source,
+    verify_overlay_s4_qc_source_integrity,
+)
 from overlay.style import DrawConfig
 from overlay.timing import PreparedFrameTiming, resolve_prepared_frame_timing
 
 __all__ = [
     "OVERLAY_ARTIFACT_MANIFEST_SCHEMA",
     "OVERLAY_RENDERER_VERSION",
+    "OVERLAY_S4_POSE_RENDERER_VERSION",
     "BehaviorSourceKind",
     "BehavioralQcExportPlan",
     "ComposedFrame",
@@ -99,6 +117,8 @@ __all__ = [
     "OverlayQcExportResult",
     "OverlayQcSource",
     "OverlayRenderError",
+    "OverlayS4PoseQcExportResult",
+    "OverlayS4QcSource",
     "OverlaySourceError",
     "OverlayStageAdapter",
     "OverlayTimingError",
@@ -109,17 +129,23 @@ __all__ = [
     "PreparedPoseAdapter",
     "PreparedVideoIdentity",
     "S4FinalPoseAdapter",
+    "S4PoseQcExportPlan",
+    "S4ProvenanceVisualClass",
     "SourceIdentity",
     "UnavailableAdapter",
     "build_behavioral_adapters",
     "build_overlay_artifact_manifest",
+    "build_s4_pose_adapters",
     "collect_evidence",
     "default_behavioral_qc_layers",
+    "default_s4_pose_qc_layers",
     "dense_sample_window_for_prepared_interval",
     "export_behavioral_qc_clip",
+    "export_s4_pose_qc_clip",
     "layers_for_hud_mode",
     "make_s2_inferred_pose_adapter",
     "make_s3_tracked_pose_adapter",
+    "make_s4_final_pose_adapter",
     "make_s5_segmentation_stub",
     "make_s8_contact",
     "make_s8_exclusive_a_to_b",
@@ -132,8 +158,12 @@ __all__ = [
     "parse_overlay_artifact_manifest",
     "plan_bout_span",
     "plan_prepared_interval",
+    "plan_s4_prepared_interval",
     "resolve_overlay_qc_source",
+    "resolve_overlay_s4_qc_source",
     "resolve_prepared_frame_timing",
+    "s4_provenance_visual_class",
     "validate_layer_selection",
     "verify_overlay_qc_source_integrity",
+    "verify_overlay_s4_qc_source_integrity",
 ]

@@ -1,14 +1,13 @@
-# Post-v0.1.1 — Overlay Architecture (C0 audit → C1 foundation → C2-A QC export)
+# Post-v0.1.1 — Overlay Architecture (C0 audit → C1 foundation → C2-A/C2-B QC export)
 
-**Status:** **C1 + C2-A final visual acceptance complete** (local Git checkpoint only; not pushed/merged). First offline behavioral QC MP4 via shared compositor.  
-**Final acceptance date:** 2026-11-02  
-**C2-A date:** 2026-11-02  
-**C1 date:** 2026-11-02  
+**Status:** **C2-B accepted and closed** (S4 provenance-styled pose QC video). Builds on C1 + C2-A at `origin/main`.  
+**C2-B final acceptance date:** 2026-11-02  
+**C2-A / C1 final acceptance date:** 2026-11-02  
 **C0 date:** 2026-11-01  
-**Base commit (C0/C1/C2-A worktree):** `a6572cc22d6a2f9b3f4bd845c0a3bfb761046282` (PI report B1+B2 complete)  
-**Integration baseline (`origin/main` at acceptance):** `f91f4582f4a4dc905c2841c7d7302712fcbb02de` (legacy framewise CSV merged via PR #1)  
+**C2-B base commit:** `a1da1e170297619b338a1d63f0c8239f5cbf5ea0` (`origin/main` — C1/C2-A + mainline CSV)  
 **Companion:** [`post_v011_s10_review_and_visualization.md`](post_v011_s10_review_and_visualization.md) (Increment B closed; overlays → this document)  
-**Non-scope (still):** GUI integration, full-session QC exporter, PI/gallery overlay integration, S4 pose styling, S5 contour generation, live overlays, scientific algorithm / schema mutation, push/merge pending architectural review, implicit S8 `generate_overlay_video` behavior.
+**Non-scope (still):** GUI overlay integration, full-session QC exporter, PI/gallery overlay integration, S5 contour generation, live overlays, scientific algorithm / schema mutation.  
+**O4 closed:** S8 `execution.generate_overlay_video` is **deprecated and unsupported** (parsed for settings compatibility; runtime unchanged; never produced video).
 
 **Legend**
 
@@ -492,7 +491,7 @@ Still open for C2 (styling / export product): **O1**, **O2**, **O3**, **O4**, **
 | **O1** | C2 first artifact | Bout QC overlay clip vs live S10 layer vs both | Offline bout/span QC first (safer performance) | Open (C2) |
 | **O2** | Partner perspective UX | Toggle single HUD vs dual HUD always-available | Toggle + optional dual strip; never merge | Open (C2); dual layers exist |
 | **O3** | S4 `temporal_resample` styling | Group with observed / with imputed / third class | Third class (honest; matches S6 distinction) | Open (C2); codes faithful in C1 |
-| **O4** | S8 `generate_overlay_video` flag | Wire to exporter / remove / rename | Wire to optional exporter or deprecate explicitly | Open; **not wired in C1** |
+| **O4** | S8 `generate_overlay_video` flag | Wire to exporter / remove / rename | Wire to optional exporter or deprecate explicitly | **Closed in C2-B:** deprecated/unsupported; runtime unchanged |
 | **O5** | Overlay in PI / gallery defaults | Off / opt-in / on | Off by default; explicit opt-in | **Resolved:** opt-in |
 | **O6** | S5 in C scope | Defer / C3 optional | Defer full movies; optional layer in C3 only | **Resolved:** deferred |
 | **O7** | Near-mouse vs top-center exclusive HUD | Legacy top-center / pose-anchored / both | Start top-center (legacy familiarity); pose-anchored later | Open (C2); C1 uses top-center stub |
@@ -718,17 +717,17 @@ Short QC clip published under session `results_exports/overlay_qc_behavioral__*`
 
 Still deferred: **O3** S4 styling, **O4** S8 `generate_overlay_video` flag wiring, GUI/PI/gallery, full-session exporter, dense-rate export.
 
-### 14.11 C2-B / C3 prerequisites
+### 14.11 C2-B / C3 prerequisites (historical at C2-A close)
 
-1. Optional S4 provenance-styled pose layer on prepared-rate QC (approve **O3**).  
-2. Decide **O4** (wire vs deprecate unused S8 overlay flag).  
+1. Optional S4 provenance-styled pose layer on prepared-rate QC (approve **O3**) — **done in §16**.  
+2. Decide **O4** (wire vs deprecate unused S8 overlay flag) — still open.  
 3. Optional GUI action to launch QC export (still opt-in).  
 4. Full-session prepared-rate exporter with stronger cancel / chunk progress (C3).  
 5. Live S10 compose path only after U7 reopen if needed.
 
-### 14.12 Stop point
+### 14.12 Stop point (historical)
 
-**C2-A complete as first offline behavioral QC MP4 exporter.** Stop for architectural review before C2-B pose styling / GUI / PI integration / full-session export.
+**C2-A complete as first offline behavioral QC MP4 exporter.** C2-B S4 pose QC follows in §16.
 
 ---
 
@@ -761,14 +760,14 @@ test_cases/E_full_session_integration/results_exports/overlay_qc_behavioral__202
 
 ### 15.3 C2-A behavioral QC export status
 
-**Accepted.** Offline prepared-rate exporter publishes `overlay_qc_behavioral__*` with `behavioral_qc.mp4` + `overlay_artifact_manifest_v1`. Dual exclusive HUD + independent CONTACT/SBS LEDs + debug counter. Naked S9 / PI media paths unchanged. S8 `generate_overlay_video` still unwired (**O4** open).
+**Accepted.** Offline prepared-rate exporter publishes `overlay_qc_behavioral__*` with `behavioral_qc.mp4` + `overlay_artifact_manifest_v1`. Dual exclusive HUD + independent CONTACT/SBS LEDs + debug counter. Naked S9 / PI media paths unchanged. S8 `generate_overlay_video` later **deprecated in C2-B** (O4 closed).
 
-### 15.4 Remaining C2-B prerequisites
+### 15.4 Remaining C2-B prerequisites (resolved by §16)
 
-1. Approve **O3** S4 provenance visual classes (recommend third class for `temporal_resample`).  
-2. Decide **O4** — wire vs deprecate unused S8 `generate_overlay_video`.  
-3. Optional S4 provenance-styled pose layer on prepared-rate QC.  
-4. Optional GUI launch for QC export (still opt-in; no GUI in this checkpoint).  
+1. Approve **O3** S4 provenance visual classes — **resolved in C2-B** (third class for `temporal_resample`).  
+2. Decide **O4** — wire vs deprecate unused S8 `generate_overlay_video` — **closed in C2-B** (deprecated/unsupported; runtime unchanged).  
+3. Optional S4 provenance-styled pose layer on prepared-rate QC — **shipped in C2-B**.  
+4. Optional GUI launch for QC export (still opt-in; no GUI in C2-B).  
 5. Keep C3 (full-session exporter / live S10) deferred until U7 reopen if needed.
 
 ### 15.5 Integration baseline and strategy
@@ -788,3 +787,184 @@ test_cases/E_full_session_integration/results_exports/overlay_qc_behavioral__202
 **Local overlay feature branch committed; combined regressions run in integration worktree when prepared.** Do not push or merge until architectural review. No GUI / PI / gallery overlay / S4 provenance / full-session exporter / science changes in this checkpoint.
 
 _End of C1+C2-A final acceptance record (C0 audit + C1 + C2-A retained above)._
+
+---
+
+## 16. Increment C2-B — S4 finalized-pose QC video (2026-11-02)
+
+### 16.1 Operator-visible product
+
+Offline prepared-rate S4 finalized-pose QC MP4 under:
+
+```text
+{session}/results_exports/overlay_qc_s4_pose__{timestamp}/
+  s4_pose_qc.mp4
+  overlay_artifact_manifest.json
+  run_meta.json
+  settings_used.yaml
+  processing_log.txt
+```
+
+- Opt-in only; explicit S4 run directory required (never auto-picks newest).
+- H.264 / yuv420p via the shared C2-A streaming ffmpeg pipe; prepared-video FPS.
+- Immutable job directories; digest revalidation before publication.
+- Naked S9 / PI / C2-A behavioral exports unchanged.
+
+### 16.2 Provenance visual map (O3 resolved)
+
+Exact S4 codes from `pose_finalization.contracts` / overlay mirrors:
+
+| Code | `provenance_name` | Visual class | Draw style |
+| --- | --- | --- | --- |
+| 0 | `missing` | `unavailable` | **Not drawn** |
+| 1 | `original` | `observed` | Filled disc (mouse identity color) |
+| 2 | `identity_corrected` | `observed` | Filled disc (mouse identity color) |
+| 3 | `temporal_resample` | `temporal_resample` | Hollow ring (third class; not conflated with gap-fill) |
+| 4 | `linear_gap_fill` | `gap_fill` | Diamond outline |
+| 5 | `kalman_gap_fill` | `gap_fill` | Diamond outline |
+| 6 | `protected_manual_blank` | `unavailable` | **Not drawn** |
+
+- Per-keypoint styling; mouse identity via track color + `M{track}` label.
+- Original provenance codes retained in observation payload + manifest.
+- Unknown codes raise; no fabricated confidence / categories.
+- Skeleton edges only between drawable endpoints; topology from S2 `pose.slp` when `sleap_io` can read it — otherwise nodes-only (never invent edges).
+
+### 16.3 Source eligibility and timing
+
+| Pin | Authority |
+| --- | --- |
+| S4 run identity | Explicit `s4_run_dir`; `validate_s4_run_for_downstream` |
+| S4 artifact digest | `final_pose.parquet` sha256 |
+| S1 prepared video | `{session}/preprocess/prepared_video.mp4` + sha256 + probe |
+| Timing source | S1 `prepared_sync.npz` → NN dense map validated against S4 dense `sample_idx`/`time_sec` → `SyncMap` |
+| S3 provenance | Recorded `source_s3` + live acceptance / tracked_pose digest |
+
+- Plateau policy: **`LAST_IN_PLATEAU`**.
+- Frame domain: prepared video FPS (no artificial 120 fps duplication).
+- Reject missing / incompatible / digest-mismatched sources.
+
+### 16.4 Export architecture
+
+Reuses C2-A streaming path in `src/overlay/export.py` (`export_s4_pose_qc_clip`):
+
+1. Open/pin S4 source (`source_s4.py`).
+2. Plan inclusive prepared interval (`plan_s4_prepared_interval`).
+3. Windowed S4 adapter + debug counter → compositor → ffmpeg raw BGR24 pipe.
+4. Staging + atomic publish; cancel cleans staging / unpublished job dir.
+5. Manifest `overlay_artifact_manifest_v1` with renderer `overlay_renderer_c2b_v1`.
+
+### 16.5 Files added/updated (C2-B)
+
+```text
+src/overlay/contracts.py              # O3 map, C2-B constants, default_s4_pose_qc_layers
+src/overlay/adapters/pose.py          # visual_class payload; dense window; factory
+src/overlay/layers/pose.py            # per-keypoint S4 provenance drawing + legend
+src/overlay/source_s4.py              # explicit S4 QC source resolve + integrity
+src/overlay/plan.py                   # S4PoseQcExportPlan / plan_s4_prepared_interval
+src/overlay/export.py                 # export_s4_pose_qc_clip (+ sidecars)
+src/overlay/provenance.py             # optional renderer_version
+src/overlay/__init__.py / adapters/__init__.py
+tests/overlay/test_s4_provenance_style.py
+tests/overlay/test_export_s4_pose_qc.py
+scripts/_overlay_c2b_e_session_s4_pose_qc_smoke.py
+docs/roadmap/post_v011_overlay_architecture.md
+```
+
+### 16.6 Laboratory evidence (E-session)
+
+Explicit eligible run: `pose_finalization__20261025T173206`.
+
+Published artifact:
+
+```text
+test_cases/E_full_session_integration/results_exports/overlay_qc_s4_pose__20261102T185333/
+  s4_pose_qc.mp4
+  overlay_artifact_manifest.json
+  run_meta.json
+  settings_used.yaml
+  processing_log.txt
+```
+
+Clip: prepared inclusive `[971, 1000]` (30 frames @ 119.048 fps).  
+Inspected frames (evidence under `tmp_overlay_c2b_e_session_s4_pose_qc/`):
+
+| Clip frame | prep | dense (LAST_IN_PLATEAU) | Recorded S4 codes | Visual check |
+| --- | --- | --- | --- | --- |
+| 0 | 971 | 979 | `missing`, `temporal_resample` | Hollow rings for drawable points; M1 `headstage` missing not drawn |
+| 15 | 986 | 994 | `missing`, `temporal_resample`, `kalman_gap_fill` | Rings + diamond (M0 nose gap-fill) |
+| 29 | 1000 | 1008 | `missing`, `identity_corrected`, `kalman_gap_fill` | Filled observed discs + diamond nose |
+
+**Absent from this clip (not visually validated here):** `original` (1), `linear_gap_fill` (4), `protected_manual_blank` (6).  
+Unit tests cover those codes’ mapping and non-drawing rules.
+
+**Skeleton note:** this environment lacks `sleap_io`, so edges resolved to nodes-only (`skeleton_source=unresolved:…/pose.slp`). Honest; no invented topology. Upstream S4/S1 digests unchanged.
+
+### 16.7 Decisions resolved by C2-B
+
+| ID | Resolution |
+| --- | --- |
+| **O3** | Three visual classes: observed / temporal_resample / gap_fill; unavailable not drawn |
+| **O4** | S8 `generate_overlay_video` **deprecated and unsupported** — documented in config / YAML / overlay package docstring; runtime parse/default unchanged; no producer wired |
+
+Still deferred: GUI overlay launch/integration, PI/gallery overlay, full-session exporter, dense-rate export, S5 contours.
+
+### 16.8 Topology (optional `sleap_io`)
+
+- Skeleton edges load from S2 `pose.slp` via `tracking_correction.skeleton.resolve_review_skeleton_edges` only when readable.
+- **`sleap_io` remains optional** for overlay QC and is **not** a hard GUI-launch dependency for C2-B.
+- When topology is unavailable/unreadable: **nodes-only** mode with explicit disclosure in processing log, manifest (`skeleton_mode`, `skeleton_nodes_only`, `skeleton_disclosure`), and source provenance — **never invent edges**.
+- Focused tests: `tests/overlay/test_s4_skeleton_topology.py` (injected real topology edge drawing + nodes-only disclosure).
+
+### 16.9 Final acceptance evidence (2026-11-02)
+
+#### Provenance mapping (accepted)
+
+| Code | Name | Visual |
+| --- | --- | --- |
+| 0 | missing | not drawn |
+| 1 | original | filled disc (observed) |
+| 2 | identity_corrected | filled disc (observed) |
+| 3 | temporal_resample | hollow ring |
+| 4 | linear_gap_fill | diamond |
+| 5 | kalman_gap_fill | diamond |
+| 6 | protected_manual_blank | not drawn |
+
+#### Performance breakdown (E-session short clip prep `[971,1000]`, 30 frames)
+
+Instrumenting `export_s4_pose_qc_clip` + source open on 2026-11-02 (job `overlay_qc_s4_pose__20261102T191230`):
+
+| Phase | Seconds |
+| --- | --- |
+| Source resolve/open (+ hashing / sync build) | 0.510 |
+| Source validation and hashing (export recheck) | 0.016 |
+| S4 pose loading | 0.068 |
+| Timing resolution (per-frame evidence) | 0.034 |
+| Frame composition | 0.096 |
+| Prepared video decode | 0.032 |
+| FFmpeg encoding (stdin write + close) | 0.147 |
+| Sidecar publication | 0.014 |
+
+Dominant cost for this short clip is **source open** (S4 eligibility + sync index + digests), not per-frame composition/encode. No localized performance defect requiring a patch; no broad optimization in C2-B closure.
+
+#### Real-session visual evidence
+
+Prior lab clip under `overlay_qc_s4_pose__20261102T185333` + frames in `tmp_overlay_c2b_e_session_s4_pose_qc/`:
+
+- Filled discs = observed; hollow rings = temporal_resample; diamonds = gap_fill.
+- Missing/protected not drawn; per-keypoint classes coexist on one mouse; M0/M1 distinguishable; legend readable.
+- Nodes-only on this host (`sleap_io` absent); no misleading edges.
+- **Validated only via unit tests (absent from short clip):** `original` (1), `linear_gap_fill` (4), `protected_manual_blank` (6). Topology edge drawing validated via injected-topology fixture (not this host’s missing `sleap_io`).
+
+#### Acceptance status
+
+**C2-B scientifically and architecturally accepted.** Offline prepared-rate S4 pose QC exporter closed. Upstream S4/S1 digests unchanged.
+
+#### Deferred
+
+GUI overlay integration, full-session export, PI/gallery overlay, S5 overlays, dense-rate export.
+
+### 16.10 Stop point
+
+**C2-B final acceptance complete.** Commit C2-B code/tests/docs and push to `origin/main` (no release tag). No GUI / PI / gallery / S5 / full-session / scientific algorithm changes.
+
+_End of C2-B record._

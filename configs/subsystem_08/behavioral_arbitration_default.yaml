@@ -118,6 +118,8 @@ execution:
   emit_stage_diagnostics: true
   # Optional long-form arbitration_diagnostics.parquet (default off).
   emit_arbitration_diagnostics: false
+  # DEPRECATED / unsupported: never wired to a producer. Kept for settings
+  # compatibility only; do not enable. Use overlay QC exporters instead.
   generate_overlay_video: false
   # Pipeline 110 emit floors must NOT be applied inside S8.
   apply_pipeline_110_emit_filters: false

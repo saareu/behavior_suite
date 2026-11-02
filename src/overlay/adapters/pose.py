@@ -15,6 +15,7 @@ from overlay.contracts import (
     S4_UNAVAILABLE_PROVENANCE,
     LayerId,
     OverlayAdapterError,
+    s4_provenance_visual_class,
 )
 from overlay.timing import PreparedFrameTiming
 from project.file_digest import sha256_file
@@ -210,6 +211,7 @@ class S4FinalPoseAdapter:
         *,
         run_id: str | None = None,
         run_dir: Path | str | None = None,
+        dense_sample_range: tuple[int, int] | None = None,
     ) -> None:
         self._path = (
             Path(parquet_path).expanduser().resolve()
@@ -219,6 +221,7 @@ class S4FinalPoseAdapter:
         self._run_dir = (
             Path(run_dir).expanduser().resolve() if run_dir is not None else None
         )
+        self._dense_sample_range = dense_sample_range
         self._frame: pd.DataFrame | None = None
         self._by_sample: dict[int, pd.DataFrame] | None = None
         self._load_error: str | None = None
@@ -236,6 +239,11 @@ class S4FinalPoseAdapter:
                     {"sample_idx", "track", "node", "x", "y", "provenance"},
                     label=str(self._path),
                 )
+                if dense_sample_range is not None:
+                    lo, hi = int(dense_sample_range[0]), int(dense_sample_range[1])
+                    keys = pd.to_numeric(self._frame["sample_idx"], errors="coerce")
+                    mask = (keys >= lo) & (keys <= hi)
+                    self._frame = self._frame.loc[mask].copy()
                 self._index_by_sample()
             except Exception as exc:  # noqa: BLE001
                 self._load_error = f"Failed to load S4 final pose: {exc}"
@@ -248,7 +256,15 @@ class S4FinalPoseAdapter:
             run_dir=self._run_dir,
             artifact_path=self._path,
             digest_sha256=_optional_digest(self._path),
-            extra={"legend": "final pose", "domain": "dense"},
+            extra={
+                "legend": "final pose",
+                "domain": "dense",
+                "dense_sample_range": (
+                    None
+                    if dense_sample_range is None
+                    else [int(dense_sample_range[0]), int(dense_sample_range[1])]
+                ),
+            },
         )
 
     def _index_by_sample(self) -> None:
@@ -390,6 +406,7 @@ def _s4_rows_to_points(group: pd.DataFrame) -> list[dict[str, Any]]:
                 f"{prov} ({name})."
             )
         xy = _finite_xy(getattr(row, "x", None), getattr(row, "y", None))
+        visual = s4_provenance_visual_class(prov)
         drawable = prov not in S4_UNAVAILABLE_PROVENANCE and xy is not None
         points.append(
             {
@@ -399,11 +416,29 @@ def _s4_rows_to_points(group: pd.DataFrame) -> list[dict[str, Any]]:
                 "y": None if xy is None else xy[1],
                 "provenance": prov,
                 "provenance_name": name,
+                "visual_class": visual.value,
                 "drawable": drawable,
                 "point_score": _optional_float(getattr(row, "point_score", None)),
             }
         )
     return points
+
+
+def make_s4_final_pose_adapter(
+    parquet_path: Path | str | None,
+    *,
+    run_id: str | None = None,
+    run_dir: Path | str | None = None,
+    dense_sample_range: tuple[int, int] | None = None,
+) -> S4FinalPoseAdapter:
+    """Factory for the S4 finalized-pose adapter (optional dense window)."""
+
+    return S4FinalPoseAdapter(
+        parquet_path,
+        run_id=run_id,
+        run_dir=run_dir,
+        dense_sample_range=dense_sample_range,
+    )
 
 
 def _optional_float(value: object) -> float | None:

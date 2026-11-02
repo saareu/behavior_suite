@@ -290,6 +290,9 @@ class ScientificSettings:
 class ExecutionSettings:
     emit_stage_diagnostics: bool = True
     emit_arbitration_diagnostics: bool = False
+    # DEPRECATED / unsupported (O4 closed): parsed for settings round-trip only.
+    # S8 never produced an overlay video from this flag. Use opt-in overlay QC
+    # exporters under ``overlay.export`` instead. Runtime behavior unchanged.
     generate_overlay_video: bool = False
     apply_pipeline_110_emit_filters: bool = False
 
