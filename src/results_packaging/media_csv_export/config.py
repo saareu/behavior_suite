@@ -4,15 +4,20 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 from results_packaging.media_csv_export.contracts import (
+    CSV_FORMAT_PROFILES,
     DEFAULT_CODEC,
     DEFAULT_CRF,
+    DEFAULT_CSV_FORMAT_PROFILE,
     DEFAULT_PIXEL_FORMAT,
     EXPORT_SETTINGS_SCHEMA_VERSION,
     JOB_KIND_CSV,
     JOB_KIND_MEDIA,
+    LEGACY_FRAMEWISE_PROFILE_ID,
+    PACKAGE_BOUTS_AUTOMATED_PROFILE_ID,
     SELECTION_ALL_PACKAGE_BOUTS,
     SELECTION_BOUT_ID_LIST,
     SELECTION_CHANNELS_BEHAVIORS,
@@ -170,6 +175,9 @@ class CsvExportSettings:
     schema_version: str = EXPORT_SETTINGS_SCHEMA_VERSION
     job_kind: str = JOB_KIND_CSV
     selection: SelectionSpec = field(default_factory=SelectionSpec)
+    format_profile: str = DEFAULT_CSV_FORMAT_PROFILE
+    # Explicit S4 run when S6→S4 lineage is unavailable (legacy_framewise_v1 only).
+    pose_run_dir: str | None = None
 
     def validated(self) -> CsvExportSettings:
         if self.schema_version != EXPORT_SETTINGS_SCHEMA_VERSION:
@@ -178,21 +186,65 @@ class CsvExportSettings:
             )
         if self.job_kind != JOB_KIND_CSV:
             raise ExportConfigError(f"CSV settings job_kind must be {JOB_KIND_CSV!r}.")
-        return replace(self, selection=self.selection.validated())
+        profile = str(self.format_profile or DEFAULT_CSV_FORMAT_PROFILE).strip()
+        if profile not in CSV_FORMAT_PROFILES:
+            raise ExportConfigError(
+                f"Unsupported CSV format_profile {profile!r}; expected one of "
+                f"{sorted(CSV_FORMAT_PROFILES)}."
+            )
+        selection = self.selection
+        if profile == LEGACY_FRAMEWISE_PROFILE_ID:
+            # Framewise export ignores bout selection; keep a validated default.
+            selection = SelectionSpec().validated()
+        else:
+            selection = self.selection.validated()
+        pose_dir: str | None = None
+        if self.pose_run_dir is not None and str(self.pose_run_dir).strip():
+            pose_dir = str(Path(str(self.pose_run_dir).strip()).expanduser().resolve())
+        if pose_dir is not None and profile != LEGACY_FRAMEWISE_PROFILE_ID:
+            raise ExportConfigError(
+                "pose_run_dir is only valid with format_profile="
+                f"{LEGACY_FRAMEWISE_PROFILE_ID!r}."
+            )
+        return replace(
+            self,
+            selection=selection,
+            format_profile=profile,
+            pose_run_dir=pose_dir,
+        )
 
     def to_settings_dict(self) -> dict[str, Any]:
         cfg = self.validated()
+        notes: dict[str, Any] = {
+            "never_mutates_s9_package": True,
+            "format_profile": cfg.format_profile,
+        }
+        if cfg.format_profile == PACKAGE_BOUTS_AUTOMATED_PROFILE_ID:
+            notes.update(
+                {
+                    "export_provenance": "automated",
+                    "no_bout_transformations": True,
+                    "row_grain": "package_bouts",
+                }
+            )
+        else:
+            notes.update(
+                {
+                    "export_provenance": "automated_or_published_reviewed",
+                    "row_grain": "dense_frame",
+                    "original_frame_authority": "sync_index.raw_decode_frame_idx",
+                    "pose_authority": "s4_final_pose",
+                    "crlf": True,
+                    "pose_run_dir": cfg.pose_run_dir,
+                }
+            )
         return {
             "schema_version": cfg.schema_version,
             "job_kind": cfg.job_kind,
+            "format_profile": cfg.format_profile,
+            "pose_run_dir": cfg.pose_run_dir,
             "selection": cfg.selection.to_dict(),
-            "notes": {
-                "export_provenance": "automated",
-                "no_bout_transformations": True,
-                "framewise_csv_deferred": True,
-                "reviewed_csv_deferred_to_s10": True,
-                "never_mutates_s9_package": True,
-            },
+            "notes": notes,
         }
 
 
@@ -236,12 +288,17 @@ def media_settings_from_mapping(data: Mapping[str, Any]) -> MediaExportSettings:
 def csv_settings_from_mapping(data: Mapping[str, Any]) -> CsvExportSettings:
     if not isinstance(data, Mapping):
         raise ExportConfigError("CSV export settings root must be a mapping.")
+    pose_raw = data.get("pose_run_dir")
     return CsvExportSettings(
         schema_version=str(
             data.get("schema_version", EXPORT_SETTINGS_SCHEMA_VERSION)
         ),
         job_kind=str(data.get("job_kind", JOB_KIND_CSV)),
         selection=selection_from_mapping(data.get("selection")),
+        format_profile=str(
+            data.get("format_profile", DEFAULT_CSV_FORMAT_PROFILE)
+        ),
+        pose_run_dir=(str(pose_raw) if pose_raw is not None else None),
     ).validated()
 
 

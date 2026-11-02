@@ -1740,6 +1740,135 @@ class BehavioralReviewController:
             self.state.run_stage = "Publication failed"
         return True
 
+    def resolve_published_review_dir_for_csv(self) -> Path:
+        """Return the selected/opened published review directory for CSV export.
+
+        Drafts and unpublished working copies are refused.
+        """
+
+        opt = self.selected_review_option()
+        if opt is not None:
+            if opt.is_draft:
+                raise BehavioralReviewUiError(
+                    "Draft S10 reviews are not eligible for final "
+                    "legacy_framewise_v1 CSV export; publish first."
+                )
+            return Path(opt.run_dir).expanduser().resolve()
+        if self.state.review_run_dir is not None and not self.state.draft_open:
+            return Path(self.state.review_run_dir).expanduser().resolve()
+        raise BehavioralReviewUiError(
+            "Select a published S10 reviewed run before exporting "
+            "legacy_framewise_v1 CSV (drafts are not eligible)."
+        )
+
+    def legacy_csv_pose_ui_state(self, *, pose_run_dir: str | None = None):
+        """Lineage vs explicit S4 picker state for published-S10 CSV export."""
+
+        from ui.controllers.results_export_support import build_legacy_pose_ui_state
+
+        if self.state.session_root is None:
+            return build_legacy_pose_ui_state(
+                session_root=None,
+                package_dir=None,
+                format_profile="legacy_framewise_v1",
+                selected_pose_run_dir=pose_run_dir,
+            )
+        package_dir: Path | None = None
+        try:
+            review_dir = self.resolve_published_review_dir_for_csv()
+            from behavioral_review.discovery import reopen_reviewed_run
+
+            opened = reopen_reviewed_run(review_dir)
+            meta = opened.get("run_meta") or {}
+            validation = opened.get("validation") or {}
+            parent = validation.get("parent_package_dir") or meta.get(
+                "parent_package_dir"
+            )
+            if parent:
+                package_dir = Path(str(parent)).expanduser().resolve()
+        except (BehavioralReviewUiError, OSError, ValueError):
+            # Fall back to selected S9 package when published review is not ready.
+            opt = self.selected_s9_option()
+            if opt is not None:
+                package_dir = Path(opt.run_dir).expanduser().resolve()
+            elif self.state.package_dir is not None:
+                package_dir = Path(self.state.package_dir).expanduser().resolve()
+        return build_legacy_pose_ui_state(
+            session_root=self.state.session_root,
+            package_dir=package_dir,
+            format_profile="legacy_framewise_v1",
+            selected_pose_run_dir=pose_run_dir,
+        )
+
+    def resolve_pose_run_dir_for_legacy_csv(
+        self, *, pose_run_dir: Path | str | None
+    ) -> Path | None:
+        """Validate explicit S4 selection for S10 CSV, or None when lineage pins."""
+
+        pose_state = self.legacy_csv_pose_ui_state(
+            pose_run_dir=str(pose_run_dir) if pose_run_dir is not None else None
+        )
+        if pose_state.lineage_available:
+            if pose_run_dir is not None and str(pose_run_dir).strip():
+                selected = Path(str(pose_run_dir)).expanduser().resolve()
+                lineage_dir = (
+                    Path(pose_state.lineage_run_dir).expanduser().resolve()
+                    if pose_state.lineage_run_dir
+                    else None
+                )
+                if lineage_dir is not None and selected != lineage_dir:
+                    raise BehavioralReviewUiError(
+                        "Explicit S4 selection disagrees with the S6 lineage-pinned "
+                        f"S4 run ({pose_state.lineage_run_id}). Clear the manual "
+                        "selection or choose the lineage-pinned run."
+                    )
+            return None
+        if not pose_state.requires_explicit_pose:
+            return None
+        if not pose_state.candidates:
+            raise BehavioralReviewUiError(
+                "S6→S4 lineage is unavailable and no completed S4 pose runs were "
+                "found in this session. Run Subsystem 4 first."
+            )
+        if pose_run_dir is None or not str(pose_run_dir).strip():
+            raise BehavioralReviewUiError(
+                "S6→S4 lineage is unavailable. Select a completed S4 pose run "
+                "explicitly before exporting legacy_framewise_v1 CSV "
+                "(automatic newest-S4 selection is disabled)."
+            )
+        return Path(str(pose_run_dir)).expanduser().resolve()
+
+    def export_legacy_framewise_csv_from_published(
+        self,
+        *,
+        progress_callback=None,
+        timestamp: str | None = None,
+        pose_run_dir: Path | str | None = None,
+    ):
+        """Export legacy_framewise_v1 from published reviewed states only."""
+
+        if self.state.session_root is None:
+            raise BehavioralReviewUiError("Open a session before CSV export.")
+        review_dir = self.resolve_published_review_dir_for_csv()
+        resolved_pose = self.resolve_pose_run_dir_for_legacy_csv(
+            pose_run_dir=pose_run_dir
+        )
+        from results_packaging.legacy_framewise_csv import (
+            LegacyFramewiseExportRequest,
+            run_legacy_framewise_csv_export,
+        )
+
+        return run_legacy_framewise_csv_export(
+            LegacyFramewiseExportRequest(
+                session_root=Path(self.state.session_root).expanduser().resolve(),
+                review_run_dir=review_dir,
+                behavior_source_kind="published_s10",
+                timestamp=timestamp,
+                pose_run_dir=resolved_pose,
+            ),
+            progress_callback=progress_callback,
+        )
+
     def fail_publish(self, identity: PublishRequestIdentity, message: str) -> bool:
         active = self.state.active_publish_identity
         if (

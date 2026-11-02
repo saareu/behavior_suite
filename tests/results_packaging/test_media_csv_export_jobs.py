@@ -15,7 +15,7 @@ from results_packaging.contracts import (
     ProvenanceError,
 )
 from results_packaging.media_csv_export.clip_bounds import compute_clip_bounds
-from results_packaging.media_csv_export.config import SelectionSpec
+from results_packaging.media_csv_export.config import CsvExportSettings, SelectionSpec
 from results_packaging.media_csv_export.contracts import (
     ENCODE_STATUS_FAILED,
     ENCODE_STATUS_SUCCEEDED,
@@ -62,6 +62,9 @@ def test_csv_export_full_table_immutable_and_no_package_writes(tmp_path: Path):
             session_root=info["session_root"],
             package_dir=info["package_dir"],
             timestamp="20260101T000001",
+            settings=CsvExportSettings(
+                format_profile="package_bouts_automated"
+            ),
         )
     )
     assert result.success
@@ -289,6 +292,9 @@ def test_discovery_and_no_writes_to_s9_sources(tmp_path: Path):
             session_root=info["session_root"],
             package_dir=info["package_dir"],
             timestamp="20260101T000010",
+            settings=CsvExportSettings(
+                format_profile="package_bouts_automated"
+            ),
         )
     )
     media = run_media_export(
@@ -344,6 +350,9 @@ def test_stale_package_rejected_for_new_export_by_default(tmp_path: Path):
                     session_root=info["session_root"],
                     package_dir=info["package_dir"],
                     timestamp="20260101T000020",
+                    settings=CsvExportSettings(
+                        format_profile="package_bouts_automated"
+                    ),
                 )
             )
         with pytest.raises(ExportSourceError, match="not currently eligible"):

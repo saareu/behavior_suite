@@ -87,13 +87,17 @@ def test_stale_package_blocks_export_controls(tmp_path: Path) -> None:
 def test_csv_export_immediate_launch_and_conflict(tmp_path: Path) -> None:
     controller, export_info, stack = _controller_with_package(tmp_path)
     with stack:
+        # Historical bout profile avoids the legacy S4 lineage gate for this
+        # launch-safety test (pose picker covered separately below).
+        bout_settings = ExportUiSettings(format_profile="package_bouts_automated")
+        controller.update_export_settings(bout_settings)
         page = ResultsPackagingPage(controller)
         page.show()
         page.refresh_from_state()
         assert page.export_csv_button.isEnabled()
 
         t0 = time.perf_counter()
-        identity = controller.begin_csv_export_launch(ExportUiSettings())
+        identity = controller.begin_csv_export_launch(bout_settings)
         assert time.perf_counter() - t0 < 0.25
         assert controller.state.task_running is True
         assert identity.job_kind == "csv_export"
@@ -101,7 +105,7 @@ def test_csv_export_immediate_launch_and_conflict(tmp_path: Path) -> None:
         assert page.export_csv_button.isEnabled() is False
         assert page.export_media_button.isEnabled() is False
         with pytest.raises(ResultsPackagingUiError, match="already running"):
-            controller.begin_media_export_launch(ExportUiSettings())
+            controller.begin_media_export_launch(bout_settings)
         # Finish without starting a QThread (avoids offscreen Qt runner crashes).
         result = CsvExportJobResult(
             success=True,
@@ -128,7 +132,9 @@ def test_csv_export_immediate_launch_and_conflict(tmp_path: Path) -> None:
 def test_export_settings_immutable_and_stale_callback_rejection(tmp_path: Path) -> None:
     controller, export_info, stack = _controller_with_package(tmp_path)
     with stack:
-        identity = controller.begin_csv_export_launch(ExportUiSettings())
+        bout_settings = ExportUiSettings(format_profile="package_bouts_automated")
+        controller.update_export_settings(bout_settings)
+        identity = controller.begin_csv_export_launch(bout_settings)
         assert controller.state.task_running
         with pytest.raises(ResultsPackagingUiError, match="Cannot change export"):
             controller.update_export_settings(
@@ -218,3 +224,98 @@ def test_incomplete_media_retry_gate(tmp_path: Path) -> None:
         result = controller.execute_media_retry_launch(identity)
         assert result.status == "completed"
         assert retried == [job_dir]
+
+
+def test_legacy_pose_picker_required_when_lineage_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, export_info, stack = _controller_with_package(tmp_path)
+    with stack:
+        session = export_info["session_root"]
+        pose_dir = session / "pose_finalization" / "pose_finalization__manual"
+        pose_dir.mkdir(parents=True)
+        (pose_dir / "run_meta.json").write_text(
+            '{"run_id":"pose_finalization__manual","status":"completed"}\n',
+            encoding="utf-8",
+        )
+        (pose_dir / "final_pose.parquet").write_bytes(b"parquet-placeholder")
+
+        class _Cand:
+            run_id = pose_dir.name
+            run_dir = pose_dir
+            status = "completed"
+            classification = "eligible"
+            label = f"{pose_dir.name} · eligible"
+
+        monkeypatch.setattr(
+            "results_packaging.legacy_framewise_csv.list_pose_run_candidates",
+            lambda _root: (_Cand(),),
+        )
+
+        # Default legacy profile without lineage → export blocked until explicit S4.
+        reason = controller.cannot_export_reason()
+        assert reason is not None
+        assert "explicit" in reason.lower() or "lineage" in reason.lower()
+        assert controller.can_run_export() is False
+
+        page = ResultsPackagingPage(controller)
+        page.show()
+        page.refresh_from_state()
+        assert page.export_pose_combo.isVisible()
+        assert page.export_pose_combo.count() >= 2  # placeholder + candidate
+        assert page.export_csv_button.isEnabled() is False
+
+        # Explicit selection unlocks launch.
+        controller.update_export_settings(
+            ExportUiSettings(
+                format_profile="legacy_framewise_v1",
+                pose_run_dir=str(pose_dir),
+            )
+        )
+        page.refresh_from_state()
+        assert controller.can_run_export() is True
+        assert page.export_csv_button.isEnabled()
+
+        # Historical bout profile hides the picker and does not require pose.
+        controller.update_export_settings(
+            ExportUiSettings(format_profile="package_bouts_automated")
+        )
+        page.refresh_from_state()
+        assert page.export_pose_combo.isVisible() is False
+        assert controller.can_run_export() is True
+
+
+def test_legacy_lineage_available_hides_pose_picker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, export_info, stack = _controller_with_package(tmp_path)
+    with stack:
+        from results_packaging.legacy_framewise_csv.source import PoseLineageInfo
+
+        def _lineage(_pkg: object) -> PoseLineageInfo:
+            return PoseLineageInfo(
+                available=True,
+                run_id="pose_finalization__pinned",
+                run_dir=export_info["session_root"]
+                / "pose_finalization"
+                / "pose_finalization__pinned",
+                final_pose_sha256="abc",
+                reason="Using S6 lineage-pinned S4 run pose_finalization__pinned.",
+            )
+
+        monkeypatch.setattr(
+            "results_packaging.legacy_framewise_csv.inspect_package_pose_lineage",
+            _lineage,
+        )
+        controller.update_export_settings(
+            ExportUiSettings(format_profile="legacy_framewise_v1")
+        )
+        page = ResultsPackagingPage(controller)
+        page.show()
+        page.refresh_from_state()
+        assert page.export_pose_combo.isVisible() is False
+        assert "lineage-pinned" in page.export_pose_status_label.text().lower()
+        assert controller.can_run_export() is True
+        identity = controller.begin_csv_export_launch()
+        assert identity.settings.pose_run_dir is None
+        assert identity.settings.format_profile == "legacy_framewise_v1"

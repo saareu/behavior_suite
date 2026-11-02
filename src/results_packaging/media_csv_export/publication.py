@@ -282,9 +282,35 @@ def publish_csv_export(
     output_root: Path | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> CsvExportJobResult:
-    """Publish an automated bout CSV export job."""
+    """Publish a CSV export job (legacy framewise default or bout table)."""
 
     cfg = settings.validated()
+    from results_packaging.legacy_framewise_csv.contracts import (
+        LEGACY_FRAMEWISE_PROFILE_ID,
+    )
+    from results_packaging.legacy_framewise_csv.runner import (
+        LegacyFramewiseExportRequest,
+        run_legacy_framewise_csv_export,
+    )
+
+    if cfg.format_profile == LEGACY_FRAMEWISE_PROFILE_ID:
+        pose_dir = cfg.pose_run_dir
+        return run_legacy_framewise_csv_export(
+            LegacyFramewiseExportRequest(
+                session_root=Path(session_root).expanduser().resolve(),
+                package_dir=source.package_dir,
+                behavior_source_kind="automated_s8",
+                timestamp=timestamp,
+                export_job_id=export_job_id,
+                output_root=output_root,
+                allow_stale_source=True,
+                pose_run_dir=(
+                    Path(pose_dir).expanduser().resolve() if pose_dir else None
+                ),
+            ),
+            progress_callback=progress_callback,
+        )
+
     root = Path(session_root).expanduser().resolve()
     ts = _sanitize_timestamp(timestamp or _now_timestamp())
     job_id = export_job_id or f"{CSV_EXPORT_RUN_PREFIX}__{ts}"

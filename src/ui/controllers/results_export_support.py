@@ -23,6 +23,9 @@ from results_packaging.media_csv_export.config import (
     SelectionSpec,
 )
 from results_packaging.media_csv_export.contracts import (
+    DEFAULT_CSV_FORMAT_PROFILE,
+    LEGACY_FRAMEWISE_PROFILE_ID,
+    PACKAGE_BOUTS_AUTOMATED_PROFILE_ID,
     SELECTION_ALL_PACKAGE_BOUTS,
     SELECTION_CHANNELS_BEHAVIORS,
     SELECTION_EXPORT_PROFILE,
@@ -45,8 +48,11 @@ class ExportUiSettings:
     channels_text: str = ""
     behaviors_text: str = ""
     profile_id: str | None = None
+    format_profile: str = DEFAULT_CSV_FORMAT_PROFILE
     pre_context_sec: float = 0.0
     post_context_sec: float = 0.0
+    # Explicit S4 when lineage missing (legacy_framewise_v1 only; never auto-newest).
+    pose_run_dir: str | None = None
 
     def validated(self) -> ExportUiSettings:
         mode = str(self.selection_mode).strip() or SELECTION_ALL_PACKAGE_BOUTS
@@ -55,9 +61,31 @@ class ExportUiSettings:
         profile = (
             str(self.profile_id).strip() if self.profile_id is not None else None
         ) or None
+        format_profile = (
+            str(self.format_profile or DEFAULT_CSV_FORMAT_PROFILE).strip()
+            or DEFAULT_CSV_FORMAT_PROFILE
+        )
+        if format_profile not in {
+            LEGACY_FRAMEWISE_PROFILE_ID,
+            PACKAGE_BOUTS_AUTOMATED_PROFILE_ID,
+        }:
+            raise ExportConfigError(
+                f"Unsupported CSV format_profile {format_profile!r}."
+            )
         if float(self.pre_context_sec) < 0 or float(self.post_context_sec) < 0:
             raise ExportConfigError("Context padding seconds must be >= 0.")
-        # Validate via SelectionSpec construction.
+        pose_dir = (
+            str(Path(str(self.pose_run_dir).strip()).expanduser().resolve())
+            if self.pose_run_dir is not None and str(self.pose_run_dir).strip()
+            else None
+        )
+        if pose_dir is not None and format_profile != LEGACY_FRAMEWISE_PROFILE_ID:
+            raise ExportConfigError(
+                "pose_run_dir is only valid with format_profile="
+                f"{LEGACY_FRAMEWISE_PROFILE_ID!r}."
+            )
+        # Validate via SelectionSpec construction (bout selection unused for
+        # legacy_framewise_v1 but still kept valid for media export).
         self.to_selection_spec()
         return replace(
             self,
@@ -65,8 +93,10 @@ class ExportUiSettings:
             channels_text=",".join(channels),
             behaviors_text=",".join(behaviors),
             profile_id=profile,
+            format_profile=format_profile,
             pre_context_sec=float(self.pre_context_sec),
             post_context_sec=float(self.post_context_sec),
+            pose_run_dir=pose_dir,
         )
 
     def to_selection_spec(self) -> SelectionSpec:
@@ -92,7 +122,11 @@ class ExportUiSettings:
         raise ExportConfigError(f"Unsupported export selection_mode {mode!r}.")
 
     def to_csv_settings(self) -> CsvExportSettings:
-        return CsvExportSettings(selection=self.to_selection_spec()).validated()
+        return CsvExportSettings(
+            selection=self.to_selection_spec(),
+            format_profile=str(self.format_profile or DEFAULT_CSV_FORMAT_PROFILE),
+            pose_run_dir=self.pose_run_dir,
+        ).validated()
 
     def to_media_settings(self) -> MediaExportSettings:
         return MediaExportSettings(
@@ -193,6 +227,7 @@ def export_provenance_summary(
     parts = [
         "export_provenance=automated",
         f"source_package={package_run_id}",
+        f"format_profile={settings.format_profile}",
         f"selection_mode={settings.selection_mode}",
     ]
     if settings.selection_mode == SELECTION_EXPORT_PROFILE and settings.profile_id:
@@ -202,9 +237,96 @@ def export_provenance_summary(
             parts.append(f"channels={settings.channels_text}")
         if settings.behaviors_text:
             parts.append(f"behaviors={settings.behaviors_text}")
+    if settings.pose_run_dir:
+        parts.append(f"pose_run_dir={Path(settings.pose_run_dir).name}")
     if n_selected is not None:
         parts.append(f"n_selected={n_selected}")
     return "; ".join(parts)
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyPoseUiState:
+    """GUI pose-source state for legacy_framewise_v1 (lineage default vs picker)."""
+
+    format_is_legacy: bool
+    lineage_available: bool
+    lineage_run_id: str | None
+    lineage_run_dir: str | None
+    requires_explicit_pose: bool
+    reason: str
+    candidates: tuple[Any, ...]
+    selected_pose_run_dir: str | None
+
+
+def build_legacy_pose_ui_state(
+    *,
+    session_root: Path | str | None,
+    package_dir: Path | str | None,
+    format_profile: str,
+    selected_pose_run_dir: str | None,
+) -> LegacyPoseUiState:
+    """Compute whether the S4 picker must be shown (never auto-select newest)."""
+
+    from results_packaging.legacy_framewise_csv import (
+        LEGACY_FRAMEWISE_PROFILE_ID,
+        inspect_package_pose_lineage,
+        list_pose_run_candidates,
+    )
+
+    profile = str(format_profile or DEFAULT_CSV_FORMAT_PROFILE).strip()
+    is_legacy = profile == LEGACY_FRAMEWISE_PROFILE_ID
+    if not is_legacy:
+        return LegacyPoseUiState(
+            format_is_legacy=False,
+            lineage_available=False,
+            lineage_run_id=None,
+            lineage_run_dir=None,
+            requires_explicit_pose=False,
+            reason="Historical bout CSV does not use S4 pose selection.",
+            candidates=(),
+            selected_pose_run_dir=None,
+        )
+    if package_dir is None:
+        return LegacyPoseUiState(
+            format_is_legacy=True,
+            lineage_available=False,
+            lineage_run_id=None,
+            lineage_run_dir=None,
+            requires_explicit_pose=False,
+            reason="Select an eligible S9 package first.",
+            candidates=(),
+            selected_pose_run_dir=None,
+        )
+    lineage = inspect_package_pose_lineage(package_dir)
+    candidates = (
+        list_pose_run_candidates(session_root) if session_root is not None else ()
+    )
+    selected = (
+        str(Path(str(selected_pose_run_dir).strip()).expanduser().resolve())
+        if selected_pose_run_dir and str(selected_pose_run_dir).strip()
+        else None
+    )
+    if lineage.available:
+        return LegacyPoseUiState(
+            format_is_legacy=True,
+            lineage_available=True,
+            lineage_run_id=lineage.run_id,
+            lineage_run_dir=str(lineage.run_dir) if lineage.run_dir else None,
+            requires_explicit_pose=False,
+            reason=lineage.reason,
+            candidates=candidates,
+            selected_pose_run_dir=None,
+        )
+    return LegacyPoseUiState(
+        format_is_legacy=True,
+        lineage_available=False,
+        lineage_run_id=None,
+        lineage_run_dir=None,
+        requires_explicit_pose=True,
+        reason=lineage.reason,
+        candidates=candidates,
+        selected_pose_run_dir=selected,
+    )
 
 
 def _split_csv_tokens(text: str) -> tuple[str, ...]:

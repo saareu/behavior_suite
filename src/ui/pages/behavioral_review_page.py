@@ -140,6 +140,7 @@ class BehavioralReviewPage(QWidget):
         self.edit_runner = GuiTaskRunner(self)
         self.publish_runner = GuiTaskRunner(self)
         self.pi_report_runner = GuiTaskRunner(self)
+        self.legacy_csv_runner = GuiTaskRunner(self)
         self._syncing_widgets = False
         self._last_running_state = False
         self._playing = False
@@ -254,6 +255,7 @@ class BehavioralReviewPage(QWidget):
                 self.video.set_frame(None)
                 self._last_shown_prepared_frame_idx = None
             self._sync_pi_report_from_state()
+            self._sync_legacy_csv_pose_widgets()
         finally:
             self._syncing_widgets = False
         self._update_enabled()
@@ -800,8 +802,49 @@ class BehavioralReviewPage(QWidget):
         right_layout.addWidget(editing_group)
         right_layout.addWidget(evidence_group)
         right_layout.addWidget(edits_group)
+        csv_group = QGroupBox("Export legacy framewise CSV")
+        csv_form = QFormLayout(csv_group)
+        csv_hint = QLabel(
+            "Default profile legacy_framewise_v1 from the selected "
+            "published S10 reviewed run (automated S8 labels are exported "
+            "from S9). Drafts are not eligible."
+        )
+        csv_hint.setWordWrap(True)
+        self.legacy_csv_source_label = QLabel(
+            "Source: published reviewed states (explicit selection required)."
+        )
+        self.legacy_csv_source_label.setWordWrap(True)
+        self.legacy_csv_pose_status_label = QLabel(
+            "Pose source: lineage pin resolved automatically when available."
+        )
+        self.legacy_csv_pose_status_label.setWordWrap(True)
+        self.legacy_csv_pose_combo = QComboBox()
+        self.legacy_csv_pose_combo.setVisible(False)
+        self.legacy_csv_pose_combo.currentIndexChanged.connect(
+            self._legacy_csv_pose_selection_changed
+        )
+        self.legacy_csv_pose_row_label = QLabel("Explicit S4 pose run")
+        self.legacy_csv_pose_row_label.setVisible(False)
+        self.legacy_csv_export_button = QPushButton(
+            "Export legacy_framewise_v1 CSV"
+        )
+        self.legacy_csv_export_button.clicked.connect(
+            self._export_legacy_framewise_csv
+        )
+        self.legacy_csv_status_label = QLabel("CSV export: idle")
+        self.legacy_csv_status_label.setWordWrap(True)
+        csv_form.addRow(csv_hint)
+        csv_form.addRow(self.legacy_csv_source_label)
+        csv_form.addRow("Pose source", self.legacy_csv_pose_status_label)
+        csv_form.addRow(
+            self.legacy_csv_pose_row_label, self.legacy_csv_pose_combo
+        )
+        csv_form.addRow(self.legacy_csv_export_button)
+        csv_form.addRow(self.legacy_csv_status_label)
+
         right_layout.addWidget(publish_group)
         right_layout.addWidget(pi_group)
+        right_layout.addWidget(csv_group)
         right_layout.addWidget(self.stage_label)
         right_layout.addStretch(1)
 
@@ -2701,6 +2744,122 @@ class BehavioralReviewPage(QWidget):
         self.pi_report_controller.refresh_discovery(root)
         self._populate_pi_reports_table()
         self.status_message.emit("PI report discovery refreshed.")
+
+    def _selected_legacy_csv_pose_run_dir(self) -> str | None:
+        if not self.legacy_csv_pose_combo.isVisible():
+            return None
+        data = self.legacy_csv_pose_combo.currentData()
+        return str(data) if data else None
+
+    def _sync_legacy_csv_pose_widgets(self) -> None:
+        pose_state = self.controller.legacy_csv_pose_ui_state(
+            pose_run_dir=self._selected_legacy_csv_pose_run_dir()
+        )
+        self.legacy_csv_pose_status_label.setText(pose_state.reason)
+        show_picker = bool(
+            pose_state.format_is_legacy and pose_state.requires_explicit_pose
+        )
+        self.legacy_csv_pose_combo.setVisible(show_picker)
+        self.legacy_csv_pose_row_label.setVisible(show_picker)
+        self.legacy_csv_pose_combo.blockSignals(True)
+        previous = self.legacy_csv_pose_combo.currentData()
+        self.legacy_csv_pose_combo.clear()
+        if show_picker:
+            self.legacy_csv_pose_combo.addItem("(select completed S4 run…)", None)
+            selected_index = 0
+            selected = (
+                str(previous)
+                if previous
+                else pose_state.selected_pose_run_dir
+            )
+            for i, candidate in enumerate(pose_state.candidates, start=1):
+                self.legacy_csv_pose_combo.addItem(
+                    candidate.label, str(candidate.run_dir)
+                )
+                if selected is not None and str(candidate.run_dir) == str(selected):
+                    selected_index = i
+            self.legacy_csv_pose_combo.setCurrentIndex(selected_index)
+            if not pose_state.candidates:
+                self.legacy_csv_pose_status_label.setText(
+                    pose_state.reason
+                    + " No completed S4 runs are available in this session."
+                )
+        self.legacy_csv_pose_combo.blockSignals(False)
+
+    def _legacy_csv_pose_selection_changed(self) -> None:
+        if self._syncing_widgets:
+            return
+        self._sync_legacy_csv_pose_widgets()
+        self._update_enabled()
+
+    def _export_legacy_framewise_csv(self) -> None:
+        if self.legacy_csv_runner.is_running:
+            self.status_message.emit("A legacy framewise CSV export is already running.")
+            return
+        state = self.controller.state
+        if state.session_root is None:
+            QMessageBox.warning(self, "No session", "Open a session first.")
+            return
+        pose_run_dir = self._selected_legacy_csv_pose_run_dir()
+        try:
+            review_dir = self.controller.resolve_published_review_dir_for_csv()
+            self.controller.resolve_pose_run_dir_for_legacy_csv(
+                pose_run_dir=pose_run_dir
+            )
+        except Exception as exc:  # noqa: BLE001 - UI boundary
+            QMessageBox.warning(self, "CSV export unavailable", str(exc))
+            return
+        self.legacy_csv_status_label.setText(
+            f"Exporting legacy_framewise_v1 from {review_dir.name}…"
+        )
+        self.legacy_csv_export_button.setEnabled(False)
+        self.status_message.emit("Legacy framewise CSV export started…")
+        context = GuiTaskContext(
+            task_id=uuid4().hex,
+            task_kind=GuiTaskKind.RESULTS_CSV_EXPORT,
+            project_dir=state.session_root,
+            raw_video_path=None,
+            generation=0,
+        )
+
+        def operation(report) -> object:
+            return self.controller.export_legacy_framewise_csv_from_published(
+                progress_callback=report,
+                pose_run_dir=pose_run_dir,
+            )
+
+        try:
+            self.legacy_csv_runner.start_progressive(
+                operation,
+                task_name="S10 legacy_framewise_v1 CSV export",
+                context=context,
+                on_success=self._on_legacy_csv_export_success,
+                on_error=self._on_legacy_csv_export_error,
+                on_finished=lambda: self.legacy_csv_export_button.setEnabled(True),
+            )
+        except TaskAlreadyRunningError as exc:
+            self.legacy_csv_export_button.setEnabled(True)
+            QMessageBox.warning(self, "CSV export busy", str(exc))
+
+    def _on_legacy_csv_export_success(self, result) -> None:
+        if getattr(result, "success", False):
+            self.legacy_csv_status_label.setText(
+                f"CSV export completed: {result.n_rows} rows → {result.job_dir}"
+            )
+            self.status_message.emit(
+                f"legacy_framewise_v1 CSV exported ({result.n_rows} rows)."
+            )
+        else:
+            self.legacy_csv_status_label.setText(
+                f"CSV export failed: {result.error_message or result.status}"
+            )
+            self.status_message.emit(
+                f"legacy_framewise_v1 CSV failed: {result.error_message}"
+            )
+
+    def _on_legacy_csv_export_error(self, exc: BaseException) -> None:
+        self.legacy_csv_status_label.setText(f"CSV export failed: {exc}")
+        self.status_message.emit(f"legacy_framewise_v1 CSV failed: {exc}")
 
     def _export_pi_report(self) -> None:
         if self.pi_report_runner.is_running or self.pi_report_controller.state.task_running:
