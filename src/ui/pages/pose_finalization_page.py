@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import time
 from pathlib import Path
 
@@ -167,8 +168,11 @@ class PoseFinalizationPage(QWidget):
         self.run_button.clicked.connect(self._run_finalization)
         self.open_output_button = QPushButton("Open S4 run folder")
         self.open_output_button.clicked.connect(self._open_output_folder)
+        self.overlay_qc_button = QPushButton("Export QC Overlay Video…")
+        self.overlay_qc_button.clicked.connect(self._open_overlay_qc_export)
         run_row.addWidget(self.run_button)
         run_row.addWidget(self.open_output_button)
+        run_row.addWidget(self.overlay_qc_button)
         run_row.addStretch(1)
 
         status_group = QGroupBox("Processing status")
@@ -416,10 +420,8 @@ class PoseFinalizationPage(QWidget):
         message = str(exc)
         self.controller.record_failure(message)
         self.stage_label.setText(f"Failed: {message}")
-        try:
+        with contextlib.suppress(PoseFinalizationUiError):
             self.controller.refresh_discovery()
-        except PoseFinalizationUiError:
-            pass
         self.refresh_from_state()
         from pose_finalization import PoseFinalizationError
 
@@ -449,6 +451,42 @@ class PoseFinalizationPage(QWidget):
             self.status_message.emit("Could not open the S4 run folder.")
         else:
             self.status_message.emit("Opened S4 run folder.")
+
+    def _open_overlay_qc_export(self) -> None:
+        from ui.controllers.overlay_qc_export_support import OverlayQcLaunchContext
+        from ui.dialogs.overlay_qc_export_dialog import open_overlay_qc_export_dialog
+
+        state = self.controller.state
+        session = state.session_root
+        if session is None:
+            QMessageBox.warning(
+                self, "No session", "Open a session before exporting QC overlay video."
+            )
+            return
+        summary = state.project_summary
+        s4_options: list[tuple[str, Path]] = []
+        if summary is not None:
+            for run in summary.eligible_runs:
+                s4_options.append((run.run_id, run.run_dir))
+        selected = self.controller.selected_s4_run()
+        if (
+            selected is not None
+            and selected.classification == ELIGIBLE_DOWNSTREAM
+            and all(run_id != selected.run_id for run_id, _ in s4_options)
+        ):
+            s4_options.insert(0, (selected.run_id, selected.run_dir))
+        launch = OverlayQcLaunchContext(
+            session_root=Path(session),
+            export_family="s4_pose",
+            s4_run_dir=None if selected is None else selected.run_dir,
+            s4_run_id=None if selected is None else selected.run_id,
+            lock_family=True,
+            s4_options=tuple(s4_options),
+            preferred_prepared_start=0,
+            preferred_prepared_end=29,
+        )
+        open_overlay_qc_export_dialog(self, launch=launch)
+        self.status_message.emit("QC overlay export dialog closed.")
 
     def _refresh_qc_panel(self) -> None:
         rows = self.controller.qc_display_rows()

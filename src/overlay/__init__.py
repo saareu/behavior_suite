@@ -54,6 +54,13 @@ from overlay.contracts import (
     s4_provenance_visual_class,
     validate_layer_selection,
 )
+from overlay.discovery import (
+    EXPORT_FAMILY_BEHAVIORAL,
+    EXPORT_FAMILY_S4_POSE,
+    OverlayQcJobSummary,
+    OverlayQcProjectSummary,
+    summarize_overlay_qc_project,
+)
 from overlay.evidence import collect_evidence
 from overlay.export import (
     OverlayQcExportResult,
@@ -92,6 +99,8 @@ from overlay.style import DrawConfig
 from overlay.timing import PreparedFrameTiming, resolve_prepared_frame_timing
 
 __all__ = [
+    "EXPORT_FAMILY_BEHAVIORAL",
+    "EXPORT_FAMILY_S4_POSE",
     "OVERLAY_ARTIFACT_MANIFEST_SCHEMA",
     "OVERLAY_RENDERER_VERSION",
     "OVERLAY_S4_POSE_RENDERER_VERSION",
@@ -115,6 +124,8 @@ __all__ = [
     "OverlayExportScopeKind",
     "OverlayObservation",
     "OverlayQcExportResult",
+    "OverlayQcJobSummary",
+    "OverlayQcProjectSummary",
     "OverlayQcSource",
     "OverlayRenderError",
     "OverlayS4PoseQcExportResult",
@@ -163,6 +174,7 @@ __all__ = [
     "resolve_overlay_s4_qc_source",
     "resolve_prepared_frame_timing",
     "s4_provenance_visual_class",
+    "summarize_overlay_qc_project",
     "validate_layer_selection",
     "verify_overlay_qc_source_integrity",
     "verify_overlay_s4_qc_source_integrity",

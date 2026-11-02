@@ -842,7 +842,21 @@ class BehavioralReviewPage(QWidget):
         csv_form.addRow(self.legacy_csv_export_button)
         csv_form.addRow(self.legacy_csv_status_label)
 
+        overlay_qc_group = QGroupBox("Export QC Overlay Video")
+        overlay_qc_layout = QVBoxLayout(overlay_qc_group)
+        overlay_qc_note = QLabel(
+            "Short prepared-rate QC overlay (behavioral or S4). Uses a separate "
+            "worker from PI report and naked media exports. Working drafts are "
+            "not eligible as reviewed sources."
+        )
+        overlay_qc_note.setWordWrap(True)
+        self.overlay_qc_button = QPushButton("Open QC Overlay Export…")
+        self.overlay_qc_button.clicked.connect(self._open_overlay_qc_export)
+        overlay_qc_layout.addWidget(overlay_qc_note)
+        overlay_qc_layout.addWidget(self.overlay_qc_button)
+
         right_layout.addWidget(publish_group)
+        right_layout.addWidget(overlay_qc_group)
         right_layout.addWidget(pi_group)
         right_layout.addWidget(csv_group)
         right_layout.addWidget(self.stage_label)
@@ -3048,6 +3062,82 @@ class BehavioralReviewPage(QWidget):
         self._update_enabled()
         self._emit_running_changed()
         self.task_finished.emit()
+
+    def _open_overlay_qc_export(self) -> None:
+        from ui.controllers.overlay_qc_export_support import OverlayQcLaunchContext
+        from ui.dialogs.overlay_qc_export_dialog import open_overlay_qc_export_dialog
+
+        state = self.controller.state
+        session = state.session_root
+        if session is None:
+            QMessageBox.warning(
+                self, "No session", "Open a session before exporting QC overlay video."
+            )
+            return
+        package_options = tuple(
+            (opt.run_id, opt.run_dir)
+            for opt in state.s9_options
+            if opt.currently_eligible
+        )
+        review_options = tuple(
+            (
+                opt.run_id,
+                opt.run_dir,
+                bool(opt.is_draft),
+                opt.parent_package_run_id,
+            )
+            for opt in state.review_options
+        )
+        s9 = self.controller.selected_s9_option()
+        review = self.controller.selected_review_option()
+        preferred_bout = state.selected_bout_id
+        preferred_start = None
+        preferred_end = None
+        preferred_prep_start = None
+        preferred_prep_end = None
+        if preferred_bout is not None:
+            row = next(
+                (
+                    r
+                    for r in state.bout_rows
+                    if str(r.get("bout_id") or "") == str(preferred_bout)
+                ),
+                None,
+            )
+            if row is not None:
+                try:
+                    preferred_start = int(row["start_sample_idx"])  # type: ignore[arg-type]
+                    preferred_end = int(row["end_sample_idx"])  # type: ignore[arg-type]
+                except (KeyError, TypeError, ValueError):
+                    preferred_start = None
+                    preferred_end = None
+                try:
+                    if row.get("prepared_frame_idx_start") is not None:
+                        preferred_prep_start = int(row["prepared_frame_idx_start"])  # type: ignore[arg-type]
+                    if row.get("prepared_frame_idx_end") is not None:
+                        preferred_prep_end = int(row["prepared_frame_idx_end"])  # type: ignore[arg-type]
+                except (TypeError, ValueError):
+                    preferred_prep_start = None
+                    preferred_prep_end = None
+        launch = OverlayQcLaunchContext(
+            session_root=Path(session),
+            export_family="behavioral",
+            package_dir=None if s9 is None else s9.run_dir,
+            package_run_id=None if s9 is None else s9.run_id,
+            review_run_dir=None if review is None else review.run_dir,
+            review_run_id=None if review is None else review.run_id,
+            review_is_draft=None if review is None else bool(review.is_draft),
+            lock_family=False,
+            package_options=package_options,
+            review_options=review_options,
+            preferred_bout_id=preferred_bout,
+            preferred_start_sample_idx=preferred_start,
+            preferred_end_sample_idx=preferred_end,
+            preferred_prepared_start=preferred_prep_start,
+            preferred_prepared_end=preferred_prep_end,
+        )
+        open_overlay_qc_export_dialog(self, launch=launch)
+        self.status_message.emit("QC overlay export dialog closed.")
 
     def _open_pi_report_folder(self) -> None:
         try:

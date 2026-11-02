@@ -1,12 +1,14 @@
 # Post-v0.1.1 — Overlay Architecture (C0 audit → C1 foundation → C2-A/C2-B QC export)
 
-**Status:** **C2-B accepted and closed** (S4 provenance-styled pose QC video). Builds on C1 + C2-A at `origin/main`.  
+**Status:** **C2-C final acceptance complete — pending architectural review / commit** (shared QC Overlay Export GUI). Builds on C1 + C2-A + C2-B.  
+**C2-C base commit:** `f84ddd1714046fee477a18a8de805068a629bbdd`  
+**C2-C final acceptance date:** 2026-11-02  
 **C2-B final acceptance date:** 2026-11-02  
 **C2-A / C1 final acceptance date:** 2026-11-02  
 **C0 date:** 2026-11-01  
 **C2-B base commit:** `a1da1e170297619b338a1d63f0c8239f5cbf5ea0` (`origin/main` — C1/C2-A + mainline CSV)  
 **Companion:** [`post_v011_s10_review_and_visualization.md`](post_v011_s10_review_and_visualization.md) (Increment B closed; overlays → this document)  
-**Non-scope (still):** GUI overlay integration, full-session QC exporter, PI/gallery overlay integration, S5 contour generation, live overlays, scientific algorithm / schema mutation.  
+**Non-scope (still):** full-session QC exporter, PI/gallery overlay integration, S5 contour generation, live overlays, S2/S3 exporters, scientific algorithm / schema mutation.  
 **O4 closed:** S8 `execution.generate_overlay_video` is **deprecated and unsupported** (parsed for settings compatibility; runtime unchanged; never produced video).
 
 **Legend**
@@ -906,7 +908,8 @@ Unit tests cover those codes’ mapping and non-drawing rules.
 | **O3** | Three visual classes: observed / temporal_resample / gap_fill; unavailable not drawn |
 | **O4** | S8 `generate_overlay_video` **deprecated and unsupported** — documented in config / YAML / overlay package docstring; runtime parse/default unchanged; no producer wired |
 
-Still deferred: GUI overlay launch/integration, PI/gallery overlay, full-session exporter, dense-rate export, S5 contours.
+Still deferred after C2-B: PI/gallery overlay, full-session exporter, dense-rate export, S5 contours.  
+**GUI overlay launch:** shipped in §17 (C2-C).
 
 ### 16.8 Topology (optional `sleap_io`)
 
@@ -968,3 +971,182 @@ GUI overlay integration, full-session export, PI/gallery overlay, S5 overlays, d
 **C2-B final acceptance complete.** Commit C2-B code/tests/docs and push to `origin/main` (no release tag). No GUI / PI / gallery / S5 / full-session / scientific algorithm changes.
 
 _End of C2-B record._
+
+---
+
+## 17. Increment C2-C — QC Overlay Export GUI (2026-11-02)
+
+### 17.1 Operator-visible workflow
+
+Shared modal **QC Overlay Video Export** dialog (PI-report style), opened from:
+
+| Page | Button | Prefill |
+| --- | --- | --- |
+| S4 Pose Finalization | `Export QC Overlay Video…` | `export_family=s4_pose`, selected eligible S4 run |
+| S9 Results Packaging | `Export QC Overlay Video…` (separate from CSV/media) | `export_family=behavioral`, selected eligible S9 package |
+| S10 Behavioral Review | `Open QC Overlay Export…` | behavioral; package + optional published review; optional gallery bout |
+
+Dialog capabilities:
+
+- Explicit export family (S4 pose vs behavioral); opener may lock family.
+- Explicit source selection (never auto-picks newest science run).
+- Prepared-frame inclusive interval **or** packaged exclusive bout span (behavioral).
+- Behavioral HUD mode (`both` default), optional contact/SBS LEDs, optional frame/time counter.
+- S4 optional skeleton draw + counter.
+- Pre/post prepared-FPS context padding.
+- Progress + cancel; job discovery table; open folder / open MP4.
+- Immutable job dirs under `{session}/results_exports/overlay_qc_*__{timestamp}/`.
+
+Naked S9 CSV/media and S10 PI-report workflows are unchanged (separate runners/kinds/tables).
+
+### 17.2 Supported sources and settings
+
+| Family | Eligible sources | Rejected |
+| --- | --- | --- |
+| S4 pose QC | Explicit completed/eligible S4 run via `resolve_overlay_s4_qc_source` | Missing/ineligible S4; digest mismatch; auto-newest |
+| Behavioral QC | Automated S8 via eligible S9 package; published S10 reviewed | Working drafts; silent automated+review merge; auto-newest |
+
+Settings snapshotted into `OverlayQcRequestIdentity` at launch (immutable for the worker). Backend planners remain `plan_prepared_interval` / `plan_bout_span` / `plan_s4_prepared_interval`. Encoding reuses C2-A/C2-B streaming ffmpeg only (no second encoder).
+
+### 17.3 Background execution and navigation safety
+
+- Task kind: `GuiTaskKind.OVERLAY_QC_EXPORT`.
+- Dialog owns a dedicated `GuiTaskRunner` (does not share S9 packaging/CSV/media or S10 PI runners).
+- Resolve / plan / hash / encode run on the worker thread; progress bridged from exporter `dict` → `OperationProgress`.
+- Cooperative cancel via existing exporter `cancellation_requested` → `OverlayExportCancelled`.
+- Non-overlapping: controller `task_running` + runner `TaskAlreadyRunningError`.
+- Session retarget blocked while export runs; stale `request_id` / session-root mismatches reject success/failure UI updates.
+- Incomplete exports are not treated as completed (discovery requires video + manifest).
+
+### 17.4 Discovery
+
+`overlay.discovery.summarize_overlay_qc_project` scans only:
+
+- `overlay_qc_behavioral__*`
+- `overlay_qc_s4_pose__*`
+
+Ignores `media_export__*`, `csv_export__*`, `pi_report__*`. Prior jobs are never overwritten.
+
+### 17.5 Files added/updated (C2-C)
+
+```text
+src/overlay/discovery.py
+src/overlay/__init__.py
+src/ui/tasks.py                              # OVERLAY_QC_EXPORT
+src/ui/controllers/overlay_qc_export_support.py
+src/ui/controllers/overlay_qc_export_controller.py
+src/ui/dialogs/__init__.py
+src/ui/dialogs/overlay_qc_export_dialog.py
+src/ui/pages/pose_finalization_page.py       # entry button
+src/ui/pages/results_packaging_page.py       # entry button
+src/ui/pages/behavioral_review_page.py       # entry button
+tests/overlay/test_discovery.py
+tests/ui/test_overlay_qc_export_gui.py
+scripts/_overlay_c2c_e_session_gui_smoke.py
+docs/roadmap/post_v011_overlay_architecture.md
+```
+
+### 17.6 Known limitations
+
+- No full-session export.
+- No S2/S3 exporters; no S5 contours; no live S10/PI/gallery overlay burn-in.
+- Bout combo lists exclusive packaged bouts only (first 250 by dense start); dense endpoints remain editable; S10 preferred bouts outside the window are injected into the combo.
+- Published S10 reviewed export requires an explicit published review (working drafts rejected). Live E-session review tree remains draft-only; published S10 validation uses the isolated PI B2 session copy.
+- Topology / `sleap_io` remains optional (nodes-only disclosure unchanged from C2-B).
+- Dialog blocks close while an export is running (cancel first).
+- GUI controller always publishes under the **bound session** `results_exports/` (never the package manifest's embedded `session_root`) so isolated package copies cannot leak QC jobs into the lab E tree (D0).
+
+### 17.7 Lab acceptance (E-session provisional, 2026-11-02)
+
+Controller path identical to the dialog worker (`OverlayQcExportController.execute_export_launch`):
+
+| Check | Result |
+| --- | --- |
+| S4 pose QC | **Pass** — `overlay_qc_s4_pose__20261102T193624` (30 frames, H.264, 119.048 fps) |
+| S8 automated behavioral QC | **Pass** — `overlay_qc_behavioral__20261102T193625` from `results_package__20261028T181714` (30 frames) |
+| Source selection / draft gate | **Pass** — draft reviewed source rejected |
+| Discovery | **Pass** — prior + new jobs listed; media/PI prefixes ignored |
+| Upstream digests | **Pass** — S4 `final_pose` + S9 `package_manifest` unchanged |
+| Published S10 | Deferred on live E-session (draft only) → covered in §17.9 via isolated published review |
+
+Evidence: `tmp_overlay_c2c_e_session_gui/C2C_GUI_SMOKE_REPORT.json`.
+
+### 17.8 Final acceptance (2026-11-02) — published S10 + visible GUI + bout coverage
+
+**Bound:** no science / PI / gallery / full-session / S5 / new overlay layers. No commit/push in this pass.
+
+#### Published S10 (isolated session)
+
+Source: `tmp_pi_report_b2_final_acceptance/isolated_session` with published `behavioral_review__20261101T201442` + in-session package copy `results_package__20261028T181714` (D0: junctions rejected; package copied so resolve stays in-session). Prepared video remains a read-only lab E reference.
+
+Shared dialog/controller path (`OverlayQcExportController` ≡ dialog worker):
+
+| Check | Result |
+| --- | --- |
+| Select published reviewed source | **Pass** — dialog prefills `s10_reviewed` + review run |
+| Short behavioral QC clip | **Pass** — `overlay_qc_behavioral__20261102T195200` under **isolated** `results_exports/` (30 frames) |
+| HUD / states identity | **Pass** — `run_meta.source_kind=s10_reviewed`; manifest `source_runs` pin `reviewed_behavior_states.parquet` + published review run id |
+| Draft rejection | **Pass** — working draft `behavioral_review__20261101T203010` rejected |
+| Source package / reviewed artifacts unchanged | **Pass** — package + reviewed digests identical before/after; lab E package digests unchanged |
+| D0 containment | **Pass** after fix — exports publish under bound session, not package manifest `session_root` |
+
+Evidence: `tmp_overlay_c2c_final_acceptance/PUBLISHED_S10_REPORT.json` (+ extracted HUD frames).
+
+#### Visible Windows GUI
+
+Qt platform `windows` (not offscreen). Scripted interactive dialog exercise with screenshots:
+
+| Check | Result |
+| --- | --- |
+| S4 entry → pose export mode | **Pass** |
+| S9 entry → automated behavioral mode | **Pass** |
+| S10 entry → reviewed source/bout defaults | **Pass** |
+| Invalid selection feedback | **Pass** (missing S4 / missing published review) |
+| Export without GUI freeze + progress events | **Pass** |
+| Close-while-running blocked | **Pass** |
+| Open folder / open MP4 hooks | **Pass** |
+| Discovery table + reopen dialog | **Pass** |
+| Session retarget blocked while running | **Pass** |
+
+Evidence: `tmp_overlay_c2c_final_acceptance/VISIBLE_GUI_REPORT.json` + `gui_*.png`.
+
+#### Bout-selection coverage
+
+| Check | Result |
+| --- | --- |
+| 250-item limit communicated | **Pass** — dialog `bout_limit_label` |
+| Excluded (rejected) bout via prepared interval | **Pass** — package bout `...bout_00000009` → `overlay_qc_behavioral__20261102T195201` |
+| S10 preferred bout outside first 250 | **Pass** — injected into combo with correct dense bounds |
+| Identity / focal / frame bounds | **Pass** — packaged bout id + dense/prepared endpoints preserved |
+
+Targeted UX fix shipped for the outside-250 / preferred-bout blocker (inject + label). S10 opener also forwards selected bout dense/prepared endpoints.
+
+#### Navigation / cancel / teardown
+
+Covered by GUI unit tests + visible acceptance: stale callback rejection, cancel outcome rows, session retarget block, dialog reopen, close-while-running guard, no source/artifact writes on science trees. No new Windows Qt lifecycle regression observed in this pass (no abnormal Qt process exits recorded in the targeted suites).
+
+#### Regression / static
+
+| Suite | Result |
+| --- | --- |
+| `tests/overlay` + packaging/pose/overlay GUI + tasks | **121 passed** |
+| S4 pose QC + behavioral QC export + discovery + arbitration GUI | **31 passed** |
+| `tests/ui/test_overlay_qc_export_gui.py` | **12 passed** (includes outside-250 + output_root pin) |
+| Broader S10 `tests/behavioral_review` sweep | **276 passed, 1 failed** — `test_e_session_controlled_edit_publish_reopen` (pre-existing D0 draft-under-`review_root` vs lab SESSION guard; **not** C2-C overlay code) |
+| Ruff (C2-C touched files) | **Pass** |
+| Mypy (`overlay_qc_export_controller`, support, `discovery`) | **Pass**; dialog module only reports pre-existing PySide6 `import-untyped` stubs |
+
+### 17.9 Required fixes found during final acceptance
+
+1. **D0 output containment (blocker):** controller now passes `output_root = {bound_session}/results_exports` into exporters so isolated package copies whose manifests still embed lab E `session_root` cannot leak QC jobs into the lab tree.
+2. **Bout combo UX (blocker):** communicate the 250 exclusive-bout cap; inject/prefill preferred bouts outside that window (by id or dense interval); S10 opener forwards selected bout endpoints.
+
+Probe artifact note: one pre-fix acceptance attempt briefly wrote two overlay jobs under lab E `results_exports/` before the containment fix; science digests were unchanged. Subsequent acceptance exports are under the isolated session only.
+
+### 17.10 Stop point
+
+**C2-C final acceptance complete for architectural review.** Recommendation: **accept C2-C for commit** after operator architectural review. No commit/push in this pass unless operator requests. No science / PI / gallery / full-session / S5 changes.
+
+Evidence root: `tmp_overlay_c2c_final_acceptance/`.
+
+_End of C2-C record._

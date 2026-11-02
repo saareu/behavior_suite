@@ -1,0 +1,339 @@
+"""QC overlay export GUI settings, request identity, and table helpers (C2-C)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Literal
+from uuid import uuid4
+
+from overlay.contracts import HudDirectionMode
+from overlay.discovery import OverlayQcJobSummary
+
+OverlayQcExportFamily = Literal["behavioral", "s4_pose"]
+OverlayQcBehaviorSource = Literal["s8_automated", "s10_reviewed"]
+OverlayQcScopeKind = Literal["prepared_interval", "bout_span"]
+
+
+@dataclass(frozen=True, slots=True)
+class OverlayQcUiSettings:
+    """GUI working settings snapshotted into each overlay QC export request."""
+
+    export_family: OverlayQcExportFamily = "behavioral"
+    source_kind: OverlayQcBehaviorSource = "s8_automated"
+    scope_kind: OverlayQcScopeKind = "prepared_interval"
+    prepared_frame_idx_start: int = 0
+    prepared_frame_idx_end: int = 29
+    bout_id: str | None = None
+    start_sample_idx: int | None = None
+    end_sample_idx: int | None = None
+    packaged_prepared_start: int | None = None
+    packaged_prepared_end: int | None = None
+    hud_mode: str = HudDirectionMode.BOTH.value
+    include_contact: bool = True
+    include_sbs: bool = True
+    include_frame_counter: bool = True
+    draw_skeleton: bool = True
+    pre_context_sec: float = 0.0
+    post_context_sec: float = 0.0
+
+    def validated(self) -> OverlayQcUiSettings:
+        family = str(self.export_family).strip().lower()
+        if family not in {"behavioral", "s4_pose"}:
+            raise ValueError(
+                f"export_family must be behavioral or s4_pose, got {family!r}."
+            )
+        source = str(self.source_kind).strip().lower()
+        if source not in {"s8_automated", "s10_reviewed"}:
+            raise ValueError(
+                "Behavioral source_kind must be s8_automated or s10_reviewed, "
+                f"got {source!r}."
+            )
+        scope = str(self.scope_kind).strip().lower()
+        if scope not in {"prepared_interval", "bout_span"}:
+            raise ValueError(f"Unsupported scope_kind {scope!r}.")
+        if float(self.pre_context_sec) < 0 or float(self.post_context_sec) < 0:
+            raise ValueError("Context padding seconds must be >= 0.")
+        hud = str(self.hud_mode).strip().lower()
+        try:
+            HudDirectionMode(hud)
+        except ValueError as exc:
+            raise ValueError(
+                "hud_mode must be focal_0_only, focal_1_only, or both."
+            ) from exc
+
+        start = int(self.prepared_frame_idx_start)
+        end = int(self.prepared_frame_idx_end)
+        if family == "s4_pose" or scope == "prepared_interval":
+            if start < 0 or end < 0:
+                raise ValueError("Prepared frame indices must be >= 0.")
+            if start > end:
+                raise ValueError(
+                    f"Prepared interval start ({start}) > end ({end})."
+                )
+
+        bout_id = None if self.bout_id is None else str(self.bout_id).strip() or None
+        start_sample = (
+            None if self.start_sample_idx is None else int(self.start_sample_idx)
+        )
+        end_sample = None if self.end_sample_idx is None else int(self.end_sample_idx)
+        if family == "behavioral" and scope == "bout_span":
+            if start_sample is None or end_sample is None:
+                raise ValueError(
+                    "Bout-span QC export requires start_sample_idx and end_sample_idx."
+                )
+            if start_sample > end_sample:
+                raise ValueError(
+                    f"Dense bout start ({start_sample}) > end ({end_sample})."
+                )
+
+        return replace(
+            self,
+            export_family=family,  # type: ignore[arg-type]
+            source_kind=source,  # type: ignore[arg-type]
+            scope_kind=scope,  # type: ignore[arg-type]
+            prepared_frame_idx_start=start,
+            prepared_frame_idx_end=end,
+            bout_id=bout_id,
+            start_sample_idx=start_sample,
+            end_sample_idx=end_sample,
+            packaged_prepared_start=(
+                None
+                if self.packaged_prepared_start is None
+                else int(self.packaged_prepared_start)
+            ),
+            packaged_prepared_end=(
+                None
+                if self.packaged_prepared_end is None
+                else int(self.packaged_prepared_end)
+            ),
+            hud_mode=hud,
+            include_contact=bool(self.include_contact),
+            include_sbs=bool(self.include_sbs),
+            include_frame_counter=bool(self.include_frame_counter),
+            draw_skeleton=bool(self.draw_skeleton),
+            pre_context_sec=float(self.pre_context_sec),
+            post_context_sec=float(self.post_context_sec),
+        )
+
+    def scope_summary(self) -> str:
+        settings = self.validated()
+        if settings.export_family == "s4_pose":
+            return (
+                f"S4 pose QC prepared [{settings.prepared_frame_idx_start}, "
+                f"{settings.prepared_frame_idx_end}]"
+            )
+        if settings.scope_kind == "bout_span":
+            bout = settings.bout_id or "(unnamed)"
+            return (
+                f"Behavioral bout {bout} dense "
+                f"[{settings.start_sample_idx}, {settings.end_sample_idx}]"
+            )
+        return (
+            f"Behavioral prepared [{settings.prepared_frame_idx_start}, "
+            f"{settings.prepared_frame_idx_end}]"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class OverlayQcRequestIdentity:
+    """Identity used to reject stale asynchronous overlay QC results."""
+
+    request_id: str
+    session_root: Path
+    export_family: str
+    source_kind: str | None
+    package_run_id: str | None
+    package_dir: Path | None
+    review_run_id: str | None
+    review_run_dir: Path | None
+    s4_run_id: str | None
+    s4_run_dir: Path | None
+    settings: OverlayQcUiSettings
+
+    @staticmethod
+    def new(
+        *,
+        session_root: Path,
+        export_family: str,
+        source_kind: str | None,
+        package_run_id: str | None,
+        package_dir: Path | None,
+        review_run_id: str | None,
+        review_run_dir: Path | None,
+        s4_run_id: str | None,
+        s4_run_dir: Path | None,
+        settings: OverlayQcUiSettings,
+    ) -> OverlayQcRequestIdentity:
+        return OverlayQcRequestIdentity(
+            request_id=str(uuid4()),
+            session_root=session_root.resolve(strict=False),
+            export_family=str(export_family),
+            source_kind=None if source_kind is None else str(source_kind),
+            package_run_id=None if package_run_id is None else str(package_run_id),
+            package_dir=(
+                package_dir.resolve(strict=False) if package_dir is not None else None
+            ),
+            review_run_id=None if review_run_id is None else str(review_run_id),
+            review_run_dir=(
+                review_run_dir.resolve(strict=False)
+                if review_run_dir is not None
+                else None
+            ),
+            s4_run_id=None if s4_run_id is None else str(s4_run_id),
+            s4_run_dir=(
+                s4_run_dir.resolve(strict=False) if s4_run_dir is not None else None
+            ),
+            settings=settings.validated(),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class OverlayQcLaunchContext:
+    """Prefill context when opening the shared QC Overlay Export dialog."""
+
+    session_root: Path
+    export_family: OverlayQcExportFamily
+    package_dir: Path | None = None
+    package_run_id: str | None = None
+    review_run_dir: Path | None = None
+    review_run_id: str | None = None
+    review_is_draft: bool | None = None
+    s4_run_dir: Path | None = None
+    s4_run_id: str | None = None
+    lock_family: bool = True
+    preferred_bout_id: str | None = None
+    preferred_start_sample_idx: int | None = None
+    preferred_end_sample_idx: int | None = None
+    preferred_prepared_start: int | None = None
+    preferred_prepared_end: int | None = None
+    package_options: tuple[tuple[str, Path], ...] = ()
+    review_options: tuple[tuple[str, Path, bool, str | None], ...] = ()
+    s4_options: tuple[tuple[str, Path], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class OverlayQcBoutOption:
+    bout_id: str
+    start_sample_idx: int
+    end_sample_idx: int
+    prepared_frame_idx_start: int | None
+    prepared_frame_idx_end: int | None
+    channel: str | None
+    behavior_name: str | None
+
+    @property
+    def label(self) -> str:
+        channel = self.channel or "?"
+        behavior = self.behavior_name or "?"
+        return (
+            f"{self.bout_id} · {channel}/{behavior} · dense "
+            f"[{self.start_sample_idx},{self.end_sample_idx}]"
+        )
+
+
+def overlay_qc_table_rows(
+    jobs: tuple[OverlayQcJobSummary, ...] | list[OverlayQcJobSummary],
+) -> tuple[tuple[str, ...], ...]:
+    rows: list[tuple[str, ...]] = []
+    for job in jobs:
+        source = (
+            job.s4_run_id
+            if job.export_family == "s4_pose"
+            else (job.review_run_id or job.package_run_id or job.source_kind or "—")
+        )
+        interval = "—"
+        if (
+            job.prepared_frame_idx_start is not None
+            and job.prepared_frame_idx_end is not None
+        ):
+            interval = f"[{job.prepared_frame_idx_start}, {job.prepared_frame_idx_end}]"
+        layers = ",".join(job.layers) if job.layers else "—"
+        rows.append(
+            (
+                job.job_id,
+                job.export_family,
+                job.status,
+                str(source),
+                interval,
+                layers,
+                str(job.frames_written) if job.frames_written is not None else "—",
+                "yes" if job.has_video else "no",
+                str(job.job_dir),
+            )
+        )
+    return tuple(rows)
+
+
+def source_identity_summary(
+    *,
+    settings: OverlayQcUiSettings,
+    package_run_id: str | None,
+    review_run_id: str | None,
+    s4_run_id: str | None,
+) -> str:
+    cfg = settings.validated()
+    parts = [f"family={cfg.export_family}"]
+    if cfg.export_family == "s4_pose":
+        parts.append(f"s4={s4_run_id or '—'}")
+        parts.append(f"skeleton={'yes' if cfg.draw_skeleton else 'no'}")
+    else:
+        parts.append(f"source={cfg.source_kind}")
+        parts.append(f"package={package_run_id or '—'}")
+        if cfg.source_kind == "s10_reviewed":
+            parts.append(f"review={review_run_id or '—'}")
+        parts.append(f"hud={cfg.hud_mode}")
+        parts.append(f"contact={'yes' if cfg.include_contact else 'no'}")
+        parts.append(f"sbs={'yes' if cfg.include_sbs else 'no'}")
+    parts.append(cfg.scope_summary())
+    parts.append(f"pad={cfg.pre_context_sec:g}/{cfg.post_context_sec:g}s")
+    parts.append(f"counter={'yes' if cfg.include_frame_counter else 'no'}")
+    return "; ".join(parts)
+
+
+def actionable_overlay_error(exc: BaseException) -> str:
+    """Map backend exceptions to short operator-facing messages."""
+
+    message = str(exc).strip() or exc.__class__.__name__
+    lowered = message.lower()
+    if "draft" in lowered:
+        return (
+            "Working drafts cannot be used as QC overlay sources. "
+            "Publish the review first, or choose an automated S9 package."
+        )
+    if "digest mismatch" in lowered or "digest changed" in lowered:
+        return (
+            "Source digest mismatch — the selected science artifacts changed. "
+            f"Re-select an eligible source. Details: {message}"
+        )
+    if "package_dir" in lowered or "ineligible" in lowered or "not eligible" in lowered:
+        return f"Ineligible source: {message}"
+    if "prepared_video" in lowered or "prepared sync" in lowered or "sync" in lowered:
+        return f"Missing or invalid prepared video/sync: {message}"
+    if "final_pose" in lowered or ("s4" in lowered and "missing" in lowered):
+        return f"Missing S4 pose artifacts: {message}"
+    if "states" in lowered and ("s8" in lowered or "s10" in lowered or "missing" in lowered):
+        return f"Missing S8/S10 behavioral states: {message}"
+    if "topology" in lowered or "skeleton" in lowered or "sleap" in lowered:
+        return (
+            f"Skeleton topology unavailable (nodes-only fallback may apply): {message}"
+        )
+    if "cancel" in lowered:
+        return f"QC overlay export canceled: {message}"
+    if "ffmpeg" in lowered or "encode" in lowered:
+        return f"FFmpeg encode failed: {message}"
+    return message
+
+
+__all__ = [
+    "OverlayQcBoutOption",
+    "OverlayQcExportFamily",
+    "OverlayQcBehaviorSource",
+    "OverlayQcLaunchContext",
+    "OverlayQcRequestIdentity",
+    "OverlayQcScopeKind",
+    "OverlayQcUiSettings",
+    "actionable_overlay_error",
+    "overlay_qc_table_rows",
+    "source_identity_summary",
+]

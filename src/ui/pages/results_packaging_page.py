@@ -421,10 +421,13 @@ class ResultsPackagingPage(QWidget):
         self.retry_media_button.clicked.connect(self._retry_media_export)
         self.open_export_button = QPushButton("Open export folder")
         self.open_export_button.clicked.connect(self._open_export_folder)
+        self.overlay_qc_button = QPushButton("Export QC Overlay Video…")
+        self.overlay_qc_button.clicked.connect(self._open_overlay_qc_export)
         export_buttons.addWidget(self.export_csv_button)
         export_buttons.addWidget(self.export_media_button)
         export_buttons.addWidget(self.retry_media_button)
         export_buttons.addWidget(self.open_export_button)
+        export_buttons.addWidget(self.overlay_qc_button)
         export_buttons.addStretch(1)
         export_layout.addLayout(export_buttons)
 
@@ -1347,6 +1350,44 @@ class ResultsPackagingPage(QWidget):
             self.status_message.emit("Could not open the export folder.")
         else:
             self.status_message.emit("Opened export folder.")
+
+    def _open_overlay_qc_export(self) -> None:
+        from ui.controllers.overlay_qc_export_support import OverlayQcLaunchContext
+        from ui.dialogs.overlay_qc_export_dialog import open_overlay_qc_export_dialog
+
+        state = self.controller.state
+        session = state.session_root
+        if session is None:
+            QMessageBox.warning(
+                self, "No session", "Open a session before exporting QC overlay video."
+            )
+            return
+        summary = state.project_summary
+        package_options: list[tuple[str, Path]] = []
+        eligible_ids: set[str] = set()
+        if summary is not None:
+            for run in summary.eligible_runs:
+                package_options.append((run.run_id, run.run_dir))
+                eligible_ids.add(run.run_id)
+        selected = self.controller.selected_s9_run()
+        if (
+            selected is not None
+            and selected.run_id in eligible_ids
+            and all(run_id != selected.run_id for run_id, _ in package_options)
+        ):
+            package_options.insert(0, (selected.run_id, selected.run_dir))
+        launch = OverlayQcLaunchContext(
+            session_root=Path(session),
+            export_family="behavioral",
+            package_dir=None if selected is None else selected.run_dir,
+            package_run_id=None if selected is None else selected.run_id,
+            lock_family=True,
+            package_options=tuple(package_options),
+            preferred_prepared_start=0,
+            preferred_prepared_end=29,
+        )
+        open_overlay_qc_export_dialog(self, launch=launch)
+        self.status_message.emit("QC overlay export dialog closed.")
 
     def _update_elapsed(self) -> None:
         if self._started_at is None:
