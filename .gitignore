@@ -24,6 +24,8 @@ bsuite_runs/
 # Overlay / PI acceptance evidence trees (local lab only).
 /tmp_overlay*/
 /tmp_pi*/
+# Multi-session NAS batch inventory/export evidence (local lab only).
+/tmp_hala*/
 # Large media assets elsewhere; models/SLEAP is tracked via Git LFS.
 *.slp
 *.mp4
