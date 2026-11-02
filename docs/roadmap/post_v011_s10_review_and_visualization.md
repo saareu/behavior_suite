@@ -1,9 +1,9 @@
 # Post-v0.1.1 — S10 Review Efficiency, Visualization, and PI Reporting
 
-**Status:** **Gallery A2 accepted**. **PI report B1 backend complete**. **PI report B2 GUI integration complete** (offline browser + published-S10 source acceptance complete). Overlays remain deferred.  
-**Date:** 2026-11-01 (**D0 closed**; **Gallery A1/A2** accepted; **B1/B2 closed** — see also [`d0_workspace_architecture.md`](d0_workspace_architecture.md))  
-**Baseline:** Behavior Suite **v0.1.1** released; S1–S10 MVP lab-validated; D0 workspace MVP closed at `e81d530`; A1 base `0d4b237`; A2/B1/B2 base `e88b1d8`.  
-**Non-scope of remaining follow-ons:** overlay generation, subsession science, S8 schema changes.
+**Status:** **Gallery A2 accepted**. **Increment B (PI report B1+B2) closed**. **Increment C0–C2-A** (shared compositor + offline behavioral QC MP4) accepted locally — see [`post_v011_overlay_architecture.md`](post_v011_overlay_architecture.md).  
+**Date:** 2026-11-02 (**D0 closed**; **Gallery A1/A2** accepted; **B1/B2 closed**; **C0–C2-A** local acceptance)  
+**Baseline:** Behavior Suite **v0.1.1** released; S1–S10 MVP lab-validated; D0 workspace MVP closed at `e81d530`; A1 base `0d4b237`; A2/B1/B2 base `e88b1d8`; C0–C2-A base `a6572cc`; mainline CSV merge `f91f458`.  
+**Non-scope of remaining follow-ons:** GUI/PI/gallery overlay integration, S4 provenance styling (C2-B), full-session exporter, subsession science, S8 schema changes.
 
 **Legend**
 
@@ -176,7 +176,7 @@ Downstream must choose `SOURCE_TYPE_AUTOMATED` vs `SOURCE_TYPE_REVIEWED` explici
 
 | Legacy piece | Finding |
 | --- | --- |
-| Pipeline 100 `VideoComposer` (`legacy/src/video/behavioral_overlay.py`) | Dense-loop QC exporter: darken → skeletons → focal HUD + contact/SBS LEDs → write at **target 120 fps**; uses imputed dense pose NPZ + predictions |
+| Pipeline 100 `VideoComposer` (`legacy/src/video/behavioral_overlay.py`) | Dense-loop QC exporter: darken → skeletons → **focal exclusive HUD only** (direction hardcoded `0→1`) → write at **target 120 fps** with OpenCV `mp4v` (docstring falsely says H.264); uses imputed dense pose NPZ + predictions. Contact/SBS LED helper exists but is **never called**. Full audit: [`post_v011_overlay_architecture.md`](post_v011_overlay_architecture.md) §2 |
 | S8 morph-close | Legacy Stage 8 contact morph; modern MVP disables via `max_gap_to_fill=0` |
 | Pipeline 110 | Fused re-collapse + emit floors + MP4/GIF; source priority `tracks_overlay` → `prepared_video` → …; time-based ffmpeg seek |
 | Modern S9 | Broke science/media coupling; frame-accurate trim; prepared-first; no GIF |
@@ -474,6 +474,8 @@ Does **not** mutate S8/S9 science trees.
 
 ## 5. Overlay infrastructure
 
+**Authority for Increment C:** [`post_v011_overlay_architecture.md`](post_v011_overlay_architecture.md) (**C0–C2-A accepted locally**; push/merge pending architectural review). Summary below retained for navigation.
+
 ### 5.1 Design goal (recommendation)
 
 Introduce a **reusable, read-only overlay compositor** that can render selected layers onto prepared frames (live GUI and/or offline QC MP4), with explicit artifact provenance — without implementing every QC exporter in this phase.
@@ -521,9 +523,10 @@ overlay_artifact_manifest_v1:
 
 | Legacy VideoComposer idea | Modern stance |
 | --- | --- |
-| Skeleton + focal HUD + contact/SBS LEDs | Reuse as UX reference for `s8.*` layers |
+| Skeleton + focal HUD (+ unused contact/SBS LED helpers) | Reuse as UX reference for `s8.*` layers; wire LEDs only if explicitly enabled |
 | Dense 120 fps writer | Optional advanced mode only; not default |
 | Darken / contrast mask | Optional style preset |
+| Hardcoded focal `0→1` only | Dual independently selectable perspectives |
 | Pipeline 110 overlay source priority | Gallery/PI default remains prepared; overlays are explicit opt-in (reopen U7 carefully) |
 | mp4v vs libx264 | Prefer ffmpeg libx264 for distributable QC, consistent with S9 clips |
 
@@ -813,21 +816,38 @@ A1 is accepted for read-only gallery use. Do **not** treat intermittent post-ass
 - Cooperative cancellation occurs between clips (cannot interrupt an in-flight ffmpeg bout encode).
 - Full E-session encoding performance is estimated, not measured.
 - Windows staging rename can intermittently encounter `WinError 5` (Access is denied) on atomic temp→final replace under load; retry or re-export if observed.
-- GIF, overlays, and contact/SBS appendix remain deferred.
+- GIF and contact/SBS appendix remain deferred. Overlays deferred to C1+ after C0 architecture review ([`post_v011_overlay_architecture.md`](post_v011_overlay_architecture.md)).
 - Browser autoplay may still require a user gesture on some engines despite muted looping.
 
+### Increment B — PI-facing immutable HTML report (**closed**)
+
+| Slice | Status |
+| --- | --- |
+| **B1 backend** | Complete under `src/behavioral_review/pi_report/` |
+| **B2 GUI** | Complete (`Export PI Report` + `PiReportController` + `GuiTaskKind.PI_REPORT_EXPORT`); offline browser + published-S10 source acceptance complete |
+| **Non-scope retained** | Overlays, GIF, contact/SBS appendix |
+
 ### Increment C — Shared overlay infrastructure and selected QC artifacts
+
+**C0–C2-A:** complete locally — [`post_v011_overlay_architecture.md`](post_v011_overlay_architecture.md) (§13–§15). Shared compositor + offline behavioral QC MP4 accepted; not yet merged to main.
+
+| Slice | Content |
+| --- | --- |
+| **C1** | Contracts, SyncMap timing helpers, compositor core, read-only adapters (S2/S3/S4/S8) — **done** |
+| **C2-A** | Behavioral HUD layers + offline prepared-rate QC clip exporter; naked S9 exports unchanged — **done** |
+| **C2-B** | Optional S4 provenance-styled pose layer; **O3**/**O4** decisions |
+| **C3** | Optional live S10 layer and/or full-session prepared QC; optional S5 layer |
 
 | Item | Content |
 | --- | --- |
 | **Reusable** | S2/S3/S5 draw helpers, sync map, S10 video pane, ffmpeg encode patterns, legacy VideoComposer as reference |
 | **New** | `OverlayLayer` / `OverlayCompositor`, provenance sidecar, 1–2 chosen exporters or live layers |
-| **Data contracts** | `overlay_artifact_manifest_v1`; read-only rendering; explicit layer list |
+| **Data contracts** | `overlay_artifact_manifest_v1`; read-only rendering; explicit layer list; dual exclusive perspectives |
 | **Scientific risks** | Dense/prepared confusion in HUD; presenting reconstructed S4 points as raw measurements; directional perspective mix-ups |
 | **Performance risks** | Full-session 120 fps exports; live multi-layer cost on GUI thread |
-| **Acceptance criteria** | Compositor unit tests for plateau mapping; one live optional layer **or** one offline QC artifact with digest pin; no S8 science mutation; S8 `generate_overlay_video` flag either wired honestly or remains clearly unused |
+| **Acceptance criteria** | See overlay architecture §9; compositor plateau tests; offline QC digest pin before live; no S8 science mutation; S8 `generate_overlay_video` flag wired honestly or deprecated |
 | **Tests** | Layer golden frames (tiny); timing plateau tests; manifest pin tests |
-| **Dependencies** | Sync/provenance clarity from A; not required for exclusive approval MVP. U7 reopen for S10 live overlay |
+| **Dependencies** | Operator approval of overlay open decisions (P9/P10/O1–O8); U7 reopen only if live S10 overlay ships |
 
 ### Increment D — Shared workspace (revised; split D0-A…D0-D)
 
@@ -859,8 +879,8 @@ D0-A (schema + WorkspaceContext)
    │                                         ├─► B (PI HTML) [after GalleryCard/preview_plan]
    └─► D0-C (optional subsessions; may trail)┘
 
-C (overlay compositor + selected artifacts) after A stabilizes inspector integration;
-full ethogram QC movie exporters remain later.
+C0 overlay architecture audit complete → C1/C2/C3 per [`post_v011_overlay_architecture.md`](post_v011_overlay_architecture.md)
+after operator review; full ethogram QC movie exporters remain C3/later.
 ```
 
 Defer: model-training UIs, active learning, reciprocal tool (U2), `uncertain` (U3), unless explicitly reopened with lab criteria.
@@ -897,7 +917,7 @@ Defer: model-training UIs, active learning, reciprocal tool (U2), `uncertain` (U
 | 1 | Current architecture inventory | §1 |
 | 2 | Recommended gallery interaction design | §2 |
 | 3 | PI report format | §4 |
-| 4 | Overlay architecture and legacy findings | §5 + §1.10 |
+| 4 | Overlay architecture and legacy findings | §5 + §1.10 → detail in `post_v011_overlay_architecture.md` |
 | 5 | Shared project-context recommendation | §6 → revised; detail in `d0_workspace_architecture.md` |
 | 6 | Proposed implementation order | §7 (D0 split A–D) |
 | 7 | Open scientific/product decisions | §8 + D0 **W1–W7** |
@@ -915,8 +935,12 @@ Defer: model-training UIs, active learning, reciprocal tool (U2), `uncertain` (U
 
 **PI report B2:** **GUI integration complete** on S10 (`Export PI Report` + `PiReportController` + `GuiTaskKind.PI_REPORT_EXPORT`). Offline browser acceptance complete. Published-S10 source acceptance complete.
 
-**Still deferred:** overlays (C), subsession science processing, outlier aids, contact/SBS secondary gallery / PI appendix, GIF generation. Targeted **R9 overlap-voiding audit** recommended as a follow-on (rules unchanged here).
+**Increment B:** **closed.**
 
-**Next authorized increment:** **C** (overlay design / shared compositor + selected QC artifacts); keep S8/S9 science schemas frozen.
+**Increment C0–C2-A:** **local acceptance complete** — [`post_v011_overlay_architecture.md`](post_v011_overlay_architecture.md). Shared compositor + offline behavioral QC MP4; push/merge pending review.
+
+**Still deferred:** C2-B S4 styling / GUI launch, C3 live/full-session overlays, PI/gallery overlay opt-in, subsession science processing, outlier aids, contact/SBS secondary gallery / PI appendix, GIF generation. Targeted **R9 overlap-voiding audit** recommended as a follow-on (rules unchanged here).
+
+**Next:** operator architectural review of C0; then authorize **C1** (contracts + compositor core). Keep S8/S9 science schemas frozen.
 
 _End of post-v0.1.1 S10 review and visualization architecture proposal._
