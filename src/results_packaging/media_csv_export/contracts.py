@@ -33,6 +33,18 @@ FAILURES_JSONL_FILENAME = "failures.jsonl"
 CSV_EXPORT_FILENAME = "behavior_bouts_automated.csv"
 CLIPS_DIRNAME = "clips"
 
+# CSV format profiles (shared leaf constants; avoid circular imports with
+# results_packaging.legacy_framewise_csv).
+LEGACY_FRAMEWISE_PROFILE_ID = "legacy_framewise_v1"
+PACKAGE_BOUTS_AUTOMATED_PROFILE_ID = "package_bouts_automated"
+CSV_FORMAT_PROFILES: frozenset[str] = frozenset(
+    {
+        LEGACY_FRAMEWISE_PROFILE_ID,
+        PACKAGE_BOUTS_AUTOMATED_PROFILE_ID,
+    }
+)
+DEFAULT_CSV_FORMAT_PROFILE = LEGACY_FRAMEWISE_PROFILE_ID
+
 # Selection modes (exactly one per job).
 SELECTION_ALL_PACKAGE_BOUTS = "all_package_bouts"
 SELECTION_CHANNELS_BEHAVIORS = "channels_behaviors"

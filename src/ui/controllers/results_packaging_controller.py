@@ -529,10 +529,41 @@ class ResultsPackagingController:
         if not package_is_export_eligible(run.classification):
             return stale_export_block_reason(run.classification)
         try:
-            self.state.export_settings.validated()
+            settings = self.state.export_settings.validated()
         except (ExportConfigError, ExportSelectionError) as exc:
             return str(exc)
+        pose_state = self.legacy_pose_ui_state(settings=settings)
+        if pose_state.requires_explicit_pose:
+            if not pose_state.candidates:
+                return (
+                    "S6→S4 lineage is unavailable and no completed S4 pose runs "
+                    "were found in this session. Run Subsystem 4 first, or open "
+                    "the session that contains the compatible S4 run."
+                )
+            if not pose_state.selected_pose_run_dir:
+                return (
+                    "S6→S4 lineage is unavailable for this package. Select a "
+                    "completed S4 pose run explicitly before exporting "
+                    "legacy_framewise_v1 CSV (automatic newest-S4 selection is "
+                    "disabled)."
+                )
         return None
+
+    def legacy_pose_ui_state(
+        self, *, settings: ExportUiSettings | None = None
+    ):
+        """Lineage vs explicit S4 picker state for the selected package."""
+
+        from ui.controllers.results_export_support import build_legacy_pose_ui_state
+
+        cfg = (settings or self.state.export_settings).validated()
+        run = self.selected_s9_run()
+        return build_legacy_pose_ui_state(
+            session_root=self.state.session_root,
+            package_dir=run.run_dir if run is not None else None,
+            format_profile=cfg.format_profile,
+            selected_pose_run_dir=cfg.pose_run_dir,
+        )
 
     def update_export_settings(self, settings: ExportUiSettings) -> ExportUiSettings:
         if self.state.task_running or self.state.discovery_running:

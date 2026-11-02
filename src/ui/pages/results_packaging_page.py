@@ -370,6 +370,35 @@ class ResultsPackagingPage(QWidget):
         self.export_post_context_spin.setRange(0.0, 60.0)
         self.export_post_context_spin.setSingleStep(0.05)
         self.export_post_context_spin.valueChanged.connect(self._export_settings_changed)
+        self.export_format_combo = QComboBox()
+        self.export_format_combo.addItem(
+            "legacy_framewise_v1 (default; automated S8 + pose)",
+            "legacy_framewise_v1",
+        )
+        self.export_format_combo.addItem(
+            "package_bouts_automated (historical bout table)",
+            "package_bouts_automated",
+        )
+        self.export_format_combo.currentIndexChanged.connect(
+            self._export_settings_changed
+        )
+        self.export_pose_status_label = QLabel(
+            "Pose source: lineage pin resolved automatically when available."
+        )
+        self.export_pose_status_label.setWordWrap(True)
+        self.export_pose_status_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.export_pose_combo = QComboBox()
+        self.export_pose_combo.setVisible(False)
+        self.export_pose_combo.currentIndexChanged.connect(
+            self._export_settings_changed
+        )
+        self.export_pose_row_label = QLabel("Explicit S4 pose run")
+        self.export_pose_row_label.setVisible(False)
+        export_form.addRow("CSV format profile", self.export_format_combo)
+        export_form.addRow("Pose source", self.export_pose_status_label)
+        export_form.addRow(self.export_pose_row_label, self.export_pose_combo)
         export_form.addRow("Selection mode", self.export_selection_combo)
         export_form.addRow("Channels (comma-separated)", self.export_channels_edit)
         export_form.addRow("Behaviors (comma-separated)", self.export_behaviors_edit)
@@ -923,6 +952,10 @@ class ResultsPackagingPage(QWidget):
             self.status_message.emit("Opened S9 package folder.")
 
     def _sync_export_widgets(self, settings: ExportUiSettings) -> None:
+        format_index = self.export_format_combo.findData(settings.format_profile)
+        self.export_format_combo.blockSignals(True)
+        self.export_format_combo.setCurrentIndex(format_index if format_index >= 0 else 0)
+        self.export_format_combo.blockSignals(False)
         mode_index = self.export_selection_combo.findData(settings.selection_mode)
         self.export_selection_combo.blockSignals(True)
         self.export_selection_combo.setCurrentIndex(mode_index if mode_index >= 0 else 0)
@@ -951,8 +984,54 @@ class ResultsPackagingPage(QWidget):
         self.export_post_context_spin.blockSignals(True)
         self.export_post_context_spin.setValue(float(settings.post_context_sec))
         self.export_post_context_spin.blockSignals(False)
+        self._sync_pose_picker_widgets(settings)
+        # Bout-selection widgets apply to media / historical bout CSV only.
+        framewise = str(settings.format_profile) == "legacy_framewise_v1"
+        for widget in (
+            self.export_selection_combo,
+            self.export_channels_edit,
+            self.export_behaviors_edit,
+            self.export_profile_combo,
+        ):
+            widget.setEnabled(not framewise)
+
+    def _sync_pose_picker_widgets(self, settings: ExportUiSettings) -> None:
+        pose_state = self.controller.legacy_pose_ui_state(settings=settings)
+        self.export_pose_status_label.setText(pose_state.reason)
+        show_picker = bool(
+            pose_state.format_is_legacy and pose_state.requires_explicit_pose
+        )
+        self.export_pose_combo.setVisible(show_picker)
+        self.export_pose_row_label.setVisible(show_picker)
+        self.export_pose_combo.blockSignals(True)
+        self.export_pose_combo.clear()
+        if show_picker:
+            self.export_pose_combo.addItem("(select completed S4 run…)", None)
+            selected_index = 0
+            selected = pose_state.selected_pose_run_dir
+            for i, candidate in enumerate(pose_state.candidates, start=1):
+                self.export_pose_combo.addItem(
+                    candidate.label, str(candidate.run_dir)
+                )
+                if selected is not None and str(candidate.run_dir) == selected:
+                    selected_index = i
+            self.export_pose_combo.setCurrentIndex(selected_index)
+            if not pose_state.candidates:
+                self.export_pose_status_label.setText(
+                    pose_state.reason
+                    + " No completed S4 runs are available in this session."
+                )
+        self.export_pose_combo.blockSignals(False)
 
     def _read_export_settings_from_widgets(self) -> ExportUiSettings:
+        pose_data = self.export_pose_combo.currentData()
+        pose_dir = str(pose_data) if pose_data else None
+        format_profile = str(
+            self.export_format_combo.currentData() or "legacy_framewise_v1"
+        )
+        # Only keep an explicit pose selection when the picker is active.
+        if format_profile != "legacy_framewise_v1" or not self.export_pose_combo.isVisible():
+            pose_dir = None
         return ExportUiSettings(
             selection_mode=str(
                 self.export_selection_combo.currentData() or SELECTION_ALL_PACKAGE_BOUTS
@@ -964,8 +1043,10 @@ class ResultsPackagingPage(QWidget):
                 if self.export_profile_combo.currentData() is not None
                 else None
             ),
+            format_profile=format_profile,
             pre_context_sec=float(self.export_pre_context_spin.value()),
             post_context_sec=float(self.export_post_context_spin.value()),
+            pose_run_dir=pose_dir,
         )
 
     def _export_settings_changed(self) -> None:
@@ -1293,6 +1374,8 @@ class ResultsPackagingPage(QWidget):
             self.hash_video_check,
             self.min_frames_spin,
             self.min_seconds_spin,
+            self.export_format_combo,
+            self.export_pose_combo,
             self.export_selection_combo,
             self.export_channels_edit,
             self.export_behaviors_edit,

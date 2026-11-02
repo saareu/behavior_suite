@@ -2,7 +2,9 @@
 
 **Status:** Frozen for headless implementation (S9-E2).  
 **Authority:** Accepted architecture `media_csv_export_architecture.md`.  
-**Non-goals:** GUI, GIF, framewise CSV, reviewed CSV, S10, mutation of S1–S9 science artifacts.
+**Non-goals (original S9-E2 freeze):** GIF; mutation of S1–S9 science artifacts.
+
+**Later addition:** framewise CSV profile `legacy_framewise_v1` (default for new CSV jobs) is documented in `legacy_framewise_csv_export.md`. Historical bout CSV remains available as `package_bouts_automated`.
 
 This document freezes identity, schemas, timing, lifecycle, and failure semantics. Implementation must match these rules.
 

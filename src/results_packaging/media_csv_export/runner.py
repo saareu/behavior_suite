@@ -50,6 +50,7 @@ class CsvExportRequest:
     export_job_id: str | None = None
     output_root: Path | None = None
     allow_stale_source: bool = False
+    pose_run_dir: Path | str | None = None
 
 
 def run_media_export(
@@ -89,9 +90,43 @@ def run_csv_export(
     request: CsvExportRequest,
     progress_callback: ProgressCallback | None = None,
 ) -> CsvExportJobResult:
-    """Validate package and publish a new automated CSV export job."""
+    """Validate package and publish a new automated CSV export job.
+
+    Default format profile is ``legacy_framewise_v1``. Pass
+    ``format_profile=package_bouts_automated`` for the historical bout table.
+    """
 
     settings = _resolve_csv_settings(request)
+    from results_packaging.legacy_framewise_csv.contracts import (
+        LEGACY_FRAMEWISE_PROFILE_ID,
+    )
+    from results_packaging.legacy_framewise_csv.runner import (
+        LegacyFramewiseExportRequest,
+        run_legacy_framewise_csv_export,
+    )
+
+    if settings.format_profile == LEGACY_FRAMEWISE_PROFILE_ID:
+        # Pose is resolved from S6 lineage on the package; explicit pose_run_dir
+        # is required when lineage is absent (never latest-S4 fallback).
+        pose_dir = request.pose_run_dir
+        if pose_dir is None and settings.pose_run_dir:
+            pose_dir = settings.pose_run_dir
+        return run_legacy_framewise_csv_export(
+            LegacyFramewiseExportRequest(
+                session_root=Path(request.session_root).expanduser().resolve(),
+                package_dir=Path(request.package_dir).expanduser().resolve(),
+                behavior_source_kind="automated_s8",
+                timestamp=request.timestamp,
+                export_job_id=request.export_job_id,
+                output_root=request.output_root,
+                allow_stale_source=request.allow_stale_source,
+                pose_run_dir=(
+                    Path(pose_dir).expanduser().resolve() if pose_dir is not None else None
+                ),
+            ),
+            progress_callback=progress_callback,
+        )
+
     source = validate_package_for_export(
         request.package_dir,
         require_video=False,
