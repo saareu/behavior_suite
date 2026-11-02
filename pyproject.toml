@@ -101,6 +101,7 @@ include = [
 "behavioral_arbitration*",
 "results_packaging*",
 "behavioral_review*",
+"overlay*",
 "workspace*",
 "cli*",
 "ui*",
@@ -148,6 +149,7 @@ source = [
 "behavioral_arbitration",
 "results_packaging",
 "behavioral_review",
+"overlay",
 "workspace",
 "cli",
 ]
@@ -207,6 +209,7 @@ known-first-party = [
 "behavioral_arbitration",
 "results_packaging",
 "behavioral_review",
+"overlay",
 "workspace",
 "cli",
 "ui",
@@ -227,6 +230,7 @@ packages = [
 "behavioral_arbitration",
 "results_packaging",
 "behavioral_review",
+"overlay",
 "workspace",
 ]
 check_untyped_defs = true
