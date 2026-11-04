@@ -190,6 +190,20 @@ class PiReportController:
             )
         if cfg.bout_scope == "selected_bouts" and not cfg.selected_bout_ids:
             return "Select at least one eligible exclusive bout for a subset report."
+        if cfg.overlays_enabled:
+            if source_kind != PI_SOURCE_REVIEWED:
+                return (
+                    "Overlays require Published S10 review "
+                    "(automated S8 labels cannot be burned into PI media)."
+                )
+            if review_is_draft:
+                return "Working drafts cannot supply overlay labels; publish first."
+            if review_run_dir is None or review_run_id is None:
+                return "Select a published S10 review before enabling overlays."
+            if not cfg.overlay_include_behavior and not cfg.overlay_include_pose:
+                return "Enable reviewed behavioral labels and/or S4 pose for overlays."
+            if cfg.overlay_include_pose and not cfg.overlay_pose_run_dir:
+                return "Select an explicit S4 finalized pose run for pose overlays."
         return None
 
     def begin_export_launch(

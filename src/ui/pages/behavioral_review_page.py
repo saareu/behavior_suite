@@ -722,6 +722,28 @@ class BehavioralReviewPage(QWidget):
         self.pi_write_zip_check = QCheckBox("Write ZIP archive")
         self.pi_write_zip_check.setChecked(True)
         self.pi_write_zip_check.toggled.connect(self._pi_settings_changed)
+        self.pi_overlay_check = QCheckBox(
+            "Annotate media with overlays (published S10 only; default off)"
+        )
+        self.pi_overlay_check.setChecked(False)
+        self.pi_overlay_check.toggled.connect(self._pi_settings_changed)
+        self.pi_overlay_behavior_check = QCheckBox("Reviewed behavioral labels")
+        self.pi_overlay_behavior_check.setChecked(True)
+        self.pi_overlay_behavior_check.toggled.connect(self._pi_settings_changed)
+        self.pi_overlay_pose_check = QCheckBox("S4 finalized pose")
+        self.pi_overlay_pose_check.setChecked(False)
+        self.pi_overlay_pose_check.toggled.connect(self._pi_settings_changed)
+        self.pi_overlay_pose_combo = QComboBox()
+        self.pi_overlay_pose_combo.currentIndexChanged.connect(self._pi_settings_changed)
+        self.pi_overlay_contact_check = QCheckBox("CONTACT indicator")
+        self.pi_overlay_contact_check.setChecked(True)
+        self.pi_overlay_contact_check.toggled.connect(self._pi_settings_changed)
+        self.pi_overlay_sbs_check = QCheckBox("SBS indicator")
+        self.pi_overlay_sbs_check.setChecked(True)
+        self.pi_overlay_sbs_check.toggled.connect(self._pi_settings_changed)
+        self.pi_overlay_skeleton_check = QCheckBox("Draw pose skeleton")
+        self.pi_overlay_skeleton_check.setChecked(True)
+        self.pi_overlay_skeleton_check.toggled.connect(self._pi_settings_changed)
         self.pi_output_label = QLabel("Output: (open a session)")
         self.pi_output_label.setWordWrap(True)
         self.pi_scope_note_label = QLabel(
@@ -730,6 +752,13 @@ class BehavioralReviewPage(QWidget):
         self.pi_scope_note_label.setWordWrap(True)
         self.pi_export_button = QPushButton("Export PI Report")
         self.pi_export_button.clicked.connect(self._export_pi_report)
+        self.pi_overlay_media_button = QPushButton(
+            "Export Reviewed Overlay Media Only"
+        )
+        self.pi_overlay_media_button.clicked.connect(self._export_reviewed_overlay_media)
+        self.pi_overlay_media_button.setToolTip(
+            "Writes reviewed_media_export_overlay__* sibling clips without a PI HTML report."
+        )
         self.pi_cancel_button = QPushButton("Cancel export")
         self.pi_cancel_button.clicked.connect(self._cancel_pi_report)
         self.pi_cancel_button.setEnabled(False)
@@ -775,9 +804,17 @@ class BehavioralReviewPage(QWidget):
         pi_form.addRow("Pre-context (s)", self.pi_pre_pad_spin)
         pi_form.addRow("Post-context (s)", self.pi_post_pad_spin)
         pi_form.addRow(self.pi_write_zip_check)
+        pi_form.addRow(self.pi_overlay_check)
+        pi_form.addRow(self.pi_overlay_behavior_check)
+        pi_form.addRow(self.pi_overlay_pose_check)
+        pi_form.addRow("Overlay S4 pose run", self.pi_overlay_pose_combo)
+        pi_form.addRow(self.pi_overlay_contact_check)
+        pi_form.addRow(self.pi_overlay_sbs_check)
+        pi_form.addRow(self.pi_overlay_skeleton_check)
         pi_form.addRow(self.pi_scope_note_label)
         pi_form.addRow(self.pi_output_label)
         pi_form.addRow(pi_buttons)
+        pi_form.addRow(self.pi_overlay_media_button)
         pi_form.addRow(pi_open_row)
         pi_form.addRow(self.pi_progress)
         pi_form.addRow(self.pi_stage_label)
@@ -2544,7 +2581,22 @@ class BehavioralReviewPage(QWidget):
         self.pi_pre_pad_spin.setEnabled(not pi_busy)
         self.pi_post_pad_spin.setEnabled(not pi_busy)
         self.pi_write_zip_check.setEnabled(not pi_busy)
+        overlays_on = bool(self.pi_overlay_check.isChecked())
+        self.pi_overlay_check.setEnabled(not pi_busy and has_session)
+        self.pi_overlay_behavior_check.setEnabled(not pi_busy and overlays_on)
+        self.pi_overlay_pose_check.setEnabled(not pi_busy and overlays_on)
+        self.pi_overlay_pose_combo.setEnabled(
+            not pi_busy and overlays_on and bool(self.pi_overlay_pose_check.isChecked())
+        )
+        self.pi_overlay_contact_check.setEnabled(not pi_busy and overlays_on)
+        self.pi_overlay_sbs_check.setEnabled(not pi_busy and overlays_on)
+        self.pi_overlay_skeleton_check.setEnabled(
+            not pi_busy and overlays_on and bool(self.pi_overlay_pose_check.isChecked())
+        )
         self.pi_export_button.setEnabled(not pi_busy and has_session)
+        self.pi_overlay_media_button.setEnabled(
+            not pi_busy and has_session and overlays_on
+        )
         self.pi_cancel_button.setEnabled(pi_busy)
         self.pi_refresh_button.setEnabled(has_session and not pi_busy)
         has_pi_selection = (
@@ -2616,6 +2668,7 @@ class BehavioralReviewPage(QWidget):
 
     def _read_pi_settings_from_widgets(self) -> PiReportUiSettings:
         selected_ids = self._selected_pi_bout_ids()
+        pose_dir = self.pi_overlay_pose_combo.currentData()
         return PiReportUiSettings(
             source_kind=str(self.pi_source_combo.currentData() or SOURCE_TYPE_AUTOMATED),
             bout_scope=str(self.pi_scope_combo.currentData() or "all_exclusive"),
@@ -2623,7 +2676,37 @@ class BehavioralReviewPage(QWidget):
             pre_context_sec=float(self.pi_pre_pad_spin.value()),
             post_context_sec=float(self.pi_post_pad_spin.value()),
             write_zip=bool(self.pi_write_zip_check.isChecked()),
+            overlays_enabled=bool(self.pi_overlay_check.isChecked()),
+            overlay_include_behavior=bool(self.pi_overlay_behavior_check.isChecked()),
+            overlay_include_pose=bool(self.pi_overlay_pose_check.isChecked()),
+            overlay_pose_run_dir=(
+                None if pose_dir is None else str(pose_dir)
+            ),
+            overlay_include_contact=bool(self.pi_overlay_contact_check.isChecked()),
+            overlay_include_sbs=bool(self.pi_overlay_sbs_check.isChecked()),
+            overlay_draw_skeleton=bool(self.pi_overlay_skeleton_check.isChecked()),
+            overlay_hud_mode="both",
         )
+
+    def _refresh_pi_overlay_pose_combo(self) -> None:
+        from results_packaging.legacy_framewise_csv import list_pose_run_candidates
+
+        settings = self.pi_report_controller.state.settings
+        selected = settings.overlay_pose_run_dir
+        root = self.controller.state.session_root
+        self.pi_overlay_pose_combo.blockSignals(True)
+        self.pi_overlay_pose_combo.clear()
+        self.pi_overlay_pose_combo.addItem("(select S4 pose run…)", None)
+        selected_index = 0
+        if root is not None:
+            for i, candidate in enumerate(list_pose_run_candidates(root), start=1):
+                self.pi_overlay_pose_combo.addItem(
+                    candidate.label, str(candidate.run_dir)
+                )
+                if selected is not None and str(candidate.run_dir) == selected:
+                    selected_index = i
+        self.pi_overlay_pose_combo.setCurrentIndex(selected_index)
+        self.pi_overlay_pose_combo.blockSignals(False)
 
     def _selected_pi_bout_ids(self) -> tuple[str, ...]:
         state = self.controller.state
@@ -2661,6 +2744,24 @@ class BehavioralReviewPage(QWidget):
         self._sync_pi_source_identity()
         self._sync_pi_selected_bout_labels()
         self._populate_pi_reports_table()
+        settings = pi.settings
+        self._syncing_widgets = True
+        try:
+            self.pi_overlay_check.setChecked(bool(settings.overlays_enabled))
+            self.pi_overlay_behavior_check.setChecked(
+                bool(settings.overlay_include_behavior)
+            )
+            self.pi_overlay_pose_check.setChecked(bool(settings.overlay_include_pose))
+            self.pi_overlay_contact_check.setChecked(
+                bool(settings.overlay_include_contact)
+            )
+            self.pi_overlay_sbs_check.setChecked(bool(settings.overlay_include_sbs))
+            self.pi_overlay_skeleton_check.setChecked(
+                bool(settings.overlay_draw_skeleton)
+            )
+            self._refresh_pi_overlay_pose_combo()
+        finally:
+            self._syncing_widgets = False
         dest = pi.output_destination or (
             str(state.session_root / "results_exports")
             if state.session_root is not None
@@ -2874,6 +2975,97 @@ class BehavioralReviewPage(QWidget):
     def _on_legacy_csv_export_error(self, exc: BaseException) -> None:
         self.legacy_csv_status_label.setText(f"CSV export failed: {exc}")
         self.status_message.emit(f"legacy_framewise_v1 CSV failed: {exc}")
+
+    def _export_reviewed_overlay_media(self) -> None:
+        if self.pi_report_runner.is_running or self.pi_report_controller.state.task_running:
+            self.status_message.emit("A PI/media export is already running.")
+            return
+        state = self.controller.state
+        if state.session_root is None:
+            QMessageBox.warning(self, "No session", "Open a session first.")
+            return
+        try:
+            settings = self._read_pi_settings_from_widgets().validated()
+            media_settings = settings.to_reviewed_overlay_media_settings()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid overlay media settings", str(exc))
+            return
+        review = self.controller.selected_review_option()
+        if review is None or bool(review.is_draft):
+            QMessageBox.warning(
+                self,
+                "Select published review",
+                "Select a published S10 review before exporting reviewed overlay media.",
+            )
+            return
+        from overlay.export_s10_media import (
+            ReviewedOverlayMediaExportRequest,
+            run_reviewed_overlay_media_export,
+        )
+
+        self.pi_progress.setVisible(True)
+        self.pi_stage_label.setText("Exporting reviewed overlay media…")
+        self.status_message.emit("Reviewed overlay media export started…")
+        self._update_enabled()
+        context = GuiTaskContext(
+            task_id=uuid4().hex,
+            task_kind=GuiTaskKind.PI_REPORT_EXPORT,
+            project_dir=state.session_root,
+            raw_video_path=None,
+            generation=0,
+        )
+        request = ReviewedOverlayMediaExportRequest(
+            session_root=state.session_root,
+            review_run_dir=Path(review.run_dir),
+            settings=media_settings,
+        )
+
+        def operation(report) -> object:
+            return run_reviewed_overlay_media_export(
+                request,
+                progress_callback=report,
+            )
+
+        try:
+            self.pi_report_runner.start_progressive(
+                operation,
+                task_name="S10 reviewed overlay media export",
+                context=context,
+                on_success=self._on_reviewed_overlay_media_success,
+                on_error=self._on_reviewed_overlay_media_error,
+                on_finished=self._on_pi_report_finished,
+            )
+        except TaskAlreadyRunningError as exc:
+            self.pi_progress.setVisible(False)
+            QMessageBox.warning(self, "Export busy", str(exc))
+            self._update_enabled()
+
+    def _on_reviewed_overlay_media_success(self, result) -> None:
+        self.pi_progress.setVisible(False)
+        if getattr(result, "success", False):
+            self.pi_stage_label.setText(
+                f"Reviewed overlay media completed: {result.job_dir}"
+            )
+            self.status_message.emit(
+                f"Reviewed overlay media exported ({result.n_succeeded} clips)."
+            )
+        else:
+            self.pi_stage_label.setText(
+                f"Reviewed overlay media {result.status}: {result.error_message}"
+            )
+            self.status_message.emit(
+                f"Reviewed overlay media failed: {result.error_message}"
+            )
+        if self.controller.state.session_root is not None:
+            self.pi_report_controller.refresh_discovery(self.controller.state.session_root)
+            self._populate_pi_reports_table()
+        self._update_enabled()
+
+    def _on_reviewed_overlay_media_error(self, exc: BaseException) -> None:
+        self.pi_progress.setVisible(False)
+        self.pi_stage_label.setText(f"Reviewed overlay media failed: {exc}")
+        self.status_message.emit(f"Reviewed overlay media failed: {exc}")
+        self._update_enabled()
 
     def _export_pi_report(self) -> None:
         if self.pi_report_runner.is_running or self.pi_report_controller.state.task_running:

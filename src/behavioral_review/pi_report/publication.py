@@ -34,6 +34,7 @@ from behavioral_review.pi_report.contracts import (
     PI_REPORT_RUN_META_SCHEMA_VERSION,
     PI_REPORT_RUN_PREFIX,
     PI_REPORT_SETTINGS_SCHEMA_VERSION,
+    PI_SOURCE_REVIEWED,
     PROCESSING_LOG_FILENAME,
     QC_FILENAME,
     REPORT_DATA_FILENAME,
@@ -53,6 +54,7 @@ from behavioral_review.pi_report.contracts import (
 from behavioral_review.pi_report.media import (
     MediaMaterializationResult,
     materialize_report_media,
+    materialize_report_overlay_media,
 )
 from behavioral_review.pi_report.source import (
     PiReportSource,
@@ -98,8 +100,27 @@ class PiReportSettings:
     movflags: str | None = DEFAULT_MOVFLAGS
     write_zip: bool = False
     ffmpeg_executable: Path | None = None
+    # C3-6 opt-in overlays (default off). Annotated clips replace naked media when
+    # enabled; never duplicates both representations for the same bout.
+    overlays_enabled: bool = False
+    overlay_include_behavior: bool = True
+    overlay_include_pose: bool = False
+    overlay_pose_run_dir: Path | str | None = None
+    overlay_include_contact: bool = True
+    overlay_include_sbs: bool = True
+    overlay_draw_skeleton: bool = True
+    overlay_hud_mode: str = "both"
 
     def to_dict(self) -> dict[str, Any]:
+        overlays = bool(self.overlays_enabled)
+        pose_dir = (
+            str(Path(str(self.overlay_pose_run_dir)).expanduser().resolve())
+            if overlays
+            and self.overlay_include_pose
+            and self.overlay_pose_run_dir is not None
+            and str(self.overlay_pose_run_dir).strip()
+            else None
+        )
         return {
             "schema_version": PI_REPORT_SETTINGS_SCHEMA_VERSION,
             "pre_context_sec": float(self.pre_context_sec),
@@ -113,7 +134,15 @@ class PiReportSettings:
                 str(self.ffmpeg_executable) if self.ffmpeg_executable else None
             ),
             "gif_requested": False,
-            "overlays_requested": False,
+            "overlays_requested": overlays,
+            "overlays_enabled": overlays,
+            "overlay_include_behavior": bool(self.overlay_include_behavior),
+            "overlay_include_pose": bool(self.overlay_include_pose),
+            "overlay_pose_run_dir": pose_dir,
+            "overlay_include_contact": bool(self.overlay_include_contact),
+            "overlay_include_sbs": bool(self.overlay_include_sbs),
+            "overlay_draw_skeleton": bool(self.overlay_draw_skeleton),
+            "overlay_hud_mode": str(self.overlay_hud_mode),
             "default_channel_view": "exclusive",
             "include_contact_sbs": False,
         }
@@ -268,19 +297,49 @@ def publish_pi_report(
             _log(log_lines, f"encode {done}/{total}: {bout_id}")
             _emit(progress_callback, "encode_media", done, max(total, 1))
 
-        media = materialize_report_media(
-            cards=source.gallery.cards,
-            source_video=source.video_path,
-            report_root=staging_dir,
-            ffmpeg_executable=cfg.ffmpeg_executable,
-            crf=cfg.crf,
-            codec=cfg.codec,
-            pixel_format=cfg.pixel_format,
-            movflags=cfg.movflags,
-            fail_fast=True,
-            progress_callback=_media_progress,
-            cancellation_requested=cancellation_requested,
-        )
+        if cfg.overlays_enabled:
+            if source.source_type != PI_SOURCE_REVIEWED:
+                raise PiReportPublicationError(
+                    "PI report overlays require a published S10 reviewed source "
+                    "(refusing automated S8 label burn-in)."
+                )
+            if source.review_run_dir is None:
+                raise PiReportPublicationError(
+                    "PI report overlays require an explicit published review_run_dir."
+                )
+            _log(log_lines, "overlay media enabled (single annotated representation)")
+            media = materialize_report_overlay_media(
+                cards=source.gallery.cards,
+                review_run_dir=source.review_run_dir,
+                report_root=staging_dir,
+                include_behavior=bool(cfg.overlay_include_behavior),
+                include_pose=bool(cfg.overlay_include_pose),
+                pose_run_dir=cfg.overlay_pose_run_dir,
+                hud_mode=str(cfg.overlay_hud_mode),
+                include_contact=bool(cfg.overlay_include_contact),
+                include_sbs=bool(cfg.overlay_include_sbs),
+                draw_skeleton=bool(cfg.overlay_draw_skeleton),
+                crf=cfg.crf,
+                codec=cfg.codec,
+                pixel_format=cfg.pixel_format,
+                fail_fast=True,
+                progress_callback=_media_progress,
+                cancellation_requested=cancellation_requested,
+            )
+        else:
+            media = materialize_report_media(
+                cards=source.gallery.cards,
+                source_video=source.video_path,
+                report_root=staging_dir,
+                ffmpeg_executable=cfg.ffmpeg_executable,
+                crf=cfg.crf,
+                codec=cfg.codec,
+                pixel_format=cfg.pixel_format,
+                movflags=cfg.movflags,
+                fail_fast=True,
+                progress_callback=_media_progress,
+                cancellation_requested=cancellation_requested,
+            )
         if media.n_failed:
             raise PiReportPublicationError(
                 f"PI report media encode failures: {media.n_failed}"
@@ -397,9 +456,33 @@ def publish_pi_report(
                 "pixel_format": cfg.pixel_format,
                 "movflags": cfg.movflags,
                 "gif_requested": False,
-                "overlays_requested": False,
+                "overlays_requested": bool(cfg.overlays_enabled),
+                "overlays_enabled": bool(cfg.overlays_enabled),
+                "overlay_include_behavior": bool(cfg.overlay_include_behavior),
+                "overlay_include_pose": bool(cfg.overlay_include_pose),
+                "overlay_pose_run_dir": (
+                    str(Path(str(cfg.overlay_pose_run_dir)).expanduser().resolve())
+                    if cfg.overlays_enabled
+                    and cfg.overlay_include_pose
+                    and cfg.overlay_pose_run_dir is not None
+                    and str(cfg.overlay_pose_run_dir).strip()
+                    else None
+                ),
+                "overlay_include_contact": bool(cfg.overlay_include_contact),
+                "overlay_include_sbs": bool(cfg.overlay_include_sbs),
+                "overlay_draw_skeleton": bool(cfg.overlay_draw_skeleton),
+                "overlay_hud_mode": str(cfg.overlay_hud_mode),
             },
-            "media_policy": "video_previews",
+            "media_policy": (
+                "annotated_video_previews"
+                if cfg.overlays_enabled
+                else "video_previews"
+            ),
+            "overlay_provenance": (
+                dict(getattr(media, "overlay_provenance", {}) or {})
+                if cfg.overlays_enabled
+                else None
+            ),
             "media_mapping": dict(media.media_mapping),
             "n_bouts": source.gallery.n_cards,
             "n_media_succeeded": media.n_succeeded,

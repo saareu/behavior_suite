@@ -24,12 +24,19 @@ from behavioral_review.discovery import (
     reopen_reviewed_run,
     validate_s10_run_for_downstream,
 )
-from behavioral_review.pi_report.source import assert_not_draft_source
 from behavioral_review.source import ReviewSourcePackage, open_review_source
 from behavioral_review.sync import SyncMap
 from overlay.contracts import BehaviorSourceKind, OverlaySourceError
 from project.file_digest import sha256_file
 from results_packaging.media_csv_export.video import VideoProbe, probe_video
+
+
+def _assert_not_draft_source(path: Path | str) -> None:
+    """Lazy import avoids gallery↔overlay circular import at package load."""
+
+    from behavioral_review.pi_report.source import assert_not_draft_source
+
+    assert_not_draft_source(path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +109,7 @@ def verify_overlay_qc_source_integrity(source: OverlayQcSource) -> None:
             raise OverlaySourceError(
                 "Reviewed overlay QC source is missing review_run_dir for integrity check."
             )
-        assert_not_draft_source(source.review_run_dir)
+        _assert_not_draft_source(source.review_run_dir)
         validate_s10_run_for_downstream(source.review_run_dir)
 
     live_package = open_review_source(
@@ -260,7 +267,7 @@ def _resolve_reviewed(
     review_run_dir: Path,
     package_dir: Path | None,
 ) -> OverlayQcSource:
-    assert_not_draft_source(review_run_dir)
+    _assert_not_draft_source(review_run_dir)
     validated = validate_s10_run_for_downstream(review_run_dir)
     reopened = reopen_reviewed_run(review_run_dir)
     parent_dir = Path(validated["parent_package_dir"]).resolve()

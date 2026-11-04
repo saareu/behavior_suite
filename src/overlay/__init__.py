@@ -5,7 +5,8 @@ S8 ``execution.generate_overlay_video`` is deprecated and unsupported (O4
 closed); it remains parsed but unwired. Use ``export_behavioral_qc_clip`` /
 ``export_s4_pose_qc_clip`` / ``export_s2_pose_qc_clip`` /
 ``export_s3_pose_qc_clip`` / ``export_s5_segmentation_qc_clip`` /
-``export_mixed_pose_behavior_qc_clip`` / ``run_overlay_media_export`` instead.
+``export_mixed_pose_behavior_qc_clip`` / ``run_overlay_media_export`` /
+``run_reviewed_overlay_media_export`` instead.
 """
 
 from overlay.adapters import (
@@ -45,6 +46,9 @@ from overlay.contracts import (
     OVERLAY_S4_POSE_RENDERER_VERSION,
     OVERLAY_S5_SEGMENTATION_RENDERER_VERSION,
     OVERLAY_S9_MEDIA_RENDERER_VERSION,
+    OVERLAY_S10_MEDIA_RENDERER_VERSION,
+    REVIEWED_MEDIA_EXPORT_OVERLAY_JOB_KIND,
+    REVIEWED_MEDIA_EXPORT_OVERLAY_JOB_PREFIX,
     BehaviorSourceKind,
     FrameDomain,
     HudDirectionMode,
@@ -121,6 +125,15 @@ from overlay.export_s9_media import (
     run_overlay_media_export,
     verify_overlay_media_sources_integrity,
 )
+from overlay.export_s10_media import (
+    ReviewedOverlayMediaExportRequest,
+    ReviewedOverlayMediaExportSettings,
+    ReviewedOverlayMediaResolvedSources,
+    publish_reviewed_overlay_media_export,
+    resolve_reviewed_overlay_media_sources,
+    run_reviewed_overlay_media_export,
+    verify_reviewed_overlay_media_sources_integrity,
+)
 from overlay.plan import (
     BehavioralQcExportPlan,
     MixedPoseBehaviorQcExportPlan,
@@ -194,6 +207,9 @@ __all__ = [
     "OVERLAY_S4_POSE_RENDERER_VERSION",
     "OVERLAY_S5_SEGMENTATION_RENDERER_VERSION",
     "OVERLAY_S9_MEDIA_RENDERER_VERSION",
+    "OVERLAY_S10_MEDIA_RENDERER_VERSION",
+    "REVIEWED_MEDIA_EXPORT_OVERLAY_JOB_KIND",
+    "REVIEWED_MEDIA_EXPORT_OVERLAY_JOB_PREFIX",
     "BehaviorSourceKind",
     "BehavioralQcExportPlan",
     "ComposedFrame",
@@ -216,6 +232,9 @@ __all__ = [
     "OverlayMediaExportRequest",
     "OverlayMediaExportSettings",
     "OverlayMediaResolvedSources",
+    "ReviewedOverlayMediaExportRequest",
+    "ReviewedOverlayMediaExportSettings",
+    "ReviewedOverlayMediaResolvedSources",
     "OverlayMixedQcExportResult",
     "OverlayMixedQcSource",
     "OverlayObservation",
@@ -305,6 +324,10 @@ __all__ = [
     "resolve_overlay_s5_qc_source",
     "resolve_prepared_frame_timing",
     "run_overlay_media_export",
+    "run_reviewed_overlay_media_export",
+    "publish_reviewed_overlay_media_export",
+    "resolve_reviewed_overlay_media_sources",
+    "verify_reviewed_overlay_media_sources_integrity",
     "s2_score_visual_intensity",
     "s4_provenance_visual_class",
     "summarize_overlay_qc_project",

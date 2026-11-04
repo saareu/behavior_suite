@@ -17,6 +17,7 @@ OVERLAY_S3_POSE_RENDERER_VERSION: Final[str] = "overlay_renderer_c3_2_v1"
 OVERLAY_S5_SEGMENTATION_RENDERER_VERSION: Final[str] = "overlay_renderer_c3_3_v1"
 OVERLAY_MIXED_RENDERER_VERSION: Final[str] = "overlay_renderer_c3_4_v1"
 OVERLAY_S9_MEDIA_RENDERER_VERSION: Final[str] = "overlay_renderer_c3_5_v1"
+OVERLAY_S10_MEDIA_RENDERER_VERSION: Final[str] = "overlay_renderer_c3_6_v1"
 OVERLAY_ARTIFACT_MANIFEST_SCHEMA: Final[str] = "overlay_artifact_manifest_v1"
 OVERLAY_QC_EXPORT_DIRNAME: Final[str] = "results_exports"
 # Opt-in sibling of naked S9 media_export__* (never rewrites naked trees).
@@ -25,6 +26,16 @@ MEDIA_EXPORT_OVERLAY_JOB_KIND: Final[str] = "media_export_overlay"
 MEDIA_EXPORT_OVERLAY_SETTINGS_SCHEMA: Final[str] = "overlay_media_export_settings_v1"
 MEDIA_EXPORT_OVERLAY_MANIFEST_FILENAME: Final[str] = "export_job_manifest.json"
 MEDIA_EXPORT_OVERLAY_STAGING_DIRNAME: Final[str] = "_overlay_media_staging"
+# Opt-in sibling for published S10 reviewed overlay media (never rewrites naked/PI trees).
+REVIEWED_MEDIA_EXPORT_OVERLAY_JOB_PREFIX: Final[str] = "reviewed_media_export_overlay__"
+REVIEWED_MEDIA_EXPORT_OVERLAY_JOB_KIND: Final[str] = "reviewed_media_export_overlay"
+REVIEWED_MEDIA_EXPORT_OVERLAY_SETTINGS_SCHEMA: Final[str] = (
+    "reviewed_overlay_media_export_settings_v1"
+)
+REVIEWED_MEDIA_EXPORT_OVERLAY_MANIFEST_FILENAME: Final[str] = "export_job_manifest.json"
+REVIEWED_MEDIA_EXPORT_OVERLAY_STAGING_DIRNAME: Final[str] = (
+    "_reviewed_overlay_media_staging"
+)
 OVERLAY_QC_JOB_PREFIX: Final[str] = "overlay_qc_behavioral__"
 OVERLAY_QC_VIDEO_FILENAME: Final[str] = "behavioral_qc.mp4"
 OVERLAY_QC_MANIFEST_FILENAME: Final[str] = "overlay_artifact_manifest.json"
