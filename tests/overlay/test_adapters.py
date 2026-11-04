@@ -175,4 +175,5 @@ def test_s5_stub_always_unavailable() -> None:
     obs = stub.observe(timing, prepared_frame_idx=0)
     assert not stub.available
     assert not obs.available
-    assert "C1" in (obs.reason or "")
+    assert "unavailable" in (obs.reason or "").lower()
+    assert "make_s5_segmentation_adapter" in (obs.reason or "")

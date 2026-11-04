@@ -1,9 +1,10 @@
 # Post-v0.1.1 — Overlay Architecture (C0 audit → C1 foundation → C2-A/C2-B QC export)
 
-**Status:** **C3-2 accepted** (S3 Tracking Correction QC Video). Builds on C1 + C2-A + C2-B + C2-C + C3-0 + C3-1.
-**C3-2 base commit:** `183a3d06709a1c3b2923c21769b1cd9ab05d1ceb`
-**C3-2 implementation date:** 2026-11-04
-**C3-2 final acceptance date:** 2026-11-04
+**Status:** **C3-3 accepted** (S5 Blob Segmentation QC Video). Builds on C1 + C2-A + C2-B + C2-C + C3-0 + C3-1 + C3-2.
+**C3-3 base commit:** `6695c76d389a0a555aec6f6f00f6432009907057`
+**C3-3 implementation date:** 2026-11-04
+**C3-3 final acceptance date:** 2026-11-04
+**C3-2 accepted:** 2026-11-04 (S3 Tracking Correction QC Video)
 **C3-1 accepted:** 2026-11-04 (S2 Pose Inference QC Video)
 **C3-0 accepted:** 2026-11-04 (S8 Behavioral QC Export Accessibility)
 **C2-C base commit:** `f84ddd1714046fee477a18a8de805068a629bbdd`
@@ -13,7 +14,7 @@
 **C0 date:** 2026-11-01  
 **C2-B base commit:** `a1da1e170297619b338a1d63f0c8239f5cbf5ea0` (`origin/main` — C1/C2-A + mainline CSV)  
 **Companion:** [`post_v011_s10_review_and_visualization.md`](post_v011_s10_review_and_visualization.md) (Increment B closed; overlays → this document)  
-**Non-scope (still):** full-session QC exporter, PI/gallery overlay integration, S5 contour generation, live overlays, S5/S9/S10 overlay-media integration, scientific algorithm / schema mutation.  
+**Non-scope (still):** full-session QC exporter, PI/gallery overlay integration, live overlays, S9/S10 overlay-media integration, scientific algorithm / schema mutation. S5 contour **QC replay** shipped in C3-3; S5/S9/S10 media burn-in remains deferred.  
 **O4 closed:** S8 `execution.generate_overlay_video` is **deprecated and unsupported** (parsed for settings compatibility; runtime unchanged; never produced video).
 
 **Legend**
@@ -1573,3 +1574,137 @@ docs/roadmap/post_v011_overlay_architecture.md
 **C3-2 accepted** after provisional architectural review + final machine-event count verification + manual inclusive-interval pixel fixture. Commit/push authorized on this closure pass. Stop before C3-3. No S5 / S9-media / S10 overlay-media / science or artifact-schema changes.
 
 _End of C3-2 record._
+
+---
+
+## 21. Increment C3-3 — S5 Blob Segmentation QC Video (2026-11-04)
+
+### 21.1 Operator-visible product
+
+Offline prepared-rate QC MP4 that re-draws S5 blob contours by **replaying** the recorded segmentation algorithm on the pinned prepared video + static cropped background, using the completed run’s immutable `settings_used.yaml`.
+
+- Export family: `s5_segmentation`
+- Job dir: `results_exports/overlay_qc_s5_segmentation__{timestamp}/`
+- Video: `s5_segmentation_qc.mp4`
+- Renderer: `overlay_renderer_c3_3_v1`
+- Layers: `s5.segmentation` (+ optional `debug.frame_counter`)
+- Contours on by default; optional translucent masks and scalar text (`cc_count_raw` / `cc_count` / `min_inter_contour_dist`)
+- Clear on-frame legend: **S5 segmentation replay QC**
+
+### 21.2 Replay source contract
+
+| Pin | Authority |
+| --- | --- |
+| Explicit eligible S5 run | `validate_s5_run_for_downstream` (`completed` / `completed_with_warnings` + live S1 digests) |
+| Settings | Run `settings_used.yaml` → `BlobSegmentationSettings` (never GUI `working_settings.json`) |
+| Settings fingerprint | SHA256 over validated segmentation knobs only |
+| S1 prepared video / sync / background | Live digests must match `run_meta.source_s1` |
+| Parquet | Lineage/immutability only — **never** contour source |
+| Implementation ids | `blob_features.segmentation.segment_frame` + `blob_features.preview.draw_contour_overlay` |
+
+**Reject:** incomplete runs, missing settings/background, digest mismatches, fingerprint mismatches, cross-session mixes. **Never** auto-select newest. If exact replay cannot be established → explicit unavailable (no approximate contours).
+
+**Persisted vs recomputed:** parquet stores scalars only. Masks/contours are **not** persisted and must be recomputed per prepared frame. Processing is per-frame independent (static background; no adaptive/session-stateful segmentation).
+
+### 21.3 Geometry semantics
+
+- Contours = recorded-algorithm external topology from `segment_frame` (same science as batch/preview).
+- Optional masks = translucent binary mask overlay (not a second algorithm).
+- Optional scalar text = live topology scalars from the same `segment_frame` result (faithful to drawn contours; not gap-filled parquet values).
+- No invented blob identities, no S3/S4 track substitution, no contours inferred from parquet.
+
+### 21.4 Prepared-frame timing
+
+- Encoding domain = S1 prepared video FPS / inclusive prepared interval.
+- SyncMap = prepared-identity 1:1 map for compositor reuse (**not** dense 120 Hz).
+- Dense parquet `frame_idx` is never used as a video seek index.
+- Export loop feeds the just-decoded prepared frame into a replay cache so drawn pixels match encoded frames.
+
+### 21.5 Export family and GUI
+
+- Shared compositor + streaming FFmpeg pipe + progress/cancel + atomic publish + integrity revalidation + manifest + discovery.
+- GUI: shared QC Overlay Export dialog family `s5_segmentation`; entry on S5 Blob Features page (`Export QC Overlay Video…`).
+- Workspace/session safety unchanged (bound session `results_exports/`).
+
+### 21.6 Replay dependency requirements
+
+| Requirement | Behavior |
+| --- | --- |
+| Recorded settings | Immutable run `settings_used.yaml` only (never GUI `working_settings.json`) |
+| S1 digests | Live prepared video / sync / cropped background must match `run_meta.source_s1` |
+| Implementation | Always `blob_features.segmentation.segment_frame` (no second algorithm; no parquet→contour) |
+| Multi-Otsu (`blob_threshold == -2`) | Requires `scikit-image`; resolve/integrity **fail closed** if missing (no approximate threshold) |
+| Runtime disclosure | Manifest / settings sidecar / processing log record current host `python` / OpenCV / NumPy / skimage versions |
+| Historical environment | **Not recorded** in S5 `run_meta.json`; QC **does not claim** historical environment equivalence |
+
+### 21.7 Reproducibility limitations
+
+- Contours are **QC replay**, not stored truth polygons.
+- Residual OpenCV seek-vs-sequential decode risk is mitigated for export by frame-cache; draw chrome (legend / scalar text / darken / frame counter) is intentionally excluded from geometry equivalence.
+- Multi-Otsu requires a working `scikit-image` on the QC host; original extraction library versions were never persisted, so bit-identical historical environment replay is not asserted.
+- Temporal gap-fill / dense parquet features do not affect drawn contours.
+- Full-session / dense-rate export still deferred.
+- Nodes / track identities are **never** inferred from segmentation (no S3/S4 substitution; parquet scalars are lineage only).
+
+### 21.8 Laboratory validation (E-session)
+
+- Run: `blob_features__20261021T152749` (eligible completed; Multi-Otsu `blob_threshold=-2`).
+- Clip: prepared `[971, 1000]` → 30 frames @ ~119.05 fps.
+- Job: `overlay_qc_s5_segmentation__20261104T163310` (lab smoke).
+- Upstream digests unchanged (parquet, settings, background, prepared video).
+- Contour availability: full (30/30 frames with contours; `cc_count_raw=2` on sampled frames).
+- Preview vs export green-contour overlap OK on sampled frames 971 / 986 / 1000 (`all_comparisons_ok=true`).
+- Evidence: `tmp_overlay_c33_e_session_s5_segmentation_qc/` + smoke script `scripts/_overlay_c33_e_session_s5_segmentation_qc_smoke.py` (local; not committed).
+
+### 21.8a Isolated contour-equivalence (final acceptance)
+
+Independent of legends, labels, frame counters, scalar text, and other QC decorations:
+
+| Item | Result |
+| --- | --- |
+| Frames evaluated | Prepared `971, 976, 981, 986, 991, 996, 1000` (7 frames) |
+| Method | Same prepared BGR (via replay cache) + pinned `settings_used` + pinned `cropped_background` → `segment_frame` vs `S5SegmentationReplayAdapter.observe`; compare with `np.array_equal` on every contour array and on the binary mask |
+| Contour geometry | **Exact match** on all 7 frames |
+| Masks | **Exact match** on all 7 frames |
+| Differences | None |
+| Identities | No `track` / blob-id keys in observation payload; `no_invented_blob_identities=true` |
+| Upstream digests | Unchanged after equivalence probe |
+
+Evidence JSON (local): `tmp_overlay_c33_e_session_s5_segmentation_qc/C33_ISOLATED_CONTOUR_EQUIVALENCE.json`.
+
+### 21.9 Remaining performance limitations
+
+- Per-frame re-segmentation (Multi-Otsu + morphology) dominates wall time; short prepared-rate clips remain the supported path.
+- Full-session / dense-rate QC export is still deferred.
+- Loading/decoding long prepared videos for wide intervals remains I/O heavy (same shared FFmpeg/OpenCV path as prior QC families).
+
+### 21.10 Files touched (C3-3)
+
+```text
+src/overlay/source_s5.py
+src/overlay/export_s5.py
+src/overlay/adapters/segmentation.py
+src/overlay/layers/segmentation.py
+src/overlay/contracts.py
+src/overlay/plan.py
+src/overlay/discovery.py
+src/overlay/__init__.py
+src/overlay/adapters/__init__.py
+src/overlay/layers/__init__.py
+src/ui/controllers/overlay_qc_export_support.py
+src/ui/controllers/overlay_qc_export_controller.py
+src/ui/dialogs/overlay_qc_export_dialog.py
+src/ui/pages/blob_features_page.py
+tests/overlay/test_export_s5_segmentation_qc.py
+tests/overlay/test_adapters.py
+tests/ui/test_overlay_qc_export_gui.py
+docs/roadmap/post_v011_overlay_architecture.md
+```
+
+(Smoke script / generated MP4 / PNG / tmp lab outputs remain local and are **not** committed.)
+
+### 21.11 Closure
+
+**C3-3 accepted** after provisional architectural review + replay-dependency disclosure hardening + isolated contour-equivalence on E-session frames. Commit/push authorized on this closure pass. Stop before C3-4. No mixed overlays, S9/S10 media integration, full-session exports, or scientific / artifact-schema changes.
+
+_End of C3-3 record._

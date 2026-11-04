@@ -21,6 +21,7 @@ from overlay.contracts import (
     default_s2_pose_qc_layers,
     default_s3_pose_qc_layers,
     default_s4_pose_qc_layers,
+    default_s5_segmentation_qc_layers,
     validate_layer_selection,
 )
 from overlay.style import DrawConfig
@@ -578,6 +579,127 @@ def plan_s3_prepared_interval(
         draw_skeleton=draw_skeleton,
         show_machine_corrections=bool(show_machine_corrections),
         show_manual_corrections=bool(show_manual_corrections),
+        include_frame_counter=include_frame_counter,
+        style=draw_style,
+        pre_context_sec=float(pre_context_sec),
+        post_context_sec=float(post_context_sec),
+        clip_bounds=bounds,
+        notes=notes,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class S5SegmentationQcExportPlan:
+    """Explicit offline prepared-rate S5 blob-segmentation QC export plan."""
+
+    scope_kind: OverlayExportScopeKind
+    prepared_interval: PreparedFrameInterval
+    selected_layers: tuple[LayerId, ...]
+    plateau_policy: PlateauPolicy = PlateauPolicy.LAST_IN_PLATEAU
+    frame_domain: FrameDomain = FrameDomain.PREPARED
+    show_contours: bool = True
+    show_masks: bool = False
+    show_scalar_text: bool = False
+    mask_opacity: float = 0.35
+    include_frame_counter: bool = True
+    style: DrawConfig = field(default_factory=DrawConfig)
+    pre_context_sec: float = 0.0
+    post_context_sec: float = 0.0
+    clip_bounds: ClipBounds | None = None
+    notes: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "scope_kind": self.scope_kind.value,
+            "prepared_interval": self.prepared_interval.to_dict(),
+            "selected_layers": [x.value for x in self.selected_layers],
+            "plateau_policy": self.plateau_policy.value,
+            "frame_domain": self.frame_domain.value,
+            "show_contours": self.show_contours,
+            "show_masks": self.show_masks,
+            "show_scalar_text": self.show_scalar_text,
+            "mask_opacity": float(self.mask_opacity),
+            "include_frame_counter": self.include_frame_counter,
+            "pre_context_sec": self.pre_context_sec,
+            "post_context_sec": self.post_context_sec,
+            "clip_bounds": None if self.clip_bounds is None else self.clip_bounds.to_dict(),
+            "style": self.style.to_dict(),
+            "notes": list(self.notes),
+        }
+
+
+def plan_s5_prepared_interval(
+    *,
+    prepared_frame_idx_start: int,
+    prepared_frame_idx_end: int,
+    source_fps: float,
+    source_n_frames: int,
+    include_frame_counter: bool = True,
+    show_contours: bool = True,
+    show_masks: bool = False,
+    show_scalar_text: bool = False,
+    mask_opacity: float = 0.35,
+    selected_layers: list[str | LayerId] | tuple[str | LayerId, ...] | None = None,
+    plateau_policy: PlateauPolicy = PlateauPolicy.LAST_IN_PLATEAU,
+    pre_context_sec: float = 0.0,
+    post_context_sec: float = 0.0,
+    style: DrawConfig | None = None,
+    notes: tuple[str, ...] = (),
+) -> S5SegmentationQcExportPlan:
+    """Build an S5 segmentation QC plan from an inclusive prepared-frame interval."""
+
+    interval = PreparedFrameInterval(
+        start=int(prepared_frame_idx_start),
+        end=int(prepared_frame_idx_end),
+    )
+    bounds = compute_clip_bounds(
+        prepared_frame_idx_start=interval.start,
+        prepared_frame_idx_end=interval.end,
+        source_fps=float(source_fps),
+        source_n_frames=int(source_n_frames),
+        pre_context_sec=float(pre_context_sec),
+        post_context_sec=float(post_context_sec),
+    )
+    export_interval = PreparedFrameInterval(
+        start=int(bounds.clip_frame_idx_start),
+        end=int(bounds.clip_frame_idx_end),
+    )
+    layers = (
+        validate_layer_selection(list(selected_layers))
+        if selected_layers is not None
+        else default_s5_segmentation_qc_layers(
+            include_frame_counter=include_frame_counter
+        )
+    )
+    if LayerId.S5_SEGMENTATION not in layers:
+        raise OverlayContractError(
+            "S5 segmentation QC plan requires the s5.segmentation layer."
+        )
+    opacity = float(mask_opacity)
+    if opacity < 0.0 or opacity > 1.0:
+        raise OverlayContractError(
+            f"mask_opacity must be in [0, 1]; got {opacity}."
+        )
+    draw_style = style or DrawConfig(
+        darken_alpha=0.95,
+        legend_text=True,
+        extra={
+            "show_contours": bool(show_contours),
+            "show_masks": bool(show_masks),
+            "show_scalar_text": bool(show_scalar_text),
+            "mask_opacity": opacity,
+            "contour_thickness": 2,
+        },
+    )
+    return S5SegmentationQcExportPlan(
+        scope_kind=OverlayExportScopeKind.PREPARED_INTERVAL,
+        prepared_interval=export_interval,
+        selected_layers=layers,
+        plateau_policy=plateau_policy,
+        show_contours=bool(show_contours),
+        show_masks=bool(show_masks),
+        show_scalar_text=bool(show_scalar_text),
+        mask_opacity=opacity,
         include_frame_counter=include_frame_counter,
         style=draw_style,
         pre_context_sec=float(pre_context_sec),

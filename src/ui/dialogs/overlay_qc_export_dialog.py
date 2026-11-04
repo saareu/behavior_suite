@@ -35,6 +35,7 @@ from overlay.discovery import (
     EXPORT_FAMILY_S2_POSE,
     EXPORT_FAMILY_S3_POSE,
     EXPORT_FAMILY_S4_POSE,
+    EXPORT_FAMILY_S5_SEGMENTATION,
 )
 from ui.controllers.overlay_qc_export_controller import (
     BOUT_COMBO_LIMIT,
@@ -108,6 +109,11 @@ class OverlayQcExportDialog(QDialog):
                 self._select_combo_by_run_id(self.s2_combo, launch.s2_run_id)
             if launch.export_family == EXPORT_FAMILY_S3_POSE and launch.s3_run_id:
                 self._select_combo_by_run_id(self.s3_combo, launch.s3_run_id)
+            if (
+                launch.export_family == EXPORT_FAMILY_S5_SEGMENTATION
+                and launch.s5_run_id
+            ):
+                self._select_combo_by_run_id(self.s5_combo, launch.s5_run_id)
             if launch.package_run_id:
                 self._select_combo_by_run_id(self.package_combo, launch.package_run_id)
             if launch.review_run_id:
@@ -187,6 +193,9 @@ class OverlayQcExportDialog(QDialog):
         self.family_combo.addItem("S4 finalized-pose QC", EXPORT_FAMILY_S4_POSE)
         self.family_combo.addItem("S2 inferred-pose QC", EXPORT_FAMILY_S2_POSE)
         self.family_combo.addItem("S3 accepted tracked-pose QC", EXPORT_FAMILY_S3_POSE)
+        self.family_combo.addItem(
+            "S5 blob-segmentation QC", EXPORT_FAMILY_S5_SEGMENTATION
+        )
         self.family_combo.currentIndexChanged.connect(self._on_family_changed)
         form.addRow("Export type", self.family_combo)
 
@@ -215,6 +224,10 @@ class OverlayQcExportDialog(QDialog):
         self.s3_combo = QComboBox()
         self.s3_combo.currentIndexChanged.connect(self._apply_settings_from_widgets)
         form.addRow("S3 run", self.s3_combo)
+
+        self.s5_combo = QComboBox()
+        self.s5_combo.currentIndexChanged.connect(self._apply_settings_from_widgets)
+        form.addRow("S5 run", self.s5_combo)
 
         self.scope_combo = QComboBox()
         self.scope_combo.addItem("Prepared-frame interval", "prepared_interval")
@@ -280,6 +293,19 @@ class OverlayQcExportDialog(QDialog):
             "Manual correction event indicators (manual_corrections.json)"
         )
         self.show_manual_corrections.setChecked(True)
+        self.show_contours = QCheckBox("Draw S5 segmentation contours (default)")
+        self.show_contours.setChecked(True)
+        self.show_masks = QCheckBox("Draw translucent S5 segmentation masks")
+        self.show_masks.setChecked(False)
+        self.show_scalar_text = QCheckBox(
+            "Show replay scalar text (cc_count / min distance)"
+        )
+        self.show_scalar_text.setChecked(False)
+        self.mask_opacity_spin = QDoubleSpinBox()
+        self.mask_opacity_spin.setRange(0.0, 1.0)
+        self.mask_opacity_spin.setSingleStep(0.05)
+        self.mask_opacity_spin.setDecimals(2)
+        self.mask_opacity_spin.setValue(0.35)
         self.nodes_only_label = QLabel("")
         self.nodes_only_label.setWordWrap(True)
         self.nodes_only_label.setStyleSheet("color: #666;")
@@ -290,6 +316,10 @@ class OverlayQcExportDialog(QDialog):
         form.addRow(self.show_confidence)
         form.addRow(self.show_machine_corrections)
         form.addRow(self.show_manual_corrections)
+        form.addRow(self.show_contours)
+        form.addRow(self.show_masks)
+        form.addRow(self.show_scalar_text)
+        form.addRow("Mask opacity", self.mask_opacity_spin)
         form.addRow(self.nodes_only_label)
 
         self.pre_context_spin = QDoubleSpinBox()
@@ -382,6 +412,10 @@ class OverlayQcExportDialog(QDialog):
             self.show_confidence,
             self.show_machine_corrections,
             self.show_manual_corrections,
+            self.show_contours,
+            self.show_masks,
+            self.show_scalar_text,
+            self.mask_opacity_spin,
         ):
             if isinstance(widget, QComboBox):
                 widget.currentIndexChanged.connect(self._apply_settings_from_widgets)
@@ -409,6 +443,7 @@ class OverlayQcExportDialog(QDialog):
         self.s4_combo.blockSignals(True)
         self.s2_combo.blockSignals(True)
         self.s3_combo.blockSignals(True)
+        self.s5_combo.blockSignals(True)
         self.package_combo.clear()
         self.review_combo.clear()
         self.s4_combo.clear()
@@ -483,11 +518,24 @@ class OverlayQcExportDialog(QDialog):
             self.s3_combo.addItem(
                 launch.s3_run_id, (launch.s3_run_id, launch.s3_run_dir)
             )
+        self.s5_combo.clear()
+        self.s5_combo.addItem("(select eligible S5 run)", None)
+        for run_id, path in launch.s5_options:
+            self.s5_combo.addItem(run_id, (run_id, path))
+        if (
+            launch.s5_run_id
+            and launch.s5_run_dir is not None
+            and self.s5_combo.findData((launch.s5_run_id, launch.s5_run_dir)) < 0
+        ):
+            self.s5_combo.addItem(
+                launch.s5_run_id, (launch.s5_run_id, launch.s5_run_dir)
+            )
         self.package_combo.blockSignals(False)
         self.review_combo.blockSignals(False)
         self.s4_combo.blockSignals(False)
         self.s2_combo.blockSignals(False)
         self.s3_combo.blockSignals(False)
+        self.s5_combo.blockSignals(False)
 
     def _on_family_changed(self) -> None:
         if self.family_combo.currentData() != EXPORT_FAMILY_BEHAVIORAL:
@@ -500,6 +548,11 @@ class OverlayQcExportDialog(QDialog):
         if family != EXPORT_FAMILY_S3_POSE:
             self.show_machine_corrections.setChecked(True)
             self.show_manual_corrections.setChecked(True)
+        if family == EXPORT_FAMILY_S5_SEGMENTATION:
+            self.show_contours.setChecked(True)
+            self.show_masks.setChecked(False)
+            self.show_scalar_text.setChecked(False)
+            self.mask_opacity_spin.setValue(0.35)
         self._apply_settings_from_widgets()
         self._update_enabled()
 
@@ -636,6 +689,10 @@ class OverlayQcExportDialog(QDialog):
             show_confidence=self.show_confidence.isChecked(),
             show_machine_corrections=self.show_machine_corrections.isChecked(),
             show_manual_corrections=self.show_manual_corrections.isChecked(),
+            show_contours=self.show_contours.isChecked(),
+            show_masks=self.show_masks.isChecked(),
+            show_scalar_text=self.show_scalar_text.isChecked(),
+            mask_opacity=float(self.mask_opacity_spin.value()),
             pre_context_sec=float(self.pre_context_spin.value()),
             post_context_sec=float(self.post_context_spin.value()),
         )
@@ -653,6 +710,7 @@ class OverlayQcExportDialog(QDialog):
         s4 = self._selected_s4()
         s2 = self._selected_s2()
         s3 = self._selected_s3()
+        s5 = self._selected_s5()
         self.source_summary_label.setText(
             self.controller.describe_source(
                 settings=self.controller.state.settings,
@@ -661,6 +719,7 @@ class OverlayQcExportDialog(QDialog):
                 s4_run_id=None if s4 is None else s4[0],
                 s2_run_id=None if s2 is None else s2[0],
                 s3_run_id=None if s3 is None else s3[0],
+                s5_run_id=None if s5 is None else s5[0],
             )
         )
         self.output_label.setText(self.controller.state.output_destination or "—")
@@ -701,6 +760,13 @@ class OverlayQcExportDialog(QDialog):
         run_id, path = data
         return str(run_id), Path(path)
 
+    def _selected_s5(self) -> tuple[str, Path] | None:
+        data = self.s5_combo.currentData()
+        if data is None:
+            return None
+        run_id, path = data
+        return str(run_id), Path(path)
+
     def _export(self) -> None:
         if self.task_runner.is_running or self.controller.state.task_running:
             QMessageBox.warning(self, "Busy", "A QC overlay export is already running.")
@@ -723,6 +789,7 @@ class OverlayQcExportDialog(QDialog):
         s4 = self._selected_s4()
         s2 = self._selected_s2()
         s3 = self._selected_s3()
+        s5 = self._selected_s5()
         try:
             identity = self.controller.begin_export_launch(
                 session_root=session,  # type: ignore[arg-type]
@@ -738,6 +805,8 @@ class OverlayQcExportDialog(QDialog):
                 s2_run_id=None if s2 is None else s2[0],
                 s3_run_dir=None if s3 is None else s3[1],
                 s3_run_id=None if s3 is None else s3[0],
+                s5_run_dir=None if s5 is None else s5[1],
+                s5_run_id=None if s5 is None else s5[0],
             )
         except OverlayQcExportUiError as exc:
             QMessageBox.warning(self, "Cannot export QC overlay", str(exc))
@@ -915,6 +984,7 @@ class OverlayQcExportDialog(QDialog):
                 self.s4_combo,
                 self.s2_combo,
                 self.s3_combo,
+                self.s5_combo,
                 self.scope_combo,
                 self.prep_start_spin,
                 self.prep_end_spin,
@@ -929,6 +999,10 @@ class OverlayQcExportDialog(QDialog):
                 self.show_confidence,
                 self.show_machine_corrections,
                 self.show_manual_corrections,
+                self.show_contours,
+                self.show_masks,
+                self.show_scalar_text,
+                self.mask_opacity_spin,
                 self.pre_context_spin,
                 self.post_context_spin,
             ):
@@ -944,6 +1018,7 @@ class OverlayQcExportDialog(QDialog):
         s4_family = family == EXPORT_FAMILY_S4_POSE
         s2_family = family == EXPORT_FAMILY_S2_POSE
         s3_family = family == EXPORT_FAMILY_S3_POSE
+        s5_family = family == EXPORT_FAMILY_S5_SEGMENTATION
         bout = self.scope_combo.currentData() == "bout_span"
         reviewed = self.source_kind_combo.currentData() == "s10_reviewed"
         self.family_combo.setEnabled(not lock)
@@ -953,6 +1028,7 @@ class OverlayQcExportDialog(QDialog):
         self.s4_combo.setEnabled(s4_family)
         self.s2_combo.setEnabled(s2_family)
         self.s3_combo.setEnabled(s3_family)
+        self.s5_combo.setEnabled(s5_family)
         self.scope_combo.setEnabled(behavioral)
         self.hud_combo.setEnabled(behavioral)
         self.include_contact.setEnabled(behavioral)
@@ -961,6 +1037,10 @@ class OverlayQcExportDialog(QDialog):
         self.show_confidence.setEnabled(s2_family)
         self.show_machine_corrections.setEnabled(s3_family)
         self.show_manual_corrections.setEnabled(s3_family)
+        self.show_contours.setEnabled(s5_family)
+        self.show_masks.setEnabled(s5_family)
+        self.show_scalar_text.setEnabled(s5_family)
+        self.mask_opacity_spin.setEnabled(s5_family and self.show_masks.isChecked())
         self.include_counter.setEnabled(True)
         self.pre_context_spin.setEnabled(True)
         self.post_context_spin.setEnabled(True)

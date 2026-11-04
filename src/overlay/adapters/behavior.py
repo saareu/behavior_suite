@@ -545,16 +545,23 @@ def make_s10_reviewed_sbs(
 
 
 def make_s5_segmentation_stub() -> UnavailableAdapter:
-    """S5 contours deferred past C1 (no contour generation)."""
+    """Legacy unavailable stub retained for adapter-contract tests.
+
+    Prefer ``make_s5_segmentation_adapter`` / ``export_s5_segmentation_qc_clip``
+    (C3-3) for real S5 segmentation-replay QC.
+    """
 
     return UnavailableAdapter(
         layer_id=LayerId.S5_SEGMENTATION,
         source_identity=SourceIdentity(
             subsystem="blob_features",
             run_id=None,
-            extra={"deferred": "C3 optional"},
+            extra={"deferred": "use make_s5_segmentation_adapter"},
         ),
-        reason="S5 segmentation overlay deferred past C1; no contour generation.",
+        reason=(
+            "S5 segmentation stub is unavailable; use make_s5_segmentation_adapter "
+            "for C3-3 QC replay."
+        ),
     )
 
 

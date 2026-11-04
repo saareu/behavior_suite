@@ -26,19 +26,27 @@ from overlay.adapters.pose import (
     make_s3_tracked_pose_adapter,
     make_s4_final_pose_adapter,
 )
+from overlay.adapters.segmentation import (
+    PreparedFrameReplayCache,
+    S5SegmentationReplayAdapter,
+    make_s5_segmentation_adapter,
+)
 
 __all__ = [
     "DirectionalExclusiveAdapter",
     "OverlayStageAdapter",
     "ParallelChannelAdapter",
+    "PreparedFrameReplayCache",
     "PreparedPoseAdapter",
     "S4FinalPoseAdapter",
+    "S5SegmentationReplayAdapter",
     "SourceIdentity",
     "UnavailableAdapter",
     "behavior_source_kind_label",
     "make_s2_inferred_pose_adapter",
     "make_s3_tracked_pose_adapter",
     "make_s4_final_pose_adapter",
+    "make_s5_segmentation_adapter",
     "make_s5_segmentation_stub",
     "make_s8_contact",
     "make_s8_exclusive_a_to_b",

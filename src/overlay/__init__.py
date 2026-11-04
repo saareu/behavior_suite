@@ -1,23 +1,26 @@
-"""Shared headless overlay compositor (C1 foundation + C2-A/C2-B QC export).
+"""Shared headless overlay compositor (C1 foundation + C2-A/C2-B/C3 QC export).
 
 Overlays are opt-in. This package never mutates scientific artifacts.
 S8 ``execution.generate_overlay_video`` is deprecated and unsupported (O4
 closed); it remains parsed but unwired. Use ``export_behavioral_qc_clip`` /
 ``export_s4_pose_qc_clip`` / ``export_s2_pose_qc_clip`` /
-``export_s3_pose_qc_clip`` instead.
+``export_s3_pose_qc_clip`` / ``export_s5_segmentation_qc_clip`` instead.
 """
 
 from overlay.adapters import (
     DirectionalExclusiveAdapter,
     OverlayStageAdapter,
     ParallelChannelAdapter,
+    PreparedFrameReplayCache,
     PreparedPoseAdapter,
     S4FinalPoseAdapter,
+    S5SegmentationReplayAdapter,
     SourceIdentity,
     UnavailableAdapter,
     make_s2_inferred_pose_adapter,
     make_s3_tracked_pose_adapter,
     make_s4_final_pose_adapter,
+    make_s5_segmentation_adapter,
     make_s5_segmentation_stub,
     make_s8_contact,
     make_s8_exclusive_a_to_b,
@@ -36,6 +39,7 @@ from overlay.contracts import (
     OVERLAY_S2_POSE_RENDERER_VERSION,
     OVERLAY_S3_POSE_RENDERER_VERSION,
     OVERLAY_S4_POSE_RENDERER_VERSION,
+    OVERLAY_S5_SEGMENTATION_RENDERER_VERSION,
     BehaviorSourceKind,
     FrameDomain,
     HudDirectionMode,
@@ -55,6 +59,7 @@ from overlay.contracts import (
     default_s2_pose_qc_layers,
     default_s3_pose_qc_layers,
     default_s4_pose_qc_layers,
+    default_s5_segmentation_qc_layers,
     layers_for_hud_mode,
     s2_score_visual_intensity,
     s4_provenance_visual_class,
@@ -65,6 +70,7 @@ from overlay.discovery import (
     EXPORT_FAMILY_S2_POSE,
     EXPORT_FAMILY_S3_POSE,
     EXPORT_FAMILY_S4_POSE,
+    EXPORT_FAMILY_S5_SEGMENTATION,
     OverlayQcJobSummary,
     OverlayQcProjectSummary,
     summarize_overlay_qc_project,
@@ -88,18 +94,25 @@ from overlay.export_s3 import (
     build_s3_pose_adapters,
     export_s3_pose_qc_clip,
 )
+from overlay.export_s5 import (
+    OverlayS5SegmentationQcExportResult,
+    build_s5_segmentation_adapters,
+    export_s5_segmentation_qc_clip,
+)
 from overlay.plan import (
     BehavioralQcExportPlan,
     PreparedFrameInterval,
     S2PoseQcExportPlan,
     S3PoseQcExportPlan,
     S4PoseQcExportPlan,
+    S5SegmentationQcExportPlan,
     dense_sample_window_for_prepared_interval,
     plan_bout_span,
     plan_prepared_interval,
     plan_s2_prepared_interval,
     plan_s3_prepared_interval,
     plan_s4_prepared_interval,
+    plan_s5_prepared_interval,
 )
 from overlay.provenance import (
     OverlayArtifactManifest,
@@ -127,6 +140,11 @@ from overlay.source_s4 import (
     resolve_overlay_s4_qc_source,
     verify_overlay_s4_qc_source_integrity,
 )
+from overlay.source_s5 import (
+    OverlayS5QcSource,
+    resolve_overlay_s5_qc_source,
+    verify_overlay_s5_qc_source_integrity,
+)
 from overlay.style import DrawConfig
 from overlay.timing import PreparedFrameTiming, resolve_prepared_frame_timing
 
@@ -135,11 +153,13 @@ __all__ = [
     "EXPORT_FAMILY_S2_POSE",
     "EXPORT_FAMILY_S3_POSE",
     "EXPORT_FAMILY_S4_POSE",
+    "EXPORT_FAMILY_S5_SEGMENTATION",
     "OVERLAY_ARTIFACT_MANIFEST_SCHEMA",
     "OVERLAY_RENDERER_VERSION",
     "OVERLAY_S2_POSE_RENDERER_VERSION",
     "OVERLAY_S3_POSE_RENDERER_VERSION",
     "OVERLAY_S4_POSE_RENDERER_VERSION",
+    "OVERLAY_S5_SEGMENTATION_RENDERER_VERSION",
     "BehaviorSourceKind",
     "BehavioralQcExportPlan",
     "ComposedFrame",
@@ -170,12 +190,15 @@ __all__ = [
     "OverlayS3QcSource",
     "OverlayS4PoseQcExportResult",
     "OverlayS4QcSource",
+    "OverlayS5QcSource",
+    "OverlayS5SegmentationQcExportResult",
     "OverlaySourceError",
     "OverlayStageAdapter",
     "OverlayTimingError",
     "ParallelChannelAdapter",
     "PlateauPolicy",
     "PreparedFrameInterval",
+    "PreparedFrameReplayCache",
     "PreparedFrameTiming",
     "PreparedPoseAdapter",
     "PreparedVideoIdentity",
@@ -184,6 +207,8 @@ __all__ = [
     "S4FinalPoseAdapter",
     "S4PoseQcExportPlan",
     "S4ProvenanceVisualClass",
+    "S5SegmentationQcExportPlan",
+    "S5SegmentationReplayAdapter",
     "SourceIdentity",
     "UnavailableAdapter",
     "build_behavioral_adapters",
@@ -191,20 +216,24 @@ __all__ = [
     "build_s2_pose_adapters",
     "build_s3_pose_adapters",
     "build_s4_pose_adapters",
+    "build_s5_segmentation_adapters",
     "collect_evidence",
     "default_behavioral_qc_layers",
     "default_s2_pose_qc_layers",
     "default_s3_pose_qc_layers",
     "default_s4_pose_qc_layers",
+    "default_s5_segmentation_qc_layers",
     "dense_sample_window_for_prepared_interval",
     "export_behavioral_qc_clip",
     "export_s2_pose_qc_clip",
     "export_s3_pose_qc_clip",
     "export_s4_pose_qc_clip",
+    "export_s5_segmentation_qc_clip",
     "layers_for_hud_mode",
     "make_s2_inferred_pose_adapter",
     "make_s3_tracked_pose_adapter",
     "make_s4_final_pose_adapter",
+    "make_s5_segmentation_adapter",
     "make_s5_segmentation_stub",
     "make_s8_contact",
     "make_s8_exclusive_a_to_b",
@@ -220,10 +249,12 @@ __all__ = [
     "plan_s2_prepared_interval",
     "plan_s3_prepared_interval",
     "plan_s4_prepared_interval",
+    "plan_s5_prepared_interval",
     "resolve_overlay_qc_source",
     "resolve_overlay_s2_qc_source",
     "resolve_overlay_s3_qc_source",
     "resolve_overlay_s4_qc_source",
+    "resolve_overlay_s5_qc_source",
     "resolve_prepared_frame_timing",
     "s2_score_visual_intensity",
     "s4_provenance_visual_class",
@@ -233,4 +264,5 @@ __all__ = [
     "verify_overlay_s2_qc_source_integrity",
     "verify_overlay_s3_qc_source_integrity",
     "verify_overlay_s4_qc_source_integrity",
+    "verify_overlay_s5_qc_source_integrity",
 ]

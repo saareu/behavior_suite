@@ -232,11 +232,14 @@ class BlobFeaturesPage(QWidget):
         self.run_button.clicked.connect(self._run_extraction)
         self.open_output_button = QPushButton("Open S5 run folder")
         self.open_output_button.clicked.connect(self._open_output_folder)
+        self.export_qc_overlay_button = QPushButton("Export QC Overlay Video…")
+        self.export_qc_overlay_button.clicked.connect(self._open_overlay_qc_export)
         actions.addWidget(self.preview_button)
         actions.addWidget(self.preview_bookmarks_button)
         actions.addWidget(self.reset_defaults_button)
         actions.addWidget(self.run_button)
         actions.addWidget(self.open_output_button)
+        actions.addWidget(self.export_qc_overlay_button)
         actions.addStretch(1)
 
         self.busy_indicator = QProgressBar()
@@ -991,6 +994,44 @@ class BlobFeaturesPage(QWidget):
         else:
             self.status_message.emit("Opened S5 run folder.")
 
+    def _open_overlay_qc_export(self) -> None:
+        from ui.controllers.overlay_qc_export_support import (
+            plan_s5_segmentation_overlay_launch,
+        )
+        from ui.dialogs.overlay_qc_export_dialog import open_overlay_qc_export_dialog
+
+        session_root = self.controller.state.session_root
+        summary = self.controller.state.summary
+        if session_root is None:
+            QMessageBox.warning(
+                self,
+                "No session",
+                "Open an eligible S1 session before exporting S5 QC overlay video.",
+            )
+            return
+        eligible: tuple[tuple[str, Path], ...] = ()
+        if summary is not None:
+            eligible = tuple(
+                (run.run_id, run.run_dir) for run in summary.eligible_runs
+            )
+        selected = self.controller.selected_s5_run()
+        plan = plan_s5_segmentation_overlay_launch(
+            session_root=session_root,
+            selected_s5_run_id=None if selected is None else selected.run_id,
+            selected_s5_run_dir=None if selected is None else selected.run_dir,
+            eligible_s5_runs=eligible,
+        )
+        if plan.blocked or plan.launch is None:
+            QMessageBox.warning(
+                self,
+                plan.block_title or "S5 run not eligible",
+                plan.block_message
+                or "Select an eligible completed S5 run before exporting QC overlay.",
+            )
+            return
+        open_overlay_qc_export_dialog(self, launch=plan.launch)
+        self.status_message.emit("QC overlay export dialog closed.")
+
     def _populate_runs_table(self) -> None:
         summary = self.controller.state.summary
         selected = self.controller.state.selected_s5_run_id
@@ -1268,6 +1309,9 @@ class BlobFeaturesPage(QWidget):
             or self.controller.state.last_result is not None
         )
         self.open_output_button.setEnabled(has_output and not busy)
+        summary = self.controller.state.summary
+        has_eligible_s5 = bool(summary is not None and summary.eligible_runs)
+        self.export_qc_overlay_button.setEnabled(has_eligible_s5 and not busy)
         multi = self.controller.state.last_multi_preview
         has_multi = multi is not None and bool(multi.items)
         self.multi_prev_button.setEnabled(has_multi and not frame_locked)

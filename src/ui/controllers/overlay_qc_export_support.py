@@ -11,7 +11,9 @@ from uuid import uuid4
 from overlay.contracts import HudDirectionMode
 from overlay.discovery import OverlayQcJobSummary
 
-OverlayQcExportFamily = Literal["behavioral", "s4_pose", "s2_pose", "s3_pose"]
+OverlayQcExportFamily = Literal[
+    "behavioral", "s4_pose", "s2_pose", "s3_pose", "s5_segmentation"
+]
 OverlayQcBehaviorSource = Literal["s8_automated", "s10_reviewed"]
 OverlayQcScopeKind = Literal["prepared_interval", "bout_span"]
 
@@ -51,15 +53,25 @@ class OverlayQcUiSettings:
     show_confidence: bool = False
     show_machine_corrections: bool = True
     show_manual_corrections: bool = True
+    show_contours: bool = True
+    show_masks: bool = False
+    show_scalar_text: bool = False
+    mask_opacity: float = 0.35
     pre_context_sec: float = 0.0
     post_context_sec: float = 0.0
 
     def validated(self) -> OverlayQcUiSettings:
         family = str(self.export_family).strip().lower()
-        if family not in {"behavioral", "s4_pose", "s2_pose", "s3_pose"}:
+        if family not in {
+            "behavioral",
+            "s4_pose",
+            "s2_pose",
+            "s3_pose",
+            "s5_segmentation",
+        }:
             raise ValueError(
-                "export_family must be behavioral, s4_pose, s2_pose, or s3_pose, "
-                f"got {family!r}."
+                "export_family must be behavioral, s4_pose, s2_pose, s3_pose, "
+                f"or s5_segmentation, got {family!r}."
             )
         source = str(self.source_kind).strip().lower()
         if source not in {"s8_automated", "s10_reviewed"}:
@@ -82,13 +94,28 @@ class OverlayQcUiSettings:
 
         start = int(self.prepared_frame_idx_start)
         end = int(self.prepared_frame_idx_end)
-        if family in {"s4_pose", "s2_pose", "s3_pose"} or scope == "prepared_interval":
+        if (
+            family in {"s4_pose", "s2_pose", "s3_pose", "s5_segmentation"}
+            or scope == "prepared_interval"
+        ):
             if start < 0 or end < 0:
                 raise ValueError("Prepared frame indices must be >= 0.")
             if start > end:
                 raise ValueError(
                     f"Prepared interval start ({start}) > end ({end})."
                 )
+        opacity = float(self.mask_opacity)
+        if opacity < 0.0 or opacity > 1.0:
+            raise ValueError(f"mask_opacity must be in [0, 1]; got {opacity}.")
+        if family == "s5_segmentation" and not (
+            bool(self.show_contours)
+            or bool(self.show_masks)
+            or bool(self.show_scalar_text)
+        ):
+            raise ValueError(
+                "S5 segmentation QC requires at least one of contours, masks, "
+                "or scalar text."
+            )
 
         bout_id = None if self.bout_id is None else str(self.bout_id).strip() or None
         start_sample = (
@@ -133,6 +160,10 @@ class OverlayQcUiSettings:
             show_confidence=bool(self.show_confidence),
             show_machine_corrections=bool(self.show_machine_corrections),
             show_manual_corrections=bool(self.show_manual_corrections),
+            show_contours=bool(self.show_contours),
+            show_masks=bool(self.show_masks),
+            show_scalar_text=bool(self.show_scalar_text),
+            mask_opacity=opacity,
             pre_context_sec=float(self.pre_context_sec),
             post_context_sec=float(self.post_context_sec),
         )
@@ -152,6 +183,11 @@ class OverlayQcUiSettings:
         if settings.export_family == "s3_pose":
             return (
                 f"S3 pose QC prepared [{settings.prepared_frame_idx_start}, "
+                f"{settings.prepared_frame_idx_end}]"
+            )
+        if settings.export_family == "s5_segmentation":
+            return (
+                f"S5 segmentation QC prepared [{settings.prepared_frame_idx_start}, "
                 f"{settings.prepared_frame_idx_end}]"
             )
         if settings.scope_kind == "bout_span":
@@ -184,6 +220,8 @@ class OverlayQcRequestIdentity:
     s2_run_dir: Path | None
     s3_run_id: str | None
     s3_run_dir: Path | None
+    s5_run_id: str | None
+    s5_run_dir: Path | None
     settings: OverlayQcUiSettings
 
     @staticmethod
@@ -202,6 +240,8 @@ class OverlayQcRequestIdentity:
         s2_run_dir: Path | None = None,
         s3_run_id: str | None = None,
         s3_run_dir: Path | None = None,
+        s5_run_id: str | None = None,
+        s5_run_dir: Path | None = None,
         settings: OverlayQcUiSettings,
     ) -> OverlayQcRequestIdentity:
         return OverlayQcRequestIdentity(
@@ -231,6 +271,10 @@ class OverlayQcRequestIdentity:
             s3_run_dir=(
                 s3_run_dir.resolve(strict=False) if s3_run_dir is not None else None
             ),
+            s5_run_id=None if s5_run_id is None else str(s5_run_id),
+            s5_run_dir=(
+                s5_run_dir.resolve(strict=False) if s5_run_dir is not None else None
+            ),
             settings=settings.validated(),
         )
 
@@ -252,6 +296,8 @@ class OverlayQcLaunchContext:
     s2_run_id: str | None = None
     s3_run_dir: Path | None = None
     s3_run_id: str | None = None
+    s5_run_dir: Path | None = None
+    s5_run_id: str | None = None
     lock_family: bool = True
     lock_source_kind: bool = False
     locked_source_kind: OverlayQcBehaviorSource | None = None
@@ -265,6 +311,7 @@ class OverlayQcLaunchContext:
     s4_options: tuple[tuple[str, Path], ...] = ()
     s2_options: tuple[tuple[str, Path], ...] = ()
     s3_options: tuple[tuple[str, Path], ...] = ()
+    s5_options: tuple[tuple[str, Path], ...] = ()
     skeleton_nodes_only_disclosure: str | None = None
     unaccepted_s3_message: str | None = None
 
@@ -419,6 +466,8 @@ def overlay_qc_table_rows(
             source = job.s2_run_id
         elif job.export_family == "s3_pose":
             source = job.s3_run_id
+        elif job.export_family == "s5_segmentation":
+            source = job.s5_run_id
         else:
             source = job.review_run_id or job.package_run_id or job.source_kind or "—"
         interval = "—"
@@ -452,6 +501,7 @@ def source_identity_summary(
     s4_run_id: str | None,
     s2_run_id: str | None = None,
     s3_run_id: str | None = None,
+    s5_run_id: str | None = None,
 ) -> str:
     cfg = settings.validated()
     parts = [f"family={cfg.export_family}"]
@@ -467,6 +517,11 @@ def source_identity_summary(
         parts.append(f"skeleton={'yes' if cfg.draw_skeleton else 'no'}")
         parts.append(f"auto={'yes' if cfg.show_machine_corrections else 'no'}")
         parts.append(f"manual={'yes' if cfg.show_manual_corrections else 'no'}")
+    elif cfg.export_family == "s5_segmentation":
+        parts.append(f"s5={s5_run_id or '—'}")
+        parts.append(f"contours={'yes' if cfg.show_contours else 'no'}")
+        parts.append(f"masks={'yes' if cfg.show_masks else 'no'}")
+        parts.append(f"scalars={'yes' if cfg.show_scalar_text else 'no'}")
     else:
         parts.append(f"source={cfg.source_kind}")
         parts.append(f"package={package_run_id or '—'}")
@@ -624,6 +679,89 @@ def plan_s3_pose_overlay_launch(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class S5SegmentationOverlayLaunchPlan:
+    """S5 page opener outcome: shared-dialog launch or an actionable block."""
+
+    launch: OverlayQcLaunchContext | None = None
+    block_title: str | None = None
+    block_message: str | None = None
+
+    @property
+    def blocked(self) -> bool:
+        return self.launch is None
+
+
+_S5_NO_ELIGIBLE_MESSAGE = (
+    "S5 Blob Segmentation QC export requires an explicitly selected eligible "
+    "completed S5 run (status completed/completed_with_warnings) whose recorded "
+    "S1 prepared video, sync, and cropped background digests still match. "
+    "Incomplete, stale-source, or settings-missing runs are not eligible. "
+    "The exporter never auto-selects the newest S5 run."
+)
+
+
+def plan_s5_segmentation_overlay_launch(
+    *,
+    session_root: Path | str,
+    selected_s5_run_id: str | None,
+    selected_s5_run_dir: Path | None,
+    eligible_s5_runs: Sequence[tuple[str, Path]],
+) -> S5SegmentationOverlayLaunchPlan:
+    """Build S5-page launch context for blob-segmentation QC.
+
+    Prefills only an explicitly selected eligible run (or the sole eligible
+    option). Never auto-picks newest.
+    """
+
+    root = Path(session_root).expanduser().resolve(strict=False)
+    options = tuple((str(run_id), Path(run_dir)) for run_id, run_dir in eligible_s5_runs)
+    selected_id = (
+        None if selected_s5_run_id is None else str(selected_s5_run_id).strip() or None
+    )
+    selected_dir = None if selected_s5_run_dir is None else Path(selected_s5_run_dir)
+
+    if selected_id is not None and selected_dir is not None:
+        in_eligible = any(run_id == selected_id for run_id, _ in options)
+        if not in_eligible:
+            return S5SegmentationOverlayLaunchPlan(
+                block_title="S5 run not eligible",
+                block_message=(
+                    f"Selected run {selected_id!r} is not currently eligible for "
+                    f"downstream/QC use. {_S5_NO_ELIGIBLE_MESSAGE}"
+                ),
+            )
+        prefill_id = selected_id
+        prefill_dir = selected_dir
+    elif len(options) == 1:
+        prefill_id, prefill_dir = options[0]
+    else:
+        prefill_id, prefill_dir = None, None
+
+    if not options and prefill_dir is None:
+        return S5SegmentationOverlayLaunchPlan(
+            block_title="No eligible S5 run",
+            block_message=_S5_NO_ELIGIBLE_MESSAGE,
+        )
+
+    return S5SegmentationOverlayLaunchPlan(
+        launch=OverlayQcLaunchContext(
+            session_root=root,
+            export_family="s5_segmentation",
+            s5_run_dir=prefill_dir,
+            s5_run_id=prefill_id,
+            lock_family=True,
+            s5_options=options,
+            preferred_prepared_start=0,
+            preferred_prepared_end=29,
+            skeleton_nodes_only_disclosure=(
+                "S5 contours are QC replay via the run settings_used.yaml + "
+                "segment_frame; masks/contours are not stored polygons."
+            ),
+        )
+    )
+
+
 def actionable_overlay_error(exc: BaseException) -> str:
     """Map backend exceptions to short operator-facing messages."""
 
@@ -653,6 +791,13 @@ def actionable_overlay_error(exc: BaseException) -> str:
         or ("s3" in lowered and ("missing" in lowered or "not eligible" in lowered))
     ):
         return f"Missing or ineligible accepted S3 tracked pose: {message}"
+    if (
+        "blob_features" in lowered
+        or "settings_used" in lowered
+        or "cropped_background" in lowered
+        or ("s5" in lowered and ("missing" in lowered or "not eligible" in lowered))
+    ):
+        return f"Missing or ineligible S5 segmentation replay source: {message}"
     if "states" in lowered and ("s8" in lowered or "s10" in lowered or "missing" in lowered):
         return f"Missing S8/S10 behavioral states: {message}"
     if "topology" in lowered or "skeleton" in lowered or "sleap" in lowered:
@@ -675,11 +820,13 @@ __all__ = [
     "OverlayQcScopeKind",
     "OverlayQcUiSettings",
     "S3PoseOverlayLaunchPlan",
+    "S5SegmentationOverlayLaunchPlan",
     "S8BehavioralOverlayLaunchPlan",
     "actionable_overlay_error",
     "overlay_qc_table_rows",
     "plan_s2_pose_overlay_launch",
     "plan_s3_pose_overlay_launch",
+    "plan_s5_segmentation_overlay_launch",
     "plan_s8_behavioral_overlay_launch",
     "source_identity_summary",
 ]

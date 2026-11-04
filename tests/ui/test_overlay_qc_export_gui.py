@@ -1136,3 +1136,88 @@ def test_s3_page_entry_button_present() -> None:
     page = TrackingReviewPage(TrackingReviewController())
     assert page.export_qc_overlay_button.text() == "Export QC Overlay Video…"
     assert callable(page._open_overlay_qc_export)
+
+
+def test_s5_dialog_family_launch_and_option_toggles(tmp_path: Path) -> None:
+    from ui.controllers.overlay_qc_export_support import (
+        plan_s5_segmentation_overlay_launch,
+    )
+
+    session = tmp_path / "session"
+    session.mkdir()
+    s5_a = session / "blob_features" / "blob_features__a"
+    s5_b = session / "blob_features" / "blob_features__b"
+    s5_a.mkdir(parents=True)
+    s5_b.mkdir(parents=True)
+    plan = plan_s5_segmentation_overlay_launch(
+        session_root=session,
+        selected_s5_run_id="blob_features__a",
+        selected_s5_run_dir=s5_a,
+        eligible_s5_runs=(("blob_features__a", s5_a), ("blob_features__b", s5_b)),
+    )
+    assert plan.blocked is False
+    assert plan.launch is not None
+    launch = plan.launch
+    assert launch.export_family == "s5_segmentation"
+    assert launch.lock_family is True
+    assert launch.s5_run_id == "blob_features__a"
+
+    dialog = OverlayQcExportDialog(launch=launch)
+    dialog.show()
+    assert dialog.family_combo.currentData() == "s5_segmentation"
+    assert dialog.family_combo.isEnabled() is False
+    assert dialog.s5_combo.isEnabled() is True
+    assert dialog.s3_combo.isEnabled() is False
+    assert dialog.show_contours.isEnabled() is True
+    assert dialog.show_masks.isEnabled() is True
+    assert dialog.show_scalar_text.isEnabled() is True
+    assert dialog.draw_skeleton.isEnabled() is False
+    dialog.show_contours.setChecked(True)
+    dialog.show_masks.setChecked(True)
+    dialog.show_scalar_text.setChecked(False)
+    dialog.mask_opacity_spin.setValue(0.25)
+    settings = dialog._read_settings()
+    assert settings.export_family == "s5_segmentation"
+    assert settings.show_contours is True
+    assert settings.show_masks is True
+    assert settings.mask_opacity == pytest.approx(0.25)
+    dialog.close()
+
+
+def test_s5_ineligible_run_blocks_with_actionable_message(tmp_path: Path) -> None:
+    from ui.controllers.overlay_qc_export_support import (
+        plan_s5_segmentation_overlay_launch,
+    )
+
+    session = tmp_path / "session"
+    session.mkdir()
+    s5 = session / "blob_features" / "blob_features__stale"
+    s5.mkdir(parents=True)
+    plan = plan_s5_segmentation_overlay_launch(
+        session_root=session,
+        selected_s5_run_id="blob_features__stale",
+        selected_s5_run_dir=s5,
+        eligible_s5_runs=(),
+    )
+    assert plan.blocked is True
+    assert plan.launch is None
+    assert plan.block_title == "S5 run not eligible"
+    assert "eligible" in (plan.block_message or "").lower()
+
+    none = plan_s5_segmentation_overlay_launch(
+        session_root=session,
+        selected_s5_run_id=None,
+        selected_s5_run_dir=None,
+        eligible_s5_runs=(),
+    )
+    assert none.blocked is True
+    assert none.block_title == "No eligible S5 run"
+
+
+def test_s5_page_entry_button_present() -> None:
+    from ui.controllers.blob_features_controller import BlobFeaturesController
+    from ui.pages.blob_features_page import BlobFeaturesPage
+
+    page = BlobFeaturesPage(BlobFeaturesController())
+    assert page.export_qc_overlay_button.text() == "Export QC Overlay Video…"
+    assert callable(page._open_overlay_qc_export)

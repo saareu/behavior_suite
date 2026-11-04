@@ -5,15 +5,17 @@ from overlay.layers.base import OverlayLayer
 from overlay.layers.behavior import ExclusiveHudLayer, ParallelLedLayer
 from overlay.layers.debug import FrameCounterLayer, draw_unavailable_badge
 from overlay.layers.pose import PoseLayer
+from overlay.layers.segmentation import SegmentationLayer
 
 
 def default_layer_registry() -> dict[LayerId, OverlayLayer]:
-    """C1 registry of drawable layers (S5 omitted / unavailable)."""
+    """Drawable layer registry (S5 segmentation replay shipped in C3-3)."""
 
     return {
         LayerId.S2_POSE_INFERRED: PoseLayer(LayerId.S2_POSE_INFERRED),
         LayerId.S3_POSE_TRACKED: PoseLayer(LayerId.S3_POSE_TRACKED),
         LayerId.S4_POSE_FINAL: PoseLayer(LayerId.S4_POSE_FINAL),
+        LayerId.S5_SEGMENTATION: SegmentationLayer(),
         LayerId.S8_EXCLUSIVE_A_TO_B: ExclusiveHudLayer(
             LayerId.S8_EXCLUSIVE_A_TO_B, stack_index=0
         ),
@@ -32,6 +34,7 @@ __all__ = [
     "OverlayLayer",
     "ParallelLedLayer",
     "PoseLayer",
+    "SegmentationLayer",
     "default_layer_registry",
     "draw_unavailable_badge",
 ]
