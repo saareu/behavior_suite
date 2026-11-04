@@ -16,6 +16,7 @@ from overlay.contracts import (
 )
 from overlay.discovery import STATUS_CANCELED
 from overlay.export import OverlayQcExportResult, OverlayS4PoseQcExportResult
+from overlay.export_s2 import OverlayS2PoseQcExportResult
 from overlay.provenance import OverlayArtifactManifest
 from ui.controllers.overlay_qc_export_controller import (
     OverlayQcExportController,
@@ -25,12 +26,14 @@ from ui.controllers.overlay_qc_export_support import (
     OverlayQcLaunchContext,
     OverlayQcUiSettings,
     actionable_overlay_error,
+    plan_s2_pose_overlay_launch,
     plan_s8_behavioral_overlay_launch,
 )
 from ui.dialogs.overlay_qc_export_dialog import OverlayQcExportDialog
 from ui.pages.behavioral_arbitration_page import BehavioralArbitrationPage
 from ui.pages.behavioral_review_page import BehavioralReviewPage
 from ui.pages.pose_finalization_page import PoseFinalizationPage
+from ui.pages.pose_inference_page import PoseInferencePage
 from ui.pages.results_packaging_page import ResultsPackagingPage
 from ui.tasks import GuiTaskKind
 
@@ -82,6 +85,25 @@ def _s4_result(session: Path) -> OverlayS4PoseQcExportResult:
     manifest_path = job / "overlay_artifact_manifest.json"
     manifest_path.write_text("{}", encoding="utf-8")
     return OverlayS4PoseQcExportResult(
+        job_dir=job,
+        video_path=video,
+        manifest_path=manifest_path,
+        manifest=_manifest(),
+        frames_written=30,
+        output_fps=30.0,
+        unavailable_layers=(),
+        qc_status="completed",
+    )
+
+
+def _s2_result(session: Path) -> OverlayS2PoseQcExportResult:
+    job = session / "results_exports" / "overlay_qc_s2_pose__test"
+    job.mkdir(parents=True, exist_ok=True)
+    video = job / "s2_pose_qc.mp4"
+    video.write_bytes(b"x")
+    manifest_path = job / "overlay_artifact_manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    return OverlayS2PoseQcExportResult(
         job_dir=job,
         video_path=video,
         manifest_path=manifest_path,
@@ -925,3 +947,111 @@ def test_existing_s4_s9_s10_overlay_entry_points_unchanged() -> None:
     assert callable(s4._open_overlay_qc_export)
     assert callable(s9._open_overlay_qc_export)
     assert callable(s10._open_overlay_qc_export)
+
+
+def test_s2_settings_and_explicit_selection_gate(tmp_path: Path) -> None:
+    s2 = OverlayQcUiSettings(
+        export_family="s2_pose",
+        prepared_frame_idx_start=0,
+        prepared_frame_idx_end=29,
+        draw_skeleton=True,
+        show_confidence=True,
+        include_frame_counter=True,
+    ).validated()
+    assert s2.export_family == "s2_pose"
+    assert s2.show_confidence is True
+
+    session = tmp_path / "session"
+    session.mkdir()
+    s2_dir = session / "pose_inference" / "bottomup__demo"
+    s2_dir.mkdir(parents=True)
+    ctrl = OverlayQcExportController(
+        s2_exporter=MagicMock(return_value=_s2_result(session)),
+    )
+    ctrl.set_session(session)
+    reason = ctrl.cannot_export_reason(
+        session_root=session,
+        settings=OverlayQcUiSettings(export_family="s2_pose"),
+        s2_run_dir=None,
+        s2_run_id=None,
+    )
+    assert reason is not None
+    assert "S2" in reason
+
+    identity = ctrl.begin_export_launch(
+        session_root=session,
+        settings=s2,
+        s2_run_dir=s2_dir,
+        s2_run_id="bottomup__demo",
+    )
+    assert identity.export_family == "s2_pose"
+    assert identity.s2_run_id == "bottomup__demo"
+    assert identity.s2_run_dir == s2_dir.resolve(strict=False)
+
+
+def test_s2_dialog_family_launch_and_confidence_option(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    session.mkdir()
+    s2_a = session / "pose_inference" / "bottomup__a"
+    s2_b = session / "pose_inference" / "bottomup__b"
+    s2_a.mkdir(parents=True)
+    s2_b.mkdir(parents=True)
+    launch = plan_s2_pose_overlay_launch(
+        session_root=session,
+        selected_s2_run_id="bottomup__a",
+        selected_s2_run_dir=s2_a,
+        eligible_s2_runs=(("bottomup__a", s2_a), ("bottomup__b", s2_b)),
+    )
+    assert launch.export_family == "s2_pose"
+    assert launch.lock_family is True
+    assert launch.s2_run_id == "bottomup__a"
+    assert launch.skeleton_nodes_only_disclosure
+
+    dialog = OverlayQcExportDialog(launch=launch)
+    dialog.show()
+    assert dialog.family_combo.currentData() == "s2_pose"
+    assert dialog.family_combo.isEnabled() is False
+    assert dialog.s2_combo.isEnabled() is True
+    assert dialog.s4_combo.isEnabled() is False
+    assert dialog.draw_skeleton.isEnabled() is True
+    assert dialog.show_confidence.isEnabled() is True
+    dialog.show_confidence.setChecked(True)
+    settings = dialog._read_settings()
+    assert settings.export_family == "s2_pose"
+    assert settings.show_confidence is True
+    dialog.close()
+
+
+def test_s2_page_entry_button_present() -> None:
+    from ui.controllers.pose_inference_controller import PoseInferenceController
+
+    page = PoseInferencePage(PoseInferenceController())
+    assert page.overlay_qc_button.text() == "Export QC Overlay Video…"
+    assert callable(page._open_overlay_qc_export)
+
+
+def test_s2_opener_prefills_only_when_unambiguous(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    session.mkdir()
+    only = session / "pose_inference" / "bottomup__only"
+    only.mkdir(parents=True)
+    launch = plan_s2_pose_overlay_launch(
+        session_root=session,
+        selected_s2_run_id=None,
+        selected_s2_run_dir=None,
+        eligible_s2_runs=(("bottomup__only", only),),
+    )
+    assert launch.s2_run_id == "bottomup__only"
+
+    a = session / "pose_inference" / "bottomup__a"
+    b = session / "pose_inference" / "bottomup__b"
+    a.mkdir(parents=True)
+    b.mkdir(parents=True)
+    ambiguous = plan_s2_pose_overlay_launch(
+        session_root=session,
+        selected_s2_run_id=None,
+        selected_s2_run_dir=None,
+        eligible_s2_runs=(("bottomup__a", a), ("bottomup__b", b)),
+    )
+    assert ambiguous.s2_run_id is None
+    assert len(ambiguous.s2_options) == 2

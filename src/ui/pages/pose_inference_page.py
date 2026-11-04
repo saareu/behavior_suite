@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -153,6 +156,8 @@ class PoseInferencePage(QWidget):
         action_row = QHBoxLayout()
         self.open_overlay_button = QPushButton("Open overlay")
         self.open_overlay_button.clicked.connect(self._open_overlay)
+        self.overlay_qc_button = QPushButton("Export QC Overlay Video…")
+        self.overlay_qc_button.clicked.connect(self._open_overlay_qc_export)
         self.open_run_folder_button = QPushButton("Open run folder")
         self.open_run_folder_button.clicked.connect(self._open_run_folder)
         self.copy_settings_button = QPushButton("Rerun with copied settings")
@@ -161,6 +166,7 @@ class PoseInferencePage(QWidget):
         self.continue_s3_button.clicked.connect(self._continue_to_s3)
         for button in (
             self.open_overlay_button,
+            self.overlay_qc_button,
             self.open_run_folder_button,
             self.copy_settings_button,
             self.continue_s3_button,
@@ -480,11 +486,13 @@ class PoseInferencePage(QWidget):
             self.technical_details.setPlainText(self.controller.technical_details())
             for button in (
                 self.open_overlay_button,
+                self.overlay_qc_button,
                 self.open_run_folder_button,
                 self.copy_settings_button,
                 self.continue_s3_button,
             ):
                 button.setEnabled(False)
+            self.overlay_qc_button.setToolTip("")
             self.continue_s3_button.setText("Run Subsystem 3")
             self.continue_s3_button.setToolTip("")
             self.technical_details.setMaximumHeight(100)
@@ -520,6 +528,15 @@ class PoseInferencePage(QWidget):
         self.open_overlay_button.setEnabled(
             bool(run.artifact_presence.get("overlay_mp4"))
             and not self.controller.state.task_running
+        )
+        self.overlay_qc_button.setEnabled(
+            self.controller.selected_run_can_feed_s3()
+            and not self.controller.state.task_running
+        )
+        s2_qc_reason = self.controller.selected_run_s3_unavailable_reason()
+        self.overlay_qc_button.setToolTip(
+            s2_qc_reason
+            or "Export a short prepared-rate S2 inferred-pose QC overlay video."
         )
         self.open_run_folder_button.setEnabled(
             run.run_dir.is_dir() and not self.controller.state.task_running
@@ -840,10 +857,64 @@ class PoseInferencePage(QWidget):
     def _open_overlay(self) -> None:
         self._perform_action(self.controller.open_selected_overlay, "Opened overlay")
 
+    def _open_overlay_qc_export(self) -> None:
+        from tracking_correction.runner import validate_s2_handoff
+        from ui.controllers.overlay_qc_export_support import plan_s2_pose_overlay_launch
+        from ui.dialogs.overlay_qc_export_dialog import open_overlay_qc_export_dialog
+
+        state = self.controller.state
+        session = state.session_root
+        if session is None:
+            QMessageBox.warning(
+                self, "No session", "Open a session before exporting QC overlay video."
+            )
+            return
+        summary = state.summary
+        eligible: list[tuple[str, Path]] = []
+        if summary is not None:
+            for run in summary.runs:
+                if run.classification != COMPLETE_REVIEWABLE:
+                    continue
+                try:
+                    validate_s2_handoff(run.run_dir)
+                except Exception:  # noqa: BLE001 - skip ineligible discovery rows
+                    continue
+                eligible.append((run.run_id, run.run_dir))
+        selected = self.controller.selected_run
+        selected_id = None if selected is None else selected.run_id
+        selected_dir = None if selected is None else selected.run_dir
+        if (
+            selected is not None
+            and self.controller.selected_run_can_feed_s3()
+            and all(run_id != selected.run_id for run_id, _ in eligible)
+        ):
+            eligible.insert(0, (selected.run_id, selected.run_dir))
+            selected_id = selected.run_id
+            selected_dir = selected.run_dir
+        if not eligible:
+            QMessageBox.warning(
+                self,
+                "No eligible S2 run",
+                "Select a completed S2 pose-inference run that passes S2 handoff "
+                "validation (same eligibility as Subsystem 3). Newest is never "
+                "auto-selected.",
+            )
+            return
+        launch = plan_s2_pose_overlay_launch(
+            session_root=Path(session),
+            selected_s2_run_id=selected_id,
+            selected_s2_run_dir=selected_dir,
+            eligible_s2_runs=tuple(eligible),
+        )
+        open_overlay_qc_export_dialog(self, launch=launch)
+        self.status_message.emit("QC overlay export dialog closed.")
+
     def _open_run_folder(self) -> None:
         self._perform_action(self.controller.open_selected_run_folder, "Opened run folder")
 
-    def _perform_action(self, action, success_message: str) -> None:
+    def _perform_action(
+        self, action: Callable[[], Any], success_message: str
+    ) -> None:
         if not self._guard_idle(success_message.lower()):
             return
         try:

@@ -11,7 +11,7 @@ from uuid import uuid4
 from overlay.contracts import HudDirectionMode
 from overlay.discovery import OverlayQcJobSummary
 
-OverlayQcExportFamily = Literal["behavioral", "s4_pose"]
+OverlayQcExportFamily = Literal["behavioral", "s4_pose", "s2_pose"]
 OverlayQcBehaviorSource = Literal["s8_automated", "s10_reviewed"]
 OverlayQcScopeKind = Literal["prepared_interval", "bout_span"]
 
@@ -48,14 +48,16 @@ class OverlayQcUiSettings:
     include_sbs: bool = True
     include_frame_counter: bool = True
     draw_skeleton: bool = True
+    show_confidence: bool = False
     pre_context_sec: float = 0.0
     post_context_sec: float = 0.0
 
     def validated(self) -> OverlayQcUiSettings:
         family = str(self.export_family).strip().lower()
-        if family not in {"behavioral", "s4_pose"}:
+        if family not in {"behavioral", "s4_pose", "s2_pose"}:
             raise ValueError(
-                f"export_family must be behavioral or s4_pose, got {family!r}."
+                "export_family must be behavioral, s4_pose, or s2_pose, "
+                f"got {family!r}."
             )
         source = str(self.source_kind).strip().lower()
         if source not in {"s8_automated", "s10_reviewed"}:
@@ -78,7 +80,7 @@ class OverlayQcUiSettings:
 
         start = int(self.prepared_frame_idx_start)
         end = int(self.prepared_frame_idx_end)
-        if family == "s4_pose" or scope == "prepared_interval":
+        if family in {"s4_pose", "s2_pose"} or scope == "prepared_interval":
             if start < 0 or end < 0:
                 raise ValueError("Prepared frame indices must be >= 0.")
             if start > end:
@@ -126,6 +128,7 @@ class OverlayQcUiSettings:
             include_sbs=bool(self.include_sbs),
             include_frame_counter=bool(self.include_frame_counter),
             draw_skeleton=bool(self.draw_skeleton),
+            show_confidence=bool(self.show_confidence),
             pre_context_sec=float(self.pre_context_sec),
             post_context_sec=float(self.post_context_sec),
         )
@@ -135,6 +138,11 @@ class OverlayQcUiSettings:
         if settings.export_family == "s4_pose":
             return (
                 f"S4 pose QC prepared [{settings.prepared_frame_idx_start}, "
+                f"{settings.prepared_frame_idx_end}]"
+            )
+        if settings.export_family == "s2_pose":
+            return (
+                f"S2 pose QC prepared [{settings.prepared_frame_idx_start}, "
                 f"{settings.prepared_frame_idx_end}]"
             )
         if settings.scope_kind == "bout_span":
@@ -163,6 +171,8 @@ class OverlayQcRequestIdentity:
     review_run_dir: Path | None
     s4_run_id: str | None
     s4_run_dir: Path | None
+    s2_run_id: str | None
+    s2_run_dir: Path | None
     settings: OverlayQcUiSettings
 
     @staticmethod
@@ -177,6 +187,8 @@ class OverlayQcRequestIdentity:
         review_run_dir: Path | None,
         s4_run_id: str | None,
         s4_run_dir: Path | None,
+        s2_run_id: str | None = None,
+        s2_run_dir: Path | None = None,
         settings: OverlayQcUiSettings,
     ) -> OverlayQcRequestIdentity:
         return OverlayQcRequestIdentity(
@@ -198,6 +210,10 @@ class OverlayQcRequestIdentity:
             s4_run_dir=(
                 s4_run_dir.resolve(strict=False) if s4_run_dir is not None else None
             ),
+            s2_run_id=None if s2_run_id is None else str(s2_run_id),
+            s2_run_dir=(
+                s2_run_dir.resolve(strict=False) if s2_run_dir is not None else None
+            ),
             settings=settings.validated(),
         )
 
@@ -215,6 +231,8 @@ class OverlayQcLaunchContext:
     review_is_draft: bool | None = None
     s4_run_dir: Path | None = None
     s4_run_id: str | None = None
+    s2_run_dir: Path | None = None
+    s2_run_id: str | None = None
     lock_family: bool = True
     lock_source_kind: bool = False
     locked_source_kind: OverlayQcBehaviorSource | None = None
@@ -226,6 +244,8 @@ class OverlayQcLaunchContext:
     package_options: tuple[tuple[str, Path], ...] = ()
     review_options: tuple[tuple[str, Path, bool, str | None], ...] = ()
     s4_options: tuple[tuple[str, Path], ...] = ()
+    s2_options: tuple[tuple[str, Path], ...] = ()
+    skeleton_nodes_only_disclosure: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -372,11 +392,12 @@ def overlay_qc_table_rows(
 ) -> tuple[tuple[str, ...], ...]:
     rows: list[tuple[str, ...]] = []
     for job in jobs:
-        source = (
-            job.s4_run_id
-            if job.export_family == "s4_pose"
-            else (job.review_run_id or job.package_run_id or job.source_kind or "—")
-        )
+        if job.export_family == "s4_pose":
+            source = job.s4_run_id
+        elif job.export_family == "s2_pose":
+            source = job.s2_run_id
+        else:
+            source = job.review_run_id or job.package_run_id or job.source_kind or "—"
         interval = "—"
         if (
             job.prepared_frame_idx_start is not None
@@ -406,12 +427,17 @@ def source_identity_summary(
     package_run_id: str | None,
     review_run_id: str | None,
     s4_run_id: str | None,
+    s2_run_id: str | None = None,
 ) -> str:
     cfg = settings.validated()
     parts = [f"family={cfg.export_family}"]
     if cfg.export_family == "s4_pose":
         parts.append(f"s4={s4_run_id or '—'}")
         parts.append(f"skeleton={'yes' if cfg.draw_skeleton else 'no'}")
+    elif cfg.export_family == "s2_pose":
+        parts.append(f"s2={s2_run_id or '—'}")
+        parts.append(f"skeleton={'yes' if cfg.draw_skeleton else 'no'}")
+        parts.append(f"confidence={'yes' if cfg.show_confidence else 'no'}")
     else:
         parts.append(f"source={cfg.source_kind}")
         parts.append(f"package={package_run_id or '—'}")
@@ -424,6 +450,56 @@ def source_identity_summary(
     parts.append(f"pad={cfg.pre_context_sec:g}/{cfg.post_context_sec:g}s")
     parts.append(f"counter={'yes' if cfg.include_frame_counter else 'no'}")
     return "; ".join(parts)
+
+
+def plan_s2_pose_overlay_launch(
+    *,
+    session_root: Path | str,
+    selected_s2_run_id: str | None,
+    selected_s2_run_dir: Path | None,
+    eligible_s2_runs: Sequence[tuple[str, Path]],
+) -> OverlayQcLaunchContext:
+    """Build S2-page launch context for inferred-pose QC via eligible S2 runs.
+
+    Prefills only when the selected run is unambiguous/eligible. Never auto-picks
+    the newest S2 run.
+    """
+
+    root = Path(session_root).expanduser().resolve(strict=False)
+    options = tuple((str(run_id), Path(run_dir)) for run_id, run_dir in eligible_s2_runs)
+    prefill_id: str | None = None
+    prefill_dir: Path | None = None
+    if selected_s2_run_id is not None and selected_s2_run_dir is not None:
+        selected_id = str(selected_s2_run_id).strip()
+        selected_dir = Path(selected_s2_run_dir)
+        if any(run_id == selected_id for run_id, _ in options) or (
+            options and len(options) == 1 and options[0][0] == selected_id
+        ):
+            prefill_id = selected_id
+            prefill_dir = selected_dir
+        else:
+            # Selected run may still be valid even if not yet in options list.
+            prefill_id = selected_id
+            prefill_dir = selected_dir
+            if all(run_id != selected_id for run_id, _ in options):
+                options = ((selected_id, selected_dir),) + options
+    elif len(options) == 1:
+        prefill_id, prefill_dir = options[0]
+
+    return OverlayQcLaunchContext(
+        session_root=root,
+        export_family="s2_pose",
+        s2_run_dir=prefill_dir,
+        s2_run_id=prefill_id,
+        lock_family=True,
+        s2_options=options,
+        preferred_prepared_start=0,
+        preferred_prepared_end=29,
+        skeleton_nodes_only_disclosure=(
+            "If SLEAP topology cannot be read, export is nodes-only "
+            "(no invented edges); disclosed in the QC manifest/log."
+        ),
+    )
 
 
 def actionable_overlay_error(exc: BaseException) -> str:
@@ -447,6 +523,8 @@ def actionable_overlay_error(exc: BaseException) -> str:
         return f"Missing or invalid prepared video/sync: {message}"
     if "final_pose" in lowered or ("s4" in lowered and "missing" in lowered):
         return f"Missing S4 pose artifacts: {message}"
+    if "pose.parquet" in lowered or ("s2" in lowered and "missing" in lowered):
+        return f"Missing or ineligible S2 pose artifacts: {message}"
     if "states" in lowered and ("s8" in lowered or "s10" in lowered or "missing" in lowered):
         return f"Missing S8/S10 behavioral states: {message}"
     if "topology" in lowered or "skeleton" in lowered or "sleap" in lowered:
@@ -471,6 +549,7 @@ __all__ = [
     "S8BehavioralOverlayLaunchPlan",
     "actionable_overlay_error",
     "overlay_qc_table_rows",
+    "plan_s2_pose_overlay_launch",
     "plan_s8_behavioral_overlay_launch",
     "source_identity_summary",
 ]

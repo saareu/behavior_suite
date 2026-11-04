@@ -12,6 +12,7 @@ from typing import Final
 OVERLAY_PACKAGE_NAME: Final[str] = "overlay"
 OVERLAY_RENDERER_VERSION: Final[str] = "overlay_renderer_c2a_v1"
 OVERLAY_S4_POSE_RENDERER_VERSION: Final[str] = "overlay_renderer_c2b_v1"
+OVERLAY_S2_POSE_RENDERER_VERSION: Final[str] = "overlay_renderer_c3_1_v1"
 OVERLAY_ARTIFACT_MANIFEST_SCHEMA: Final[str] = "overlay_artifact_manifest_v1"
 OVERLAY_QC_EXPORT_DIRNAME: Final[str] = "results_exports"
 OVERLAY_QC_JOB_PREFIX: Final[str] = "overlay_qc_behavioral__"
@@ -20,9 +21,25 @@ OVERLAY_QC_MANIFEST_FILENAME: Final[str] = "overlay_artifact_manifest.json"
 OVERLAY_QC_STAGING_DIRNAME: Final[str] = "_overlay_qc_staging"
 OVERLAY_QC_S4_POSE_JOB_PREFIX: Final[str] = "overlay_qc_s4_pose__"
 OVERLAY_QC_S4_POSE_VIDEO_FILENAME: Final[str] = "s4_pose_qc.mp4"
+OVERLAY_QC_S2_POSE_JOB_PREFIX: Final[str] = "overlay_qc_s2_pose__"
+OVERLAY_QC_S2_POSE_VIDEO_FILENAME: Final[str] = "s2_pose_qc.mp4"
 OVERLAY_QC_PROCESSING_LOG_FILENAME: Final[str] = "processing_log.txt"
 OVERLAY_QC_RUN_META_FILENAME: Final[str] = "run_meta.json"
 OVERLAY_QC_SETTINGS_FILENAME: Final[str] = "settings_used.yaml"
+
+# SLEAP per-keypoint ``score`` is conventionally near [0, 1] but may exceed 1.
+# Visual mapping assumes this range and clamps for drawing only; original scores
+# are preserved in observation payloads / manifests. Score never filters nodes.
+S2_SCORE_VISUAL_RANGE_MIN: Final[float] = 0.0
+S2_SCORE_VISUAL_RANGE_MAX: Final[float] = 1.0
+S2_SCORE_VISUAL_MAPPING_ID: Final[str] = "s2_score_fill_intensity_v1"
+S2_SCORE_VISUAL_MAPPING_SUMMARY: Final[str] = (
+    "Optional continuous confidence: filled disc intensity scales with SLEAP "
+    "score assuming [0,1] (values outside clamped for drawing only). "
+    "Missing/NaN score → hollow ring (distinct from numerical zero). "
+    "Track-colored outline keeps provisional identity legible. "
+    "No confidence thresholding; drawable nodes are never dropped for viz."
+)
 
 # Pixel domain for composed frames (OpenCV / existing draw helpers).
 PIXEL_FORMAT_BGR: Final[str] = "bgr"
@@ -191,6 +208,14 @@ C2B_S4_POSE_QC_LAYERS: frozenset[LayerId] = frozenset(
     }
 )
 
+# S2 inferred-pose QC default layers (C3-1; prepared-domain; no dense HUD).
+C31_S2_POSE_QC_LAYERS: frozenset[LayerId] = frozenset(
+    {
+        LayerId.S2_POSE_INFERRED,
+        LayerId.DEBUG_FRAME_COUNTER,
+    }
+)
+
 
 class OverlayError(RuntimeError):
     """Base overlay compositor error."""
@@ -295,6 +320,46 @@ def default_s4_pose_qc_layers(
     if include_frame_counter:
         layers.append(LayerId.DEBUG_FRAME_COUNTER)
     return validate_layer_selection(layers)
+
+
+def default_s2_pose_qc_layers(
+    *,
+    include_frame_counter: bool = True,
+) -> tuple[LayerId, ...]:
+    """Build the default C3-1 S2 inferred-pose QC layer selection."""
+
+    layers: list[LayerId] = [LayerId.S2_POSE_INFERRED]
+    if include_frame_counter:
+        layers.append(LayerId.DEBUG_FRAME_COUNTER)
+    return validate_layer_selection(layers)
+
+
+def s2_score_visual_intensity(score: float | None) -> float | None:
+    """Map a SLEAP score to fill intensity in ``[0, 1]`` for drawing only.
+
+    ``None`` means missing confidence (caller draws hollow ring). Numerical
+    zero maps to intensity 0 (still drawn as a filled disc). Values outside
+    the assumed ``[0, 1]`` range are clamped for visualization; originals are
+    not mutated here.
+    """
+
+    if score is None:
+        return None
+    try:
+        value = float(score)
+    except (TypeError, ValueError):
+        return None
+    if value != value:  # NaN
+        return None
+    span = float(S2_SCORE_VISUAL_RANGE_MAX - S2_SCORE_VISUAL_RANGE_MIN)
+    if span <= 0:
+        return 0.0
+    normalized = (value - float(S2_SCORE_VISUAL_RANGE_MIN)) / span
+    if normalized < 0.0:
+        return 0.0
+    if normalized > 1.0:
+        return 1.0
+    return float(normalized)
 
 
 def s4_provenance_visual_class(code: int) -> S4ProvenanceVisualClass:

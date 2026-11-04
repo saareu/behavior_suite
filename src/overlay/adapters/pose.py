@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,8 @@ from overlay.contracts import (
 )
 from overlay.timing import PreparedFrameTiming
 from project.file_digest import sha256_file
+
+_TRACK_LABEL = re.compile(r"^(?:track_)?(\d+)$", re.IGNORECASE)
 
 
 def _optional_digest(path: Path | None) -> str | None:
@@ -51,10 +55,14 @@ class PreparedPoseAdapter:
         run_dir: Path | str | None = None,
         legend: str,
         require_track: bool = False,
+        provisional_identity: bool = False,
+        prepared_frame_range: tuple[int, int] | None = None,
     ) -> None:
         self._layer_id = layer_id
         self._legend = legend
         self._require_track = require_track
+        self._provisional_identity = provisional_identity
+        self._prepared_frame_range = prepared_frame_range
         self._path = (
             Path(parquet_path).expanduser().resolve()
             if parquet_path is not None
@@ -79,6 +87,16 @@ class PreparedPoseAdapter:
                 if require_track:
                     required.add("track")
                 require_columns(self._frame.columns, required, label=str(self._path))
+                if prepared_frame_range is not None:
+                    lo, hi = int(prepared_frame_range[0]), int(prepared_frame_range[1])
+                    if "prepared_frame_idx" in self._frame.columns:
+                        keys = pd.to_numeric(
+                            self._frame["prepared_frame_idx"], errors="coerce"
+                        )
+                    else:
+                        keys = pd.to_numeric(self._frame["frame_idx"], errors="coerce")
+                    mask = (keys >= lo) & (keys <= hi)
+                    self._frame = self._frame.loc[mask].copy()
                 self._index_by_prepared()
             except Exception as exc:  # noqa: BLE001 - surface as unavailable
                 self._load_error = f"Failed to load {subsystem} pose: {exc}"
@@ -91,7 +109,18 @@ class PreparedPoseAdapter:
             run_dir=self._run_dir,
             artifact_path=self._path,
             digest_sha256=_optional_digest(self._path),
-            extra={"legend": legend, "domain": "prepared"},
+            extra={
+                "legend": legend,
+                "domain": "prepared",
+                "identity_kind": (
+                    "provisional" if provisional_identity else "accepted_or_tracked"
+                ),
+                "prepared_frame_range": (
+                    None
+                    if prepared_frame_range is None
+                    else [int(prepared_frame_range[0]), int(prepared_frame_range[1])]
+                ),
+            },
         )
 
     def _index_by_prepared(self) -> None:
@@ -158,6 +187,9 @@ class PreparedPoseAdapter:
             payload={
                 "legend": self._legend,
                 "domain": "prepared",
+                "identity_kind": (
+                    "provisional" if self._provisional_identity else "accepted_or_tracked"
+                ),
                 "points": points,
                 "n_points": len(points),
             },
@@ -169,6 +201,7 @@ def make_s2_inferred_pose_adapter(
     *,
     run_id: str | None = None,
     run_dir: Path | str | None = None,
+    prepared_frame_range: tuple[int, int] | None = None,
 ) -> PreparedPoseAdapter:
     """S2 inferred pose — do not imply identity-final or invent corrected IDs."""
 
@@ -178,8 +211,10 @@ def make_s2_inferred_pose_adapter(
         subsystem="pose_inference",
         run_id=run_id,
         run_dir=run_dir,
-        legend="inferred pose",
+        legend="inferred pose (S2 predictions; provisional IDs)",
         require_track=False,
+        provisional_identity=True,
+        prepared_frame_range=prepared_frame_range,
     )
 
 
@@ -358,27 +393,69 @@ def _rows_to_points(
         if xy is None:
             continue
         track_val = getattr(row, "track", None)
-        if track_val is None or (isinstance(track_val, float) and np.isnan(track_val)):
+        parsed_track = _parse_track_index(track_val)
+        if parsed_track is None:
             if require_track:
                 continue
-            # S2 may expose instance_index when track is provisional.
+            # S2 may expose instance_index when track is provisional/missing.
             inst = getattr(row, "instance_index", None)
-            track = int(inst) if inst is not None and not (
-                isinstance(inst, float) and np.isnan(inst)
-            ) else 0
+            parsed_inst = _parse_track_index(inst)
+            track = 0 if parsed_inst is None else int(parsed_inst)
         else:
-            track = int(track_val)
-        score = getattr(row, "score", None)
+            track = int(parsed_track)
+        score = _optional_score(getattr(row, "score", None))
         points.append(
             {
                 "track": track,
                 "node": str(getattr(row, "node", "")),
                 "x": xy[0],
                 "y": xy[1],
-                "score": None if score is None else float(score),
+                # Preserve original numeric score including 0.0; None = missing.
+                "score": score,
+                "score_missing": score is None,
             }
         )
     return points
+
+
+def _parse_track_index(value: object) -> int | None:
+    """Parse integer track ids including SLEAP ``track_N`` labels."""
+
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        return int(value)
+    item = getattr(value, "item", None)
+    if callable(item) and not isinstance(value, (str, bytes)):
+        try:
+            unpacked = item()
+        except (TypeError, ValueError):
+            unpacked = value
+        if unpacked is not value:
+            return _parse_track_index(unpacked)
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "<na>", "none"}:
+        return None
+    match = _TRACK_LABEL.fullmatch(text)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def _optional_score(value: object) -> float | None:
+    """Return finite score, or ``None`` when missing (distinct from 0.0)."""
+
+    if value is None:
+        return None
+    try:
+        out = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return out if np.isfinite(out) else None
 
 
 def _s4_rows_to_points(group: pd.DataFrame) -> list[dict[str, Any]]:

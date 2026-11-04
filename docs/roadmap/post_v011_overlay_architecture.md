@@ -1,15 +1,17 @@
 # Post-v0.1.1 — Overlay Architecture (C0 audit → C1 foundation → C2-A/C2-B QC export)
 
-**Status:** **C3-0 accepted** (S8 Behavioral QC Export Accessibility; bounded GUI source-lock correction). Builds on C1 + C2-A + C2-B + C2-C.
+**Status:** **C3-1 implemented — stop for architectural review** (S2 Pose Inference QC Video). Builds on C1 + C2-A + C2-B + C2-C + C3-0.
+**C3-1 base commit:** `f3c4f1e08f4a55fb8ef09d57d0bda94771a50fb8`
+**C3-1 implementation date:** 2026-11-04
+**C3-0 accepted:** 2026-11-04 (S8 Behavioral QC Export Accessibility)
 **C2-C base commit:** `f84ddd1714046fee477a18a8de805068a629bbdd`
 **C2-C final acceptance date:** 2026-11-02
-**C3-0 implementation date:** 2026-11-04
 **C2-B final acceptance date:** 2026-11-02  
 **C2-A / C1 final acceptance date:** 2026-11-02  
 **C0 date:** 2026-11-01  
 **C2-B base commit:** `a1da1e170297619b338a1d63f0c8239f5cbf5ea0` (`origin/main` — C1/C2-A + mainline CSV)  
 **Companion:** [`post_v011_s10_review_and_visualization.md`](post_v011_s10_review_and_visualization.md) (Increment B closed; overlays → this document)  
-**Non-scope (still):** full-session QC exporter, PI/gallery overlay integration, S5 contour generation, live overlays, S2/S3 exporters, scientific algorithm / schema mutation.  
+**Non-scope (still):** full-session QC exporter, PI/gallery overlay integration, S5 contour generation, live overlays, S3 exporters, scientific algorithm / schema mutation.  
 **O4 closed:** S8 `execution.generate_overlay_video` is **deprecated and unsupported** (parsed for settings compatibility; runtime unchanged; never produced video).
 
 **Legend**
@@ -1209,3 +1211,157 @@ docs/roadmap/post_v011_overlay_architecture.md    # this section
 **C3-0 accepted** after architectural review + bounded GUI source-lock correction. Commit/push authorized on this closure pass. Stop before C3-1. Deferred C3 live/full-session work remains out of scope.
 
 _End of C3-0 record._
+
+---
+
+## 19. Increment C3-1 — S2 Pose Inference QC Video (2026-11-04)
+
+### 19.1 Operator-visible product
+
+Offline prepared-rate S2 inferred-pose QC MP4 under:
+
+```text
+{session}/results_exports/overlay_qc_s2_pose__{timestamp}/
+  s2_pose_qc.mp4
+  overlay_artifact_manifest.json
+  run_meta.json
+  settings_used.yaml
+  processing_log.txt
+```
+
+- Opt-in only; explicit eligible S2 run required (never auto-picks newest).
+- H.264 / yuv420p via the shared C2-A/C2-B streaming ffmpeg pipe; prepared-video FPS.
+- Immutable job directories; digest revalidation before publication.
+- Existing S2 `overlay.mp4` generation path **unchanged**.
+- Naked S9 / PI / S4 / behavioral QC exports unchanged.
+
+### 19.2 Source eligibility and provenance contract
+
+| Pin | Authority |
+| --- | --- |
+| S2 eligibility | Explicit `s2_run_dir`; `tracking_correction.runner.validate_s2_handoff` (completed S2 + authoritative `pose.parquet` + resolvable S1 prepared video/timing). **Not** S3 acceptance. |
+| S2 artifact digest | `pose.parquet` sha256 |
+| S1 prepared video | Resolved from S2 `pose_meta.json` input paths (or `pose_inference/` layout fallback) + sha256 + probe |
+| S1 timing | `prepared_sync.npz` → **prepared-identity SyncMap** (1:1 prepared↔sample at prepared FPS). **No** S4 dense 120 Hz NN duplication. |
+| Skeleton | S2 `pose.slp` via `resolve_review_skeleton_edges` only when readable |
+
+Reject incomplete / dry-run / mismatched frame-domain / digest-mismatched sources. Never silently select the newest S2 run.
+
+### 19.3 Pose, skeleton, and confidence rendering
+
+| Concern | Design |
+| --- | --- |
+| Nodes | All finite XY keypoints from S2 `pose.parquet` (prepared-frame domain) |
+| Identity | Provisional `P{id}` labels + track colors; legend states **S2 predictions, not S3-accepted** |
+| Track labels | Parse integer / `track_N` SLEAP labels; fall back to `instance_index` |
+| Skeleton | Recorded SLEAP topology only; otherwise **nodes-only** with manifest/log disclosure (never invent edges) |
+| Confidence (optional) | Mapping id `s2_score_fill_intensity_v1`: fill intensity scales with SLEAP `score` assuming `[0,1]`; values outside clamped **for drawing only**; originals preserved. Missing/NaN → hollow ring (distinct from numerical zero). No confidence thresholding / no node dropping for viz. Identity-colored outline remains legible. |
+
+Adapter / layer reuse: `make_s2_inferred_pose_adapter` + shared `PoseLayer` S2 path; compositor / ffmpeg encode unchanged.
+
+### 19.4 Timing and export behavior
+
+- Frame domain: prepared video indices + prepared FPS.
+- Inclusive prepared interval `[start, end]`; optional prepared-FPS context padding.
+- Cooperative cancel; staging + atomic publish; integrity recheck before publish.
+- Renderer version: `overlay_renderer_c3_1_v1`.
+- Debug counter uses prepared-identity sample idx (equal to prepared frame); notes disclose “not dense 120 Hz”.
+
+### 19.5 GUI integration
+
+| Item | Behavior |
+| --- | --- |
+| Shared dialog family | `export_family=s2_pose` |
+| S2 Pose Inference page | `Export QC Overlay Video…` beside Open overlay |
+| Prefill | Prefill selected eligible S2 when unambiguous; otherwise explicit selection among eligible options |
+| Options | Skeleton draw; optional confidence styling; frame/time counter; prepared interval + pad |
+| Safety | Bound-session `results_exports/` (D0); background runner; cancel; session retarget block |
+| Other families | S3/S4/S8/S9/S10 entry behaviors unchanged |
+
+### 19.6 Laboratory acceptance evidence (E-session)
+
+Explicit eligible run: `bottomup__20260709T195039`.
+
+Published artifact:
+
+```text
+test_cases/E_full_session_integration/results_exports/overlay_qc_s2_pose__20261104T144105/
+  s2_pose_qc.mp4
+  overlay_artifact_manifest.json
+  run_meta.json
+  settings_used.yaml
+  processing_log.txt
+```
+
+Clip: prepared inclusive `[971, 1000]` (30 frames @ 119.048 fps).  
+Evidence: `tmp_overlay_c31_e_session_s2_pose_qc/` (+ `C31_S2_POSE_QC_SMOKE_REPORT.json`, sampled frames).
+
+| Check | Result |
+| --- | --- |
+| Keypoints on prepared video | **Pass** — nodes drawn in prepared coordinates |
+| Provisional identities distinguishable | **Pass** — `P0`/`P1` in clip; manifest pins provisional semantics |
+| Skeleton | **Nodes-only** on this host (`sleap_io` absent); disclosure recorded; no invented edges. Topology edge drawing covered by fixtures |
+| Confidence styling | **Pass** — enabled; scores in clip within `[0.179, 0.940]`; mapping disclosed. Missing-score / numerical-zero / >1 clamp covered by unit fixtures (not present in this short clip) |
+| Frame count / FPS vs manifest | **Pass** — 30 frames, 119.048 fps, libx264/yuv420p |
+| Upstream digests | **Pass** — `pose.parquet` sha256 unchanged; existing `overlay.mp4` still present |
+
+### 19.7 Confidence visual acceptance (`s2_score_fill_intensity_v1`)
+
+Final closure pixel fixture (score **0**, low+, mid, **1**, **missing**, out-of-range **1.5**) confirmed:
+
+| Criterion | Result |
+| --- | --- |
+| Numeric confidence 0 remains drawable | **Pass** — filled disc at minimum intensity + identity outline/halo |
+| Missing confidence visually distinct | **Pass** — hollow ring; center stays background (≠ numerical zero fill) |
+| Low confidence does not drop markers | **Pass** — no score filtering; low+ still filled + outlined |
+| Scores outside `[0,1]` display-clamped only | **Pass** — 1.5 renders identical to 1.0; payload keeps 1.5 |
+| Original confidence values unchanged | **Pass** — adapter/payload preserve originals including 0 and >1 |
+| Legend + manifest describe mapping | **Pass** — on-frame mapping id + summary; manifest `confidence` disclosure |
+| Visual output deterministic | **Pass** — identical re-renders |
+
+Drawing/legend mapping required no visual correction on this closure pass.
+Minimum closure fixes only: pixel-fixture regression; S2 legend-string adapter test update;
+`state.summary` eligibility lookup; `np.isfinite` typing in drawable-score parsing.
+No confidence-computation or scientific-filtering changes.
+
+### 19.8 Semantics pins (accepted)
+
+- **Provisional identity:** `P{id}` labels + track colors; legend states S2 predictions, **not** S3-accepted `M{id}`.
+- **Nodes-only fallback:** when `pose.slp` topology is unreadable / `sleap_io` absent → draw nodes only; never invent edges; disclose in legend/manifest/log.
+- **Performance limitation:** export loads full `pose.parquet` then windows the adapter — can be heavy for very long sessions.
+
+### 19.9 Files touched (C3-1)
+
+```text
+src/overlay/source_s2.py
+src/overlay/export_s2.py
+src/overlay/contracts.py
+src/overlay/plan.py
+src/overlay/adapters/pose.py
+src/overlay/layers/pose.py
+src/overlay/discovery.py
+src/overlay/__init__.py
+src/ui/controllers/overlay_qc_export_support.py
+src/ui/controllers/overlay_qc_export_controller.py
+src/ui/dialogs/overlay_qc_export_dialog.py
+src/ui/pages/pose_inference_page.py
+tests/overlay/test_export_s2_pose_qc.py
+tests/overlay/test_s2_confidence_identity_skeleton.py
+tests/ui/test_overlay_qc_export_gui.py
+scripts/_overlay_c31_e_session_s2_pose_qc_smoke.py
+docs/roadmap/post_v011_overlay_architecture.md
+```
+
+### 19.10 Remaining limitations / risks
+
+- Full-session / dense-rate export still deferred (C3 live/full-session out of scope).
+- S3 tracking-corrected QC family not implemented (stop before C3-2).
+- Topology requires optional `sleap_io`; otherwise honest nodes-only.
+- Loading full `pose.parquet` then windowing can be heavy for very long sessions.
+- Existing S2 `overlay.mp4` generation path remains the S2 runner product (unchanged by this QC family).
+
+### 19.11 Closure
+
+**C3-1 accepted** after architectural review + final confidence-visualization verification. Commit/push authorized on this closure pass. Stop before C3-2. No S3/S5/S9-media/S10 overlay-media / science or artifact-schema changes.
+
+_End of C3-1 record._

@@ -31,8 +31,15 @@ from overlay.export import (
     export_behavioral_qc_clip,
     export_s4_pose_qc_clip,
 )
-from overlay.plan import plan_bout_span, plan_prepared_interval, plan_s4_prepared_interval
+from overlay.export_s2 import OverlayS2PoseQcExportResult, export_s2_pose_qc_clip
+from overlay.plan import (
+    plan_bout_span,
+    plan_prepared_interval,
+    plan_s2_prepared_interval,
+    plan_s4_prepared_interval,
+)
 from overlay.source import resolve_overlay_qc_source
+from overlay.source_s2 import resolve_overlay_s2_qc_source
 from overlay.source_s4 import resolve_overlay_s4_qc_source
 from preprocess.models import OperationProgress
 from ui.controllers.overlay_qc_export_support import (
@@ -47,7 +54,9 @@ from ui.controllers.run_preprocess_controller import open_folder_in_platform_exp
 ProgressCallback = Callable[[OperationProgress], None]
 FolderOpener = Callable[[Path], bool]
 FileOpener = Callable[[Path], bool]
-OverlayExportResult = OverlayQcExportResult | OverlayS4PoseQcExportResult
+OverlayExportResult = (
+    OverlayQcExportResult | OverlayS4PoseQcExportResult | OverlayS2PoseQcExportResult
+)
 
 
 class OverlayQcExportUiError(RuntimeError):
@@ -86,6 +95,7 @@ class OverlayQcExportController:
         *,
         behavioral_exporter: Callable[..., OverlayQcExportResult] | None = None,
         s4_exporter: Callable[..., OverlayS4PoseQcExportResult] | None = None,
+        s2_exporter: Callable[..., OverlayS2PoseQcExportResult] | None = None,
         folder_opener: FolderOpener | None = None,
         file_opener: FileOpener | None = None,
         bout_loader: Callable[[Path], tuple[OverlayQcBoutOption, ...]] | None = None,
@@ -93,6 +103,7 @@ class OverlayQcExportController:
         self.state = OverlayQcExportUiState()
         self._behavioral_exporter = behavioral_exporter or export_behavioral_qc_clip
         self._s4_exporter = s4_exporter or export_s4_pose_qc_clip
+        self._s2_exporter = s2_exporter or export_s2_pose_qc_clip
         self._folder_opener = folder_opener or open_folder_in_platform_explorer
         self._file_opener = file_opener or _default_file_opener
         self._bout_loader = bout_loader or load_bout_options_from_package
@@ -235,6 +246,7 @@ class OverlayQcExportController:
         package_run_id: str | None,
         review_run_id: str | None,
         s4_run_id: str | None,
+        s2_run_id: str | None = None,
     ) -> str:
         cfg = (settings or self.state.settings).validated()
         return source_identity_summary(
@@ -242,6 +254,7 @@ class OverlayQcExportController:
             package_run_id=package_run_id,
             review_run_id=review_run_id,
             s4_run_id=s4_run_id,
+            s2_run_id=s2_run_id,
         )
 
     def cannot_export_reason(
@@ -256,6 +269,8 @@ class OverlayQcExportController:
         review_is_draft: bool | None = None,
         s4_run_dir: Path | None = None,
         s4_run_id: str | None = None,
+        s2_run_dir: Path | None = None,
+        s2_run_id: str | None = None,
     ) -> str | None:
         if self.state.task_running:
             return "A QC overlay export is already running."
@@ -275,6 +290,10 @@ class OverlayQcExportController:
         if cfg.export_family == "s4_pose":
             if s4_run_dir is None or s4_run_id is None:
                 return "Select an eligible completed S4 run (never auto-picks newest)."
+            return None
+        if cfg.export_family == "s2_pose":
+            if s2_run_dir is None or s2_run_id is None:
+                return "Select an eligible completed S2 run (never auto-picks newest)."
             return None
 
         if cfg.source_kind not in {
@@ -311,6 +330,8 @@ class OverlayQcExportController:
         review_is_draft: bool | None = None,
         s4_run_dir: Path | None = None,
         s4_run_id: str | None = None,
+        s2_run_dir: Path | None = None,
+        s2_run_id: str | None = None,
     ) -> OverlayQcRequestIdentity:
         """Snapshot settings + source paths only (no encode/hash on the GUI thread)."""
 
@@ -324,6 +345,8 @@ class OverlayQcExportController:
             review_is_draft=review_is_draft,
             s4_run_dir=s4_run_dir,
             s4_run_id=s4_run_id,
+            s2_run_dir=s2_run_dir,
+            s2_run_id=s2_run_id,
         )
         if reason is not None:
             raise OverlayQcExportUiError(reason)
@@ -334,7 +357,7 @@ class OverlayQcExportController:
             export_family=validated.export_family,
             source_kind=(
                 None
-                if validated.export_family == "s4_pose"
+                if validated.export_family in {"s4_pose", "s2_pose"}
                 else validated.source_kind
             ),
             package_run_id=package_run_id,
@@ -353,6 +376,8 @@ class OverlayQcExportController:
             ),
             s4_run_id=s4_run_id if validated.export_family == "s4_pose" else None,
             s4_run_dir=s4_run_dir if validated.export_family == "s4_pose" else None,
+            s2_run_id=s2_run_id if validated.export_family == "s2_pose" else None,
+            s2_run_dir=s2_run_dir if validated.export_family == "s2_pose" else None,
             settings=validated,
         )
         self.state.settings = validated
@@ -367,6 +392,7 @@ class OverlayQcExportController:
             package_run_id=package_run_id,
             review_run_id=review_run_id,
             s4_run_id=s4_run_id,
+            s2_run_id=s2_run_id,
         )
         self.state.output_destination = str(
             Path(session_root) / OVERLAY_QC_EXPORT_DIRNAME
@@ -436,6 +462,29 @@ class OverlayQcExportController:
             return self._s4_exporter(
                 source=s4_source,
                 plan=s4_plan,
+                output_root=output_root,
+                progress_callback=_bridge,
+                cancellation_requested=cancellation_requested,
+            )
+        if settings.export_family == "s2_pose":
+            if identity.s2_run_dir is None:
+                raise OverlayQcExportUiError("S2 pose QC launch is missing s2_run_dir.")
+            s2_source = resolve_overlay_s2_qc_source(s2_run_dir=identity.s2_run_dir)
+            s2_plan = plan_s2_prepared_interval(
+                prepared_frame_idx_start=settings.prepared_frame_idx_start,
+                prepared_frame_idx_end=settings.prepared_frame_idx_end,
+                source_fps=float(s2_source.video_probe.fps),
+                source_n_frames=int(s2_source.video_probe.n_frames),
+                include_frame_counter=settings.include_frame_counter,
+                draw_skeleton=settings.draw_skeleton,
+                show_confidence=settings.show_confidence,
+                pre_context_sec=settings.pre_context_sec,
+                post_context_sec=settings.post_context_sec,
+            )
+            output_root = Path(identity.session_root) / OVERLAY_QC_EXPORT_DIRNAME
+            return self._s2_exporter(
+                source=s2_source,
+                plan=s2_plan,
                 output_root=output_root,
                 progress_callback=_bridge,
                 cancellation_requested=cancellation_requested,

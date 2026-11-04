@@ -11,6 +11,8 @@ from overlay.contracts import (
     OVERLAY_QC_JOB_PREFIX,
     OVERLAY_QC_MANIFEST_FILENAME,
     OVERLAY_QC_RUN_META_FILENAME,
+    OVERLAY_QC_S2_POSE_JOB_PREFIX,
+    OVERLAY_QC_S2_POSE_VIDEO_FILENAME,
     OVERLAY_QC_S4_POSE_JOB_PREFIX,
     OVERLAY_QC_S4_POSE_VIDEO_FILENAME,
     OVERLAY_QC_VIDEO_FILENAME,
@@ -19,6 +21,7 @@ from results_packaging.export import load_json_object
 
 EXPORT_FAMILY_BEHAVIORAL = "behavioral"
 EXPORT_FAMILY_S4_POSE = "s4_pose"
+EXPORT_FAMILY_S2_POSE = "s2_pose"
 
 STATUS_COMPLETED = "completed"
 STATUS_INCOMPLETE = "incomplete"
@@ -38,6 +41,7 @@ class OverlayQcJobSummary:
     package_run_id: str | None
     review_run_id: str | None
     s4_run_id: str | None
+    s2_run_id: str | None
     layers: tuple[str, ...]
     prepared_frame_idx_start: int | None
     prepared_frame_idx_end: int | None
@@ -68,6 +72,7 @@ class OverlayQcJobSummary:
             "package_run_id": self.package_run_id,
             "review_run_id": self.review_run_id,
             "s4_run_id": self.s4_run_id,
+            "s2_run_id": self.s2_run_id,
             "layers": list(self.layers),
             "prepared_frame_idx_start": self.prepared_frame_idx_start,
             "prepared_frame_idx_end": self.prepared_frame_idx_end,
@@ -103,15 +108,23 @@ class OverlayQcProjectSummary:
             job for job in self.jobs if job.export_family == EXPORT_FAMILY_S4_POSE
         )
 
+    @property
+    def s2_pose_jobs(self) -> tuple[OverlayQcJobSummary, ...]:
+        return tuple(
+            job for job in self.jobs if job.export_family == EXPORT_FAMILY_S2_POSE
+        )
+
 
 def summarize_overlay_qc_project(
     session_root: Path | str,
     *,
     exports_root: Path | str | None = None,
 ) -> OverlayQcProjectSummary:
-    """Scan ``results_exports/`` for ``overlay_qc_behavioral__*`` and ``overlay_qc_s4_pose__*``.
+    """Scan ``results_exports/`` for overlay QC job prefixes.
 
-    Other export families (media, CSV, PI report) are ignored.
+    Discovers ``overlay_qc_behavioral__*``, ``overlay_qc_s4_pose__*``, and
+    ``overlay_qc_s2_pose__*``. Other export families (media, CSV, PI report)
+    are ignored.
     """
 
     root = Path(session_root).expanduser().resolve()
@@ -141,17 +154,23 @@ def _family_for_dirname(name: str) -> str | None:
         return EXPORT_FAMILY_BEHAVIORAL
     if name.startswith(OVERLAY_QC_S4_POSE_JOB_PREFIX):
         return EXPORT_FAMILY_S4_POSE
+    if name.startswith(OVERLAY_QC_S2_POSE_JOB_PREFIX):
+        return EXPORT_FAMILY_S2_POSE
     return None
+
+
+def _video_filename_for_family(export_family: str) -> str:
+    if export_family == EXPORT_FAMILY_BEHAVIORAL:
+        return OVERLAY_QC_VIDEO_FILENAME
+    if export_family == EXPORT_FAMILY_S2_POSE:
+        return OVERLAY_QC_S2_POSE_VIDEO_FILENAME
+    return OVERLAY_QC_S4_POSE_VIDEO_FILENAME
 
 
 def _summarize_job(job_dir: Path, *, export_family: str) -> OverlayQcJobSummary:
     meta_path = job_dir / OVERLAY_QC_RUN_META_FILENAME
     manifest_path = job_dir / OVERLAY_QC_MANIFEST_FILENAME
-    video_name = (
-        OVERLAY_QC_VIDEO_FILENAME
-        if export_family == EXPORT_FAMILY_BEHAVIORAL
-        else OVERLAY_QC_S4_POSE_VIDEO_FILENAME
-    )
+    video_name = _video_filename_for_family(export_family)
     video_path = job_dir / video_name
     has_video = video_path.is_file()
     has_manifest = manifest_path.is_file()
@@ -160,6 +179,7 @@ def _summarize_job(job_dir: Path, *, export_family: str) -> OverlayQcJobSummary:
     package_run_id: str | None = None
     review_run_id: str | None = None
     s4_run_id: str | None = None
+    s2_run_id: str | None = None
     layers: tuple[str, ...] = ()
     prep_start: int | None = None
     prep_end: int | None = None
@@ -176,6 +196,7 @@ def _summarize_job(job_dir: Path, *, export_family: str) -> OverlayQcJobSummary:
             package_run_id = _optional_str(meta.get("package_run_id"))
             review_run_id = _optional_str(meta.get("review_run_id"))
             s4_run_id = _optional_str(meta.get("s4_run_id"))
+            s2_run_id = _optional_str(meta.get("s2_run_id"))
             created_at = _optional_str(meta.get("created_at_utc"))
             frames_written = _optional_int(meta.get("frames_written"))
             plan = meta.get("plan")
@@ -203,6 +224,11 @@ def _summarize_job(job_dir: Path, *, export_family: str) -> OverlayQcJobSummary:
                 )
                 review_run_id = review_run_id or _optional_str(extra.get("review_run_id"))
                 s4_run_id = s4_run_id or _optional_str(extra.get("s4_run_id"))
+                s2_run_id = s2_run_id or _optional_str(extra.get("s2_run_id"))
+                source_block = extra.get("source")
+                if isinstance(source_block, dict):
+                    s2_run_id = s2_run_id or _optional_str(source_block.get("s2_run_id"))
+                    s4_run_id = s4_run_id or _optional_str(source_block.get("s4_run_id"))
             source_runs = manifest.get("source_runs")
             if isinstance(source_runs, list):
                 for run in source_runs:
@@ -212,6 +238,11 @@ def _summarize_job(job_dir: Path, *, export_family: str) -> OverlayQcJobSummary:
                     kind = _optional_str(run.get("kind") or run.get("stage"))
                     if rid and kind and "s4" in kind.lower() and s4_run_id is None:
                         s4_run_id = rid
+                    if rid and kind and "s2" in kind.lower() and s2_run_id is None:
+                        s2_run_id = rid
+                    subsystem = _optional_str(run.get("subsystem"))
+                    if rid and subsystem == "pose_inference" and s2_run_id is None:
+                        s2_run_id = rid
             frames_written = frames_written or _optional_int(
                 manifest.get("output_frame_count") or manifest.get("frame_count")
             )
@@ -232,6 +263,7 @@ def _summarize_job(job_dir: Path, *, export_family: str) -> OverlayQcJobSummary:
         package_run_id=package_run_id,
         review_run_id=review_run_id,
         s4_run_id=s4_run_id,
+        s2_run_id=s2_run_id,
         layers=layers,
         prepared_frame_idx_start=prep_start,
         prepared_frame_idx_end=prep_end,
@@ -303,6 +335,7 @@ def _optional_int(value: object) -> int | None:
 
 __all__ = [
     "EXPORT_FAMILY_BEHAVIORAL",
+    "EXPORT_FAMILY_S2_POSE",
     "EXPORT_FAMILY_S4_POSE",
     "STATUS_CANCELED",
     "STATUS_COMPLETED",

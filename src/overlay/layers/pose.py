@@ -1,4 +1,4 @@
-"""Pose layer drawers including C2-B S4 provenance styling."""
+"""Pose layer drawers including C2-B S4 provenance and C3-1 S2 confidence styling."""
 
 from __future__ import annotations
 
@@ -10,8 +10,13 @@ import numpy as np
 
 from overlay.context import OverlayContext, OverlayObservation
 from overlay.contracts import (
+    S2_SCORE_VISUAL_MAPPING_ID,
+    S2_SCORE_VISUAL_MAPPING_SUMMARY,
+    S2_SCORE_VISUAL_RANGE_MAX,
+    S2_SCORE_VISUAL_RANGE_MIN,
     LayerId,
     S4ProvenanceVisualClass,
+    s2_score_visual_intensity,
     s4_provenance_visual_class,
 )
 from tracking_correction.overlay_draw import draw_pose_overlay
@@ -25,7 +30,8 @@ _HALO_BGR = (245, 245, 245)
 class PoseLayer:
     """Draw prepared- or dense-domain pose points.
 
-    S2/S3 use the shared identity-colored drawer. S4 uses per-keypoint
+    S2 uses provisional identity labels (+ optional confidence intensity).
+    S3 uses the shared identity-colored drawer. S4 uses per-keypoint
     provenance visual classes while preserving mouse identity colors.
     """
 
@@ -52,6 +58,16 @@ class PoseLayer:
                 context=context,
                 legend=str(observation.payload.get("legend") or "final pose"),
             )
+        if self._layer_id is LayerId.S2_POSE_INFERRED:
+            return _render_s2_pose(
+                frame_bgr,
+                points_raw,
+                context=context,
+                legend=str(
+                    observation.payload.get("legend")
+                    or "inferred pose (S2 predictions; provisional IDs)"
+                ),
+            )
 
         node_points = _to_node_points(points_raw, layer_id=self._layer_id)
         if not node_points:
@@ -70,6 +86,294 @@ class PoseLayer:
             legend = str(observation.payload.get("legend") or self._layer_id.value)
             _draw_simple_legend(canvas, legend, y=20)
         return canvas
+
+
+def _render_s2_pose(
+    frame_bgr: np.ndarray,
+    points_raw: Sequence[Mapping[str, Any]],
+    *,
+    context: OverlayContext,
+    legend: str,
+) -> np.ndarray:
+    canvas = np.ascontiguousarray(frame_bgr.copy())
+    show_confidence = bool(context.style.extra.get("show_confidence", False))
+    drawable = _s2_drawable_points(points_raw)
+    if not drawable:
+        if context.style.legend_text:
+            _draw_s2_legend(
+                canvas,
+                legend=legend,
+                tracks=(),
+                show_confidence=show_confidence,
+                skeleton_nodes_only=not bool(
+                    context.style.extra.get("skeleton_edges")
+                ),
+            )
+        return canvas
+
+    by_track: dict[int, dict[str, dict[str, Any]]] = {}
+    for point in drawable:
+        by_track.setdefault(int(point["track"]), {})[str(point["node"])] = point
+
+    edges: Sequence[tuple[str, str]] = ()
+    if context.style.draw_skeleton:
+        edges = tuple(context.style.extra.get("skeleton_edges", ()))
+
+    radius = max(3, int(context.style.node_radius))
+    edge_thickness = max(1, int(context.style.edge_thickness))
+
+    for track, nodes in by_track.items():
+        color = TRACK_COLORS_BGR.get(int(track), (200, 200, 200))
+        for start_name, end_name in edges:
+            start = nodes.get(start_name)
+            end = nodes.get(end_name)
+            if start is None or end is None:
+                continue
+            _draw_edge(
+                canvas,
+                start,
+                end,
+                color=color,
+                thickness=edge_thickness,
+            )
+
+    for track, nodes in by_track.items():
+        color = TRACK_COLORS_BGR.get(int(track), (200, 200, 200))
+        for point in nodes.values():
+            _draw_s2_keypoint(
+                canvas,
+                float(point["x"]),
+                float(point["y"]),
+                color=color,
+                score=point.get("score"),
+                show_confidence=show_confidence,
+                radius=radius,
+            )
+        _draw_provisional_track_label(
+            canvas, track=int(track), nodes=nodes, color=color
+        )
+
+    if context.style.legend_text:
+        _draw_s2_legend(
+            canvas,
+            legend=legend,
+            tracks=tuple(sorted(by_track)),
+            show_confidence=show_confidence,
+            skeleton_nodes_only=len(edges) == 0,
+        )
+    return canvas
+
+
+def _s2_drawable_points(
+    points_raw: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep every finite XY node; never filter by confidence score."""
+
+    out: list[dict[str, Any]] = []
+    for item in points_raw:
+        x = item.get("x")
+        y = item.get("y")
+        if x is None or y is None:
+            continue
+        score = item.get("score")
+        score_f: float | None = None
+        if score is not None:
+            try:
+                candidate = float(score)
+            except (TypeError, ValueError):
+                candidate = float("nan")
+            if np.isfinite(candidate):
+                score_f = candidate
+        out.append(
+            {
+                "track": int(item["track"]),
+                "node": str(item["node"]),
+                "x": float(x),
+                "y": float(y),
+                "score": score_f,
+            }
+        )
+    return out
+
+
+def _draw_s2_keypoint(
+    canvas: np.ndarray,
+    x: float,
+    y: float,
+    *,
+    color: tuple[int, int, int],
+    score: float | None,
+    show_confidence: bool,
+    radius: int,
+) -> None:
+    center = (int(round(x)), int(round(y)))
+    # Always keep a strong identity outline so low/missing confidence stays legible.
+    cv2.circle(canvas, center, radius + 1, _OUTLINE_BGR, 2, lineType=cv2.LINE_AA)
+    cv2.circle(canvas, center, radius + 1, color, 1, lineType=cv2.LINE_AA)
+
+    if not show_confidence:
+        cv2.circle(canvas, center, radius, color, -1, lineType=cv2.LINE_AA)
+        cv2.circle(canvas, center, radius, _HALO_BGR, 1, lineType=cv2.LINE_AA)
+        return
+
+    intensity = s2_score_visual_intensity(score)
+    if intensity is None:
+        # Missing confidence: hollow ring only (distinct from numerical zero fill).
+        cv2.circle(canvas, center, radius, color, 2, lineType=cv2.LINE_AA)
+        cv2.circle(canvas, center, radius, _HALO_BGR, 1, lineType=cv2.LINE_AA)
+        return
+
+    fill = _blend_bgr(color, (25, 25, 25), float(intensity))
+    cv2.circle(canvas, center, radius, fill, -1, lineType=cv2.LINE_AA)
+    cv2.circle(canvas, center, radius, _HALO_BGR, 1, lineType=cv2.LINE_AA)
+
+
+def _blend_bgr(
+    color: tuple[int, int, int],
+    dark: tuple[int, int, int],
+    intensity: float,
+) -> tuple[int, int, int]:
+    t = max(0.0, min(1.0, float(intensity)))
+    return (
+        int(round(dark[0] + (color[0] - dark[0]) * t)),
+        int(round(dark[1] + (color[1] - dark[1]) * t)),
+        int(round(dark[2] + (color[2] - dark[2]) * t)),
+    )
+
+
+def _draw_provisional_track_label(
+    canvas: np.ndarray,
+    *,
+    track: int,
+    nodes: Mapping[str, Mapping[str, Any]],
+    color: tuple[int, int, int],
+) -> None:
+    if not nodes:
+        return
+    preferred = nodes.get("nose") or nodes.get("neck") or next(iter(nodes.values()))
+    x = int(round(float(preferred["x"])))
+    y = int(round(float(preferred["y"]))) - 10
+    # P{{id}} = provisional S2 prediction identity (not S3-accepted M{{id}}).
+    label = f"P{track}"
+    cv2.putText(
+        canvas,
+        label,
+        (x + 4, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.45,
+        _OUTLINE_BGR,
+        2,
+        lineType=cv2.LINE_AA,
+    )
+    cv2.putText(
+        canvas,
+        label,
+        (x + 4, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.45,
+        color,
+        1,
+        lineType=cv2.LINE_AA,
+    )
+
+
+def _draw_s2_legend(
+    canvas: np.ndarray,
+    *,
+    legend: str,
+    tracks: Sequence[int],
+    show_confidence: bool,
+    skeleton_nodes_only: bool,
+) -> None:
+    x0, y0 = 8, 16
+    cv2.putText(
+        canvas,
+        f"{legend}",
+        (x0, y0),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.42,
+        _HALO_BGR,
+        1,
+        lineType=cv2.LINE_AA,
+    )
+    row = y0 + 16
+    cv2.putText(
+        canvas,
+        "S2 QC - provisional IDs (not S3-accepted)",
+        (x0, row),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.38,
+        (200, 200, 120),
+        1,
+        lineType=cv2.LINE_AA,
+    )
+    row += 16
+    if skeleton_nodes_only:
+        cv2.putText(
+            canvas,
+            "nodes-only (no SLEAP topology)",
+            (x0, row),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            (180, 180, 180),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+        row += 16
+    if show_confidence:
+        sample = (80, 180, 255)
+        for label, score in (("score~0", 0.0), ("score~1", 1.0), ("missing", None)):
+            _draw_s2_keypoint(
+                canvas,
+                float(x0 + 8),
+                float(row - 3),
+                color=sample,
+                score=score,
+                show_confidence=True,
+                radius=4,
+            )
+            cv2.putText(
+                canvas,
+                label,
+                (x0 + 20, row),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.38,
+                _HALO_BGR,
+                1,
+                lineType=cv2.LINE_AA,
+            )
+            row += 15
+        cv2.putText(
+            canvas,
+            (
+                f"{S2_SCORE_VISUAL_MAPPING_ID}: fill intensity vs "
+                f"[{S2_SCORE_VISUAL_RANGE_MIN:g},{S2_SCORE_VISUAL_RANGE_MAX:g}] "
+                "(draw clamp only)"
+            ),
+            (x0, row),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.34,
+            (170, 170, 170),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+        row += 14
+        # Keep summary short on-frame; full text is in the manifest.
+        _ = S2_SCORE_VISUAL_MAPPING_SUMMARY
+    for track in tracks:
+        color = TRACK_COLORS_BGR.get(int(track), (200, 200, 200))
+        cv2.circle(canvas, (x0 + 8, row - 3), 4, color, -1, lineType=cv2.LINE_AA)
+        cv2.putText(
+            canvas,
+            f"P{track} provisional",
+            (x0 + 20, row),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            _HALO_BGR,
+            1,
+            lineType=cv2.LINE_AA,
+        )
+        row += 15
 
 
 def _render_s4_pose(
