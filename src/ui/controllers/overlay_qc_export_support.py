@@ -12,9 +12,15 @@ from overlay.contracts import HudDirectionMode
 from overlay.discovery import OverlayQcJobSummary
 
 OverlayQcExportFamily = Literal[
-    "behavioral", "s4_pose", "s2_pose", "s3_pose", "s5_segmentation"
+    "behavioral",
+    "s4_pose",
+    "s2_pose",
+    "s3_pose",
+    "s5_segmentation",
+    "mixed_pose_behavior",
 ]
 OverlayQcBehaviorSource = Literal["s8_automated", "s10_reviewed"]
+OverlayQcPoseSource = Literal["s3_accepted", "s4_finalized"]
 OverlayQcScopeKind = Literal["prepared_interval", "bout_span"]
 
 
@@ -37,6 +43,7 @@ class OverlayQcUiSettings:
 
     export_family: OverlayQcExportFamily = "behavioral"
     source_kind: OverlayQcBehaviorSource = "s8_automated"
+    pose_source_kind: OverlayQcPoseSource = "s4_finalized"
     scope_kind: OverlayQcScopeKind = "prepared_interval"
     prepared_frame_idx_start: int = 0
     prepared_frame_idx_end: int = 29
@@ -68,10 +75,11 @@ class OverlayQcUiSettings:
             "s2_pose",
             "s3_pose",
             "s5_segmentation",
+            "mixed_pose_behavior",
         }:
             raise ValueError(
                 "export_family must be behavioral, s4_pose, s2_pose, s3_pose, "
-                f"or s5_segmentation, got {family!r}."
+                f"s5_segmentation, or mixed_pose_behavior, got {family!r}."
             )
         source = str(self.source_kind).strip().lower()
         if source not in {"s8_automated", "s10_reviewed"}:
@@ -79,9 +87,31 @@ class OverlayQcUiSettings:
                 "Behavioral source_kind must be s8_automated or s10_reviewed, "
                 f"got {source!r}."
             )
+        pose_source = str(self.pose_source_kind).strip().lower()
+        if pose_source not in {"s3_accepted", "s4_finalized"}:
+            raise ValueError(
+                "pose_source_kind must be s3_accepted or s4_finalized, "
+                f"got {pose_source!r}."
+            )
+        if family == "mixed_pose_behavior":
+            if pose_source == "s3_accepted" and source != "s8_automated":
+                raise ValueError(
+                    "Mixed S3 accepted pose supports automated S8 behavior only "
+                    "(S3+S10 is deferred; refusing silent substitution)."
+                )
+            if source not in {"s8_automated", "s10_reviewed"}:
+                raise ValueError(
+                    "Mixed behavioral source must be explicit s8_automated or "
+                    "s10_reviewed (never auto-selected)."
+                )
         scope = str(self.scope_kind).strip().lower()
         if scope not in {"prepared_interval", "bout_span"}:
             raise ValueError(f"Unsupported scope_kind {scope!r}.")
+        if family == "mixed_pose_behavior" and scope != "prepared_interval":
+            raise ValueError(
+                "Mixed pose+behavior QC uses prepared-frame intervals only "
+                "(bout-span scope is behavioral-only)."
+            )
         if float(self.pre_context_sec) < 0 or float(self.post_context_sec) < 0:
             raise ValueError("Context padding seconds must be >= 0.")
         hud = str(self.hud_mode).strip().lower()
@@ -95,7 +125,14 @@ class OverlayQcUiSettings:
         start = int(self.prepared_frame_idx_start)
         end = int(self.prepared_frame_idx_end)
         if (
-            family in {"s4_pose", "s2_pose", "s3_pose", "s5_segmentation"}
+            family
+            in {
+                "s4_pose",
+                "s2_pose",
+                "s3_pose",
+                "s5_segmentation",
+                "mixed_pose_behavior",
+            }
             or scope == "prepared_interval"
         ):
             if start < 0 or end < 0:
@@ -136,6 +173,7 @@ class OverlayQcUiSettings:
             self,
             export_family=family,  # type: ignore[arg-type]
             source_kind=source,  # type: ignore[arg-type]
+            pose_source_kind=pose_source,  # type: ignore[arg-type]
             scope_kind=scope,  # type: ignore[arg-type]
             prepared_frame_idx_start=start,
             prepared_frame_idx_end=end,
@@ -188,6 +226,12 @@ class OverlayQcUiSettings:
         if settings.export_family == "s5_segmentation":
             return (
                 f"S5 segmentation QC prepared [{settings.prepared_frame_idx_start}, "
+                f"{settings.prepared_frame_idx_end}]"
+            )
+        if settings.export_family == "mixed_pose_behavior":
+            return (
+                f"Mixed {settings.pose_source_kind}+{settings.source_kind} QC "
+                f"prepared [{settings.prepared_frame_idx_start}, "
                 f"{settings.prepared_frame_idx_end}]"
             )
         if settings.scope_kind == "bout_span":
@@ -298,6 +342,8 @@ class OverlayQcLaunchContext:
     s3_run_id: str | None = None
     s5_run_dir: Path | None = None
     s5_run_id: str | None = None
+    # Explicit mixed pose preselection (never inferred as newest-run fallback).
+    pose_source_kind: OverlayQcPoseSource | None = None
     lock_family: bool = True
     lock_source_kind: bool = False
     locked_source_kind: OverlayQcBehaviorSource | None = None
@@ -468,6 +514,12 @@ def overlay_qc_table_rows(
             source = job.s3_run_id
         elif job.export_family == "s5_segmentation":
             source = job.s5_run_id
+        elif job.export_family == "mixed_pose_behavior":
+            pose = job.s4_run_id or job.s3_run_id or "—"
+            behavior = (
+                job.review_run_id or job.package_run_id or job.source_kind or "—"
+            )
+            source = f"{pose}+{behavior}"
         else:
             source = job.review_run_id or job.package_run_id or job.source_kind or "—"
         interval = "—"
@@ -522,6 +574,18 @@ def source_identity_summary(
         parts.append(f"contours={'yes' if cfg.show_contours else 'no'}")
         parts.append(f"masks={'yes' if cfg.show_masks else 'no'}")
         parts.append(f"scalars={'yes' if cfg.show_scalar_text else 'no'}")
+    elif cfg.export_family == "mixed_pose_behavior":
+        parts.append(f"pose={cfg.pose_source_kind}")
+        if cfg.pose_source_kind == "s4_finalized":
+            parts.append(f"s4={s4_run_id or '—'}")
+        else:
+            parts.append(f"s3={s3_run_id or '—'}")
+        parts.append(f"behavior={cfg.source_kind}")
+        parts.append(f"package={package_run_id or '—'}")
+        if cfg.source_kind == "s10_reviewed":
+            parts.append(f"review={review_run_id or '—'}")
+        parts.append(f"skeleton={'yes' if cfg.draw_skeleton else 'no'}")
+        parts.append(f"hud={cfg.hud_mode}")
     else:
         parts.append(f"source={cfg.source_kind}")
         parts.append(f"package={package_run_id or '—'}")
@@ -815,6 +879,7 @@ __all__ = [
     "OverlayQcBoutOption",
     "OverlayQcExportFamily",
     "OverlayQcBehaviorSource",
+    "OverlayQcPoseSource",
     "OverlayQcLaunchContext",
     "OverlayQcRequestIdentity",
     "OverlayQcScopeKind",

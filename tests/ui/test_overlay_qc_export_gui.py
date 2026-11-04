@@ -1221,3 +1221,192 @@ def test_s5_page_entry_button_present() -> None:
     page = BlobFeaturesPage(BlobFeaturesController())
     assert page.export_qc_overlay_button.text() == "Export QC Overlay Video…"
     assert callable(page._open_overlay_qc_export)
+
+
+def test_mixed_settings_and_compatible_selection_gates(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    session.mkdir()
+    controller = OverlayQcExportController()
+    controller.set_session(session)
+
+    ok = OverlayQcUiSettings(
+        export_family="mixed_pose_behavior",
+        pose_source_kind="s4_finalized",
+        source_kind="s8_automated",
+        prepared_frame_idx_start=10,
+        prepared_frame_idx_end=20,
+        hud_mode="both",
+        include_contact=True,
+        include_sbs=True,
+        draw_skeleton=True,
+    ).validated()
+    assert ok.export_family == "mixed_pose_behavior"
+    assert ok.pose_source_kind == "s4_finalized"
+
+    with pytest.raises(ValueError, match="S3\\+S10"):
+        OverlayQcUiSettings(
+            export_family="mixed_pose_behavior",
+            pose_source_kind="s3_accepted",
+            source_kind="s10_reviewed",
+        ).validated()
+
+    reason = controller.cannot_export_reason(
+        session_root=session,
+        settings=OverlayQcUiSettings(
+            export_family="mixed_pose_behavior",
+            pose_source_kind="s4_finalized",
+            source_kind="s8_automated",
+        ),
+        package_dir=None,
+        package_run_id=None,
+        s4_run_dir=session / "pose_finalization" / "s4",
+        s4_run_id="s4",
+    )
+    assert reason is not None
+    assert "S9 package" in reason
+
+    identity = controller.begin_export_launch(
+        session_root=session,
+        settings=OverlayQcUiSettings(
+            export_family="mixed_pose_behavior",
+            pose_source_kind="s4_finalized",
+            source_kind="s8_automated",
+            prepared_frame_idx_start=0,
+            prepared_frame_idx_end=5,
+        ),
+        package_dir=session / "results_package__a",
+        package_run_id="results_package__a",
+        s4_run_dir=session / "pose_finalization" / "s4",
+        s4_run_id="s4",
+    )
+    assert identity.export_family == "mixed_pose_behavior"
+    assert identity.source_kind == "s8_automated"
+    assert identity.s4_run_id == "s4"
+    assert identity.package_run_id == "results_package__a"
+    controller.record_export_failure("cleanup", expected_identity=identity)
+
+
+def test_mixed_dialog_family_selection_and_workspace_safety(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    session.mkdir()
+    s4 = session / "pose_finalization" / "s4_a"
+    s3 = session / "tracking_correction" / "s3_a"
+    pkg = session / "results_package__a"
+    s4.mkdir(parents=True)
+    s3.mkdir(parents=True)
+    pkg.mkdir(parents=True)
+    launch = OverlayQcLaunchContext(
+        session_root=session,
+        export_family="mixed_pose_behavior",
+        lock_family=False,
+        package_dir=pkg,
+        package_run_id="results_package__a",
+        s4_run_dir=s4,
+        s4_run_id="s4_a",
+        s3_run_dir=s3,
+        s3_run_id="s3_a",
+        package_options=(("results_package__a", pkg),),
+        s4_options=(("s4_a", s4),),
+        s3_options=(("s3_a", s3),),
+        preferred_prepared_start=5,
+        preferred_prepared_end=15,
+    )
+    dialog = OverlayQcExportDialog(launch=launch)
+    dialog.show()
+    idx = dialog.family_combo.findData("mixed_pose_behavior")
+    assert idx >= 0
+    dialog.family_combo.setCurrentIndex(idx)
+    assert dialog.pose_source_combo.isEnabled() is True
+    assert dialog.draw_skeleton.isEnabled() is True
+    assert dialog.hud_combo.isEnabled() is True
+    assert dialog.include_contact.isEnabled() is True
+    assert dialog.include_sbs.isEnabled() is True
+    assert dialog.s4_provenance_label.isVisible() is True
+    dialog.pose_source_combo.setCurrentIndex(
+        dialog.pose_source_combo.findData("s3_accepted")
+    )
+    assert dialog.source_kind_combo.currentData() == "s8_automated"
+    assert dialog.s3_combo.isEnabled() is True
+    assert dialog.s4_combo.isEnabled() is False
+    assert dialog.s4_provenance_label.isVisible() is False
+    settings = dialog._read_settings().validated()
+    assert settings.export_family == "mixed_pose_behavior"
+    assert settings.pose_source_kind == "s3_accepted"
+    assert settings.source_kind == "s8_automated"
+    assert settings.prepared_frame_idx_start == 5
+    assert settings.hud_mode == "both"
+
+    # S4 mixed may select published S10; S3+S10 remains forced off.
+    dialog.pose_source_combo.setCurrentIndex(
+        dialog.pose_source_combo.findData("s4_finalized")
+    )
+    dialog.source_kind_combo.setCurrentIndex(
+        dialog.source_kind_combo.findData("s10_reviewed")
+    )
+    assert dialog.source_kind_combo.currentData() == "s10_reviewed"
+    assert dialog.review_combo.isEnabled() is True
+    dialog.pose_source_combo.setCurrentIndex(
+        dialog.pose_source_combo.findData("s3_accepted")
+    )
+    assert dialog.source_kind_combo.currentData() == "s8_automated"
+    assert dialog.review_combo.isEnabled() is False
+
+    # Missing pose selection is rejected with an explicit operator message.
+    missing = dialog.controller.cannot_export_reason(
+        session_root=session,
+        settings=OverlayQcUiSettings(
+            export_family="mixed_pose_behavior",
+            pose_source_kind="s4_finalized",
+            source_kind="s8_automated",
+        ),
+        package_dir=pkg,
+        package_run_id="results_package__a",
+        s4_run_dir=None,
+        s4_run_id=None,
+    )
+    assert missing is not None
+    assert "never auto-picks newest" in missing
+
+    # Workspace safety: retarget blocked while a task is marked running.
+    dialog.controller.state.task_running = True
+    with pytest.raises(OverlayQcExportUiError, match="while a QC overlay export"):
+        dialog.controller.set_session(tmp_path / "other")
+    dialog.controller.state.task_running = False
+    dialog.close()
+
+
+def test_mixed_preselection_is_caller_attributed(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    session.mkdir()
+    s4_a = session / "pose_finalization" / "s4_a"
+    s4_b = session / "pose_finalization" / "s4_b"
+    pkg = session / "results_package__a"
+    for path in (s4_a, s4_b, pkg):
+        path.mkdir(parents=True)
+    # Explicit caller preselection of s4_b — never newest/fallback to s4_a.
+    launch = OverlayQcLaunchContext(
+        session_root=session,
+        export_family="mixed_pose_behavior",
+        lock_family=True,
+        pose_source_kind="s4_finalized",
+        package_dir=pkg,
+        package_run_id="results_package__a",
+        s4_run_dir=s4_b,
+        s4_run_id="s4_b",
+        package_options=(("results_package__a", pkg),),
+        s4_options=(("s4_a", s4_a), ("s4_b", s4_b)),
+        preferred_prepared_start=2,
+        preferred_prepared_end=7,
+    )
+    dialog = OverlayQcExportDialog(launch=launch)
+    dialog.show()
+    assert dialog.family_combo.currentData() == "mixed_pose_behavior"
+    assert dialog.family_combo.isEnabled() is False  # lock_family
+    assert dialog.pose_source_combo.currentData() == "s4_finalized"
+    assert dialog.s4_combo.currentData()[0] == "s4_b"
+    assert dialog.s4_combo.currentData()[1] == s4_b
+    settings = dialog._read_settings().validated()
+    assert settings.pose_source_kind == "s4_finalized"
+    assert settings.prepared_frame_idx_start == 2
+    assert settings.prepared_frame_idx_end == 7
+    dialog.close()

@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 from overlay.contracts import OverlayExportCancelled
 from overlay.discovery import (
     EXPORT_FAMILY_BEHAVIORAL,
+    EXPORT_FAMILY_MIXED,
     EXPORT_FAMILY_S2_POSE,
     EXPORT_FAMILY_S3_POSE,
     EXPORT_FAMILY_S4_POSE,
@@ -103,11 +104,19 @@ class OverlayQcExportDialog(QDialog):
             if family_idx >= 0:
                 self.family_combo.setCurrentIndex(family_idx)
             self.family_combo.setEnabled(not launch.lock_family)
-            if launch.export_family == EXPORT_FAMILY_S4_POSE and launch.s4_run_id:
+            if (
+                launch.export_family
+                in {EXPORT_FAMILY_S4_POSE, EXPORT_FAMILY_MIXED}
+                and launch.s4_run_id
+            ):
                 self._select_combo_by_run_id(self.s4_combo, launch.s4_run_id)
             if launch.export_family == EXPORT_FAMILY_S2_POSE and launch.s2_run_id:
                 self._select_combo_by_run_id(self.s2_combo, launch.s2_run_id)
-            if launch.export_family == EXPORT_FAMILY_S3_POSE and launch.s3_run_id:
+            if (
+                launch.export_family
+                in {EXPORT_FAMILY_S3_POSE, EXPORT_FAMILY_MIXED}
+                and launch.s3_run_id
+            ):
                 self._select_combo_by_run_id(self.s3_combo, launch.s3_run_id)
             if (
                 launch.export_family == EXPORT_FAMILY_S5_SEGMENTATION
@@ -119,10 +128,20 @@ class OverlayQcExportDialog(QDialog):
             if launch.review_run_id:
                 self._select_combo_by_run_id(self.review_combo, launch.review_run_id)
             source_kind = self._resolved_launch_source_kind(launch)
-            if launch.export_family == EXPORT_FAMILY_BEHAVIORAL:
+            if launch.export_family in {
+                EXPORT_FAMILY_BEHAVIORAL,
+                EXPORT_FAMILY_MIXED,
+            }:
                 idx = self.source_kind_combo.findData(source_kind)
                 if idx >= 0:
                     self.source_kind_combo.setCurrentIndex(idx)
+            if (
+                launch.export_family == EXPORT_FAMILY_MIXED
+                and launch.pose_source_kind
+            ):
+                pose_idx = self.pose_source_combo.findData(launch.pose_source_kind)
+                if pose_idx >= 0:
+                    self.pose_source_combo.setCurrentIndex(pose_idx)
             if launch.preferred_prepared_start is not None:
                 self.prep_start_spin.setValue(int(launch.preferred_prepared_start))
             if launch.preferred_prepared_end is not None:
@@ -196,14 +215,30 @@ class OverlayQcExportDialog(QDialog):
         self.family_combo.addItem(
             "S5 blob-segmentation QC", EXPORT_FAMILY_S5_SEGMENTATION
         )
+        self.family_combo.addItem(
+            "Mixed pose + behavioral QC", EXPORT_FAMILY_MIXED
+        )
         self.family_combo.currentIndexChanged.connect(self._on_family_changed)
         form.addRow("Export type", self.family_combo)
+
+        self.pose_source_combo = QComboBox()
+        self.pose_source_combo.addItem("S4 finalized pose", "s4_finalized")
+        self.pose_source_combo.addItem("S3 accepted tracked pose", "s3_accepted")
+        self.pose_source_combo.currentIndexChanged.connect(self._on_pose_source_changed)
+        form.addRow("Mixed pose source", self.pose_source_combo)
 
         self.source_kind_combo = QComboBox()
         self.source_kind_combo.addItem("Automated S8 via S9 package", "s8_automated")
         self.source_kind_combo.addItem("Published S10 reviewed", "s10_reviewed")
         self.source_kind_combo.currentIndexChanged.connect(self._on_source_kind_changed)
         form.addRow("Behavioral source", self.source_kind_combo)
+
+        self.s4_provenance_label = QLabel(
+            "S4 provenance styling: observed / temporal_resample / gap_fill; "
+            "missing and protected blanks stay undrawn."
+        )
+        self.s4_provenance_label.setWordWrap(True)
+        form.addRow("", self.s4_provenance_label)
 
         self.package_combo = QComboBox()
         self.package_combo.currentIndexChanged.connect(self._on_package_changed)
@@ -553,10 +588,34 @@ class OverlayQcExportDialog(QDialog):
             self.show_masks.setChecked(False)
             self.show_scalar_text.setChecked(False)
             self.mask_opacity_spin.setValue(0.35)
+        if family == EXPORT_FAMILY_MIXED:
+            # Mixed defaults: both-direction HUD + skeleton; do not alter
+            # single-family export defaults when leaving mixed.
+            self.hud_combo.setCurrentIndex(self.hud_combo.findData("both"))
+            self.draw_skeleton.setChecked(True)
+            self._enforce_mixed_behavior_compatibility()
         self._apply_settings_from_widgets()
         self._update_enabled()
 
+    def _on_pose_source_changed(self) -> None:
+        self._enforce_mixed_behavior_compatibility()
+        self._apply_settings_from_widgets()
+        self._update_enabled()
+
+    def _enforce_mixed_behavior_compatibility(self) -> None:
+        """Keep mixed pose/behavior pairs inside supported combinations only."""
+
+        if self.family_combo.currentData() != EXPORT_FAMILY_MIXED:
+            return
+        pose_kind = self.pose_source_combo.currentData()
+        if pose_kind == "s3_accepted":
+            # S3+S10 deferred — force automated S8 without silent S10 keep.
+            idx = self.source_kind_combo.findData("s8_automated")
+            if idx >= 0:
+                self.source_kind_combo.setCurrentIndex(idx)
+
     def _on_source_kind_changed(self) -> None:
+        self._enforce_mixed_behavior_compatibility()
         self._apply_settings_from_widgets()
         self._update_enabled()
 
@@ -670,9 +729,11 @@ class OverlayQcExportDialog(QDialog):
         source_kind = str(self.source_kind_combo.currentData())
         if self._launch is not None and self._launch.lock_source_kind:
             source_kind = str(self._launch.locked_source_kind or "s8_automated")
+        pose_source_kind = str(self.pose_source_combo.currentData() or "s4_finalized")
         return OverlayQcUiSettings(
             export_family=family,  # type: ignore[arg-type]
             source_kind=source_kind,  # type: ignore[arg-type]
+            pose_source_kind=pose_source_kind,  # type: ignore[arg-type]
             scope_kind=str(self.scope_combo.currentData()),  # type: ignore[arg-type]
             prepared_frame_idx_start=int(self.prep_start_spin.value()),
             prepared_frame_idx_end=int(self.prep_end_spin.value()),
@@ -978,6 +1039,7 @@ class OverlayQcExportDialog(QDialog):
         if running:
             for widget in (
                 self.family_combo,
+                self.pose_source_combo,
                 self.source_kind_combo,
                 self.package_combo,
                 self.review_combo,
@@ -1015,25 +1077,39 @@ class OverlayQcExportDialog(QDialog):
         )
         family = self.family_combo.currentData()
         behavioral = family == EXPORT_FAMILY_BEHAVIORAL
+        mixed = family == EXPORT_FAMILY_MIXED
         s4_family = family == EXPORT_FAMILY_S4_POSE
         s2_family = family == EXPORT_FAMILY_S2_POSE
         s3_family = family == EXPORT_FAMILY_S3_POSE
         s5_family = family == EXPORT_FAMILY_S5_SEGMENTATION
         bout = self.scope_combo.currentData() == "bout_span"
         reviewed = self.source_kind_combo.currentData() == "s10_reviewed"
+        pose_kind = self.pose_source_combo.currentData()
+        mixed_s4 = mixed and pose_kind == "s4_finalized"
+        mixed_s3 = mixed and pose_kind == "s3_accepted"
+        behavioral_controls = behavioral or mixed
+        # S3 mixed locks behavior to S8; S4 mixed may choose S8 or S10.
+        mixed_behavior_switchable = mixed_s4 and not source_locked
         self.family_combo.setEnabled(not lock)
-        self.source_kind_combo.setEnabled(behavioral and not source_locked)
-        self.package_combo.setEnabled(behavioral)
-        self.review_combo.setEnabled(behavioral and reviewed and not source_locked)
-        self.s4_combo.setEnabled(s4_family)
+        self.pose_source_combo.setEnabled(mixed)
+        self.source_kind_combo.setEnabled(
+            (behavioral and not source_locked) or mixed_behavior_switchable
+        )
+        self.package_combo.setEnabled(behavioral_controls)
+        self.review_combo.setEnabled(
+            ((behavioral and reviewed) or (mixed_s4 and reviewed)) and not source_locked
+        )
+        self.s4_combo.setEnabled(s4_family or mixed_s4)
         self.s2_combo.setEnabled(s2_family)
-        self.s3_combo.setEnabled(s3_family)
+        self.s3_combo.setEnabled(s3_family or mixed_s3)
         self.s5_combo.setEnabled(s5_family)
         self.scope_combo.setEnabled(behavioral)
-        self.hud_combo.setEnabled(behavioral)
-        self.include_contact.setEnabled(behavioral)
-        self.include_sbs.setEnabled(behavioral)
-        self.draw_skeleton.setEnabled(s4_family or s2_family or s3_family)
+        self.hud_combo.setEnabled(behavioral_controls)
+        self.include_contact.setEnabled(behavioral_controls)
+        self.include_sbs.setEnabled(behavioral_controls)
+        self.draw_skeleton.setEnabled(
+            s4_family or s2_family or s3_family or mixed
+        )
         self.show_confidence.setEnabled(s2_family)
         self.show_machine_corrections.setEnabled(s3_family)
         self.show_manual_corrections.setEnabled(s3_family)
@@ -1041,6 +1117,7 @@ class OverlayQcExportDialog(QDialog):
         self.show_masks.setEnabled(s5_family)
         self.show_scalar_text.setEnabled(s5_family)
         self.mask_opacity_spin.setEnabled(s5_family and self.show_masks.isChecked())
+        self.s4_provenance_label.setVisible(s4_family or mixed_s4)
         self.include_counter.setEnabled(True)
         self.pre_context_spin.setEnabled(True)
         self.post_context_spin.setEnabled(True)

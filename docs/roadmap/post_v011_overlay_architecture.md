@@ -1,9 +1,10 @@
 # Post-v0.1.1 — Overlay Architecture (C0 audit → C1 foundation → C2-A/C2-B QC export)
 
-**Status:** **C3-3 accepted** (S5 Blob Segmentation QC Video). Builds on C1 + C2-A + C2-B + C2-C + C3-0 + C3-1 + C3-2.
-**C3-3 base commit:** `6695c76d389a0a555aec6f6f00f6432009907057`
-**C3-3 implementation date:** 2026-11-04
-**C3-3 final acceptance date:** 2026-11-04
+**Status:** **C3-4 accepted** (Mixed Pose + Behavioral QC Video). Builds on C1 + C2-A + C2-B + C2-C + C3-0 + C3-1 + C3-2 + C3-3.
+**C3-4 base commit:** `17b03044acd328cad6bf7659e48df00a8c9a0a47`
+**C3-4 implementation date:** 2026-11-04
+**C3-4 final acceptance date:** 2026-11-04
+**C3-3 accepted:** 2026-11-04 (S5 Blob Segmentation QC Video)
 **C3-2 accepted:** 2026-11-04 (S3 Tracking Correction QC Video)
 **C3-1 accepted:** 2026-11-04 (S2 Pose Inference QC Video)
 **C3-0 accepted:** 2026-11-04 (S8 Behavioral QC Export Accessibility)
@@ -14,7 +15,7 @@
 **C0 date:** 2026-11-01  
 **C2-B base commit:** `a1da1e170297619b338a1d63f0c8239f5cbf5ea0` (`origin/main` — C1/C2-A + mainline CSV)  
 **Companion:** [`post_v011_s10_review_and_visualization.md`](post_v011_s10_review_and_visualization.md) (Increment B closed; overlays → this document)  
-**Non-scope (still):** full-session QC exporter, PI/gallery overlay integration, live overlays, S9/S10 overlay-media integration, scientific algorithm / schema mutation. S5 contour **QC replay** shipped in C3-3; S5/S9/S10 media burn-in remains deferred.  
+**Non-scope (still):** full-session QC exporter, PI/gallery overlay integration, live overlays, S9/S10 overlay-media integration, scientific algorithm / schema mutation. S5 contour **QC replay** shipped in C3-3; S5 mixing and S9/S10 media burn-in remain deferred.  
 **O4 closed:** S8 `execution.generate_overlay_video` is **deprecated and unsupported** (parsed for settings compatibility; runtime unchanged; never produced video).
 
 **Legend**
@@ -1708,3 +1709,147 @@ docs/roadmap/post_v011_overlay_architecture.md
 **C3-3 accepted** after provisional architectural review + replay-dependency disclosure hardening + isolated contour-equivalence on E-session frames. Commit/push authorized on this closure pass. Stop before C3-4. No mixed overlays, S9/S10 media integration, full-session exports, or scientific / artifact-schema changes.
 
 _End of C3-3 record._
+
+---
+
+## 22. C3-4 — Mixed Pose + Behavioral QC Video (2026-11-04)
+
+### 22.1 Objective
+
+Export short prepared-rate QC MP4s that combine one eligible pose source with one eligible behavioral source through the **existing shared compositor** (no new rendering engine).
+
+Supported combinations only:
+
+| Pose | Behavior | Status |
+| --- | --- | --- |
+| S4 finalized pose | S8 automated (via eligible S9 package) | **Supported** |
+| S4 finalized pose | Published S10 reviewed | **Supported** |
+| S3 accepted tracked pose | S8 automated | **Supported** |
+| S3 accepted tracked pose | S10 reviewed | **Deferred** (explicitly rejected) |
+| Any auto “newest run” selection | — | **Forbidden** |
+| Silent S8↔S10 or S3↔S4 substitution | — | **Forbidden** |
+
+Family dirname: `overlay_qc_mixed__{timestamp}/`  
+Video: `mixed_pose_behavior_qc.mp4`  
+Renderer stamp: `overlay_renderer_c3_4_v1`
+
+### 22.2 Source compatibility rules (**fact**)
+
+`resolve_overlay_mixed_qc_source` requires:
+
+1. Explicit pose kind + run dir (S3 **or** S4, never both args).
+2. Explicit behavioral kind + package/review paths (S8 package **or** published S10 review).
+3. Same D0 `session_root`.
+4. Same authoritative S1 `prepared_video.mp4` path **and** digest.
+5. Matching prepared-video FPS / frame count / pixel geometry probes.
+6. Compatible synchronization / **independent timing authorities**:
+   - Behavioral dense authority = S9 package `SyncMap` / `sync_index` with offline `LAST_IN_PLATEAU`.
+   - S4 pose dense authority = **pose SyncMap** with the same `LAST_IN_PLATEAU` policy (never forced onto the behavioral map).
+   - S3 pose authority = prepared-frame direct indexing (no dense sample invented for pose).
+   - Compatibility compares session/video identity and prepared-domain alignment / coverage; it does **not** require equality of unrelated dense sample indices across maps. Independent dense choices and per-frame missing coverage are disclosed in compatibility notes. Empty coverage for the planned interval on a required dense authority is rejected.
+7. Compatible prepared-pixel coordinates (shared prepared video).
+8. Pose digests and behavioral digests pinned **independently** and revalidated before publish.
+
+### 22.3 Pose / behavior timing and rendering (**fact**)
+
+| Layer | Mapping | Notes |
+| --- | --- | --- |
+| S4 pose | Dense sample via **pose** SyncMap `LAST_IN_PLATEAU` | Independent of behavioral dense indices; provenance styling preserved; missing/protected blanks undrawn |
+| S3 pose | Prepared-frame direct (`frame_idx`) | Accepted tracked only; M0/M1 identity preserved; **not** S4 finalization |
+| Exclusive HUD A→B / B→A | Behavioral SyncMap `LAST_IN_PLATEAU` | Exact recorded exclusive labels; both directions default |
+| CONTACT / SBS | Behavioral SyncMap `LAST_IN_PLATEAU` | Independent optional LEDs |
+| Encode FPS | Prepared-video FPS | Streaming ffmpeg `libx264`; short prepared interval only |
+
+Topology: recorded S2 edges when readable; otherwise honest nodes-only disclosure (no invented edges).
+
+Irregular/plateau fixture (`test_independent_timing_authorities_irregular_plateau`) verifies repeated dense→prepared plateaus, missing pose coverage with independent behavioral coverage, first/last prepared frames, and intentionally different numeric pose vs behavioral dense sample indices with correct rendered pose coordinates and labels.
+
+### 22.4 Mixed export product (**fact**)
+
+`export_mixed_pose_behavior_qc_clip` reuses C2-A streaming pipe + atomic staging publication. Sidecars:
+
+- `overlay_artifact_manifest.json` (`overlay_artifact_manifest_v1`)
+- `run_meta.json`
+- `settings_used.yaml`
+- `processing_log.txt`
+
+Manifest records pose run + digests, behavioral run/package/review + digests, video/sync lineage, layer selection, timing policies, output range/FPS/frame count, unavailable layers, and topology fallback.
+
+### 22.5 GUI workflow (**fact**)
+
+Shared QC Overlay Export dialog gains family `mixed_pose_behavior`:
+
+- Explicit mixed pose source combo (S4 finalized / S3 accepted).
+- Explicit behavioral source combo (S8 / published S10).
+- Compatible filtering: S3 pose forces S8 (S3+S10 disabled); S4 allows S8 or S10.
+- No newest-run fallback; missing/incompatible sources yield explicit operator errors.
+- Caller preselection (`OverlayQcLaunchContext.pose_source_kind` / run ids / preferred prepared interval) remains attributable to the opener; unlocked dialog still requires explicit combo selection.
+- Prepared-frame interval selection (bout-span remains behavioral-only).
+- Pose skeleton toggle; S4 provenance legend when S4 pose selected.
+- Both-direction HUD default; optional CONTACT/SBS.
+- Existing S4/S8/S9/S10 single-family defaults unchanged.
+- Workspace/session switching protections remain active while an export task is running.
+- Background export via existing `GuiTaskRunner` / controller path.
+
+### 22.6 Real-session acceptance evidence
+
+Session: `test_cases/E_full_session_integration`  
+Prepared interval: `[971, 1000]` (30 frames)  
+Package: `results_package__20261028T183759`
+
+| Export | Job | Result |
+| --- | --- | --- |
+| S4+S8 | `overlay_qc_mixed__20261104T171907` | 30 frames @ prepared FPS; digests unchanged; prep↔dense LAST_IN_PLATEAU noted (`971→979`, `1000→1008`); both focal labels + CONTACT/SBS LEDs visible; S4 provenance legend present |
+| S3+S8 | `overlay_qc_mixed__20261104T171908` | 30 frames; digests unchanged; S3 prepared mapping + behavior dense mapping disclosed independently |
+
+Smoke report: `tmp_overlay_c34_e_session_mixed_qc/C34_MIXED_QC_SMOKE_REPORT.json`  
+Sample frames under `tmp_overlay_c34_e_session_mixed_qc/{s4_s8,s3_s8}/frames/`.
+
+Topology note on this workstation: `pose.slp` present but optional `sleap_io` unreadable → honest nodes-only fallback (no invented edges).
+
+### 22.6.1 Published S10 mixed-export evidence (**fact**)
+
+Live E-session review `behavioral_review__20261029T194225` remains `publication_state=draft` and is **not** used. Published S4+S10 evidence is an **isolated D0-session fixture** (`test_published_s10_mixed_export_via_controller`):
+
+- Mini S9 package + published S10 review with a controlled exclusive-label change at dense sample 2 (`approach` → `nose_to_body`).
+- Draft review rejected by eligibility gates before publish.
+- Short S4+S10 mixed MP4 produced through `OverlayQcExportController` → `export_mixed_pose_behavior_qc_clip`.
+- Manifest pins published `review_run_id`, S4 `pose_run_id`, independent pose/behavior timing stamps, and observed reviewed labels.
+- Upstream S4 / S8 / reviewed-state digests unchanged after export.
+
+### 22.7 Remaining limitations / deferred non-goals
+
+- S3 + S10 mixed QC
+- S5 mixing into pose/behavior QC
+- S9/S10 media burn-in / PI integration
+- Full-session or dense-rate export
+- New scientific computations or artifact schema mutation
+- Auto-selection of newest pose or behavioral run
+- Live E-session currently lacks a published S10 review (draft-only); S4+S10 closure evidence is fixture-based
+
+### 22.8 Files touched (C3-4)
+
+```text
+src/overlay/source_mixed.py
+src/overlay/export_mixed.py
+src/overlay/evidence.py
+src/overlay/contracts.py
+src/overlay/plan.py
+src/overlay/discovery.py
+src/overlay/__init__.py
+src/ui/controllers/overlay_qc_export_support.py
+src/ui/controllers/overlay_qc_export_controller.py
+src/ui/dialogs/overlay_qc_export_dialog.py
+tests/overlay/test_export_mixed_pose_behavior_qc.py
+tests/ui/test_overlay_qc_export_gui.py
+docs/roadmap/post_v011_overlay_architecture.md
+scripts/_overlay_c34_e_session_mixed_qc_smoke.py
+```
+
+(Smoke MP4 / PNG / tmp lab outputs remain local and are **not** committed.)
+
+### 22.9 Closure
+
+**C3-4 accepted** after provisional architectural review + independent timing-authority correction + irregular/plateau fixture + isolated published S10 mixed export + GUI selection hardening. Commit/push authorized on this closure pass. Stop before C3-5. No S5 mixing, S9/S10 media or PI-report integration, full-session/dense-rate export, or scientific schema changes.
+
+_End of C3-4 acceptance record._

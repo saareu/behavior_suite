@@ -15,6 +15,7 @@ OVERLAY_S4_POSE_RENDERER_VERSION: Final[str] = "overlay_renderer_c2b_v1"
 OVERLAY_S2_POSE_RENDERER_VERSION: Final[str] = "overlay_renderer_c3_1_v1"
 OVERLAY_S3_POSE_RENDERER_VERSION: Final[str] = "overlay_renderer_c3_2_v1"
 OVERLAY_S5_SEGMENTATION_RENDERER_VERSION: Final[str] = "overlay_renderer_c3_3_v1"
+OVERLAY_MIXED_RENDERER_VERSION: Final[str] = "overlay_renderer_c3_4_v1"
 OVERLAY_ARTIFACT_MANIFEST_SCHEMA: Final[str] = "overlay_artifact_manifest_v1"
 OVERLAY_QC_EXPORT_DIRNAME: Final[str] = "results_exports"
 OVERLAY_QC_JOB_PREFIX: Final[str] = "overlay_qc_behavioral__"
@@ -29,6 +30,8 @@ OVERLAY_QC_S3_POSE_JOB_PREFIX: Final[str] = "overlay_qc_s3_pose__"
 OVERLAY_QC_S3_POSE_VIDEO_FILENAME: Final[str] = "s3_pose_qc.mp4"
 OVERLAY_QC_S5_SEGMENTATION_JOB_PREFIX: Final[str] = "overlay_qc_s5_segmentation__"
 OVERLAY_QC_S5_SEGMENTATION_VIDEO_FILENAME: Final[str] = "s5_segmentation_qc.mp4"
+OVERLAY_QC_MIXED_JOB_PREFIX: Final[str] = "overlay_qc_mixed__"
+OVERLAY_QC_MIXED_VIDEO_FILENAME: Final[str] = "mixed_pose_behavior_qc.mp4"
 S5_SEGMENTATION_REPLAY_IMPLEMENTATION_ID: Final[str] = (
     "blob_features.segmentation.segment_frame"
 )
@@ -91,6 +94,25 @@ class BehaviorSourceKind(StrEnum):
 
     S8_AUTOMATED = "s8_automated"
     S10_REVIEWED = "s10_reviewed"
+
+
+class PoseSourceKind(StrEnum):
+    """Keep accepted S3 tracked pose and S4 finalized pose identities separate."""
+
+    S3_ACCEPTED = "s3_accepted"
+    S4_FINALIZED = "s4_finalized"
+
+
+# C3-4 supported mixed combinations (never auto-promote / substitute).
+MIXED_SUPPORTED_COMBINATIONS: Final[frozenset[tuple[PoseSourceKind, BehaviorSourceKind]]] = (
+    frozenset(
+        {
+            (PoseSourceKind.S4_FINALIZED, BehaviorSourceKind.S8_AUTOMATED),
+            (PoseSourceKind.S4_FINALIZED, BehaviorSourceKind.S10_REVIEWED),
+            (PoseSourceKind.S3_ACCEPTED, BehaviorSourceKind.S8_AUTOMATED),
+        }
+    )
+)
 
 
 class HudDirectionMode(StrEnum):
@@ -371,6 +393,44 @@ def default_s5_segmentation_qc_layers(
     """Build the default C3-3 S5 blob-segmentation QC layer selection."""
 
     layers: list[LayerId] = [LayerId.S5_SEGMENTATION]
+    if include_frame_counter:
+        layers.append(LayerId.DEBUG_FRAME_COUNTER)
+    return validate_layer_selection(layers)
+
+
+def default_mixed_pose_behavior_qc_layers(
+    *,
+    pose_source_kind: PoseSourceKind | str,
+    hud_mode: HudDirectionMode | str = HudDirectionMode.BOTH,
+    include_contact: bool = True,
+    include_sbs: bool = True,
+    include_frame_counter: bool = True,
+) -> tuple[LayerId, ...]:
+    """Build the default C3-4 mixed pose + behavioral QC layer selection.
+
+    Pose layer precedes exclusive HUD / parallel LEDs / frame counter so the
+    shared compositor order matches legacy darken → skeleton → HUD → counter.
+    """
+
+    pose_kind = (
+        pose_source_kind
+        if isinstance(pose_source_kind, PoseSourceKind)
+        else PoseSourceKind(str(pose_source_kind))
+    )
+    if pose_kind is PoseSourceKind.S4_FINALIZED:
+        pose_layer = LayerId.S4_POSE_FINAL
+    elif pose_kind is PoseSourceKind.S3_ACCEPTED:
+        pose_layer = LayerId.S3_POSE_TRACKED
+    else:
+        raise OverlayContractError(
+            f"Unsupported mixed pose source kind: {pose_kind!r}."
+        )
+    layers: list[LayerId] = [pose_layer]
+    layers.extend(layers_for_hud_mode(hud_mode))
+    if include_contact:
+        layers.append(LayerId.S8_CONTACT)
+    if include_sbs:
+        layers.append(LayerId.S8_SBS)
     if include_frame_counter:
         layers.append(LayerId.DEBUG_FRAME_COUNTER)
     return validate_layer_selection(layers)

@@ -10,6 +10,8 @@ from overlay.contracts import (
     OVERLAY_QC_EXPORT_DIRNAME,
     OVERLAY_QC_JOB_PREFIX,
     OVERLAY_QC_MANIFEST_FILENAME,
+    OVERLAY_QC_MIXED_JOB_PREFIX,
+    OVERLAY_QC_MIXED_VIDEO_FILENAME,
     OVERLAY_QC_RUN_META_FILENAME,
     OVERLAY_QC_S2_POSE_JOB_PREFIX,
     OVERLAY_QC_S2_POSE_VIDEO_FILENAME,
@@ -28,6 +30,7 @@ EXPORT_FAMILY_S4_POSE = "s4_pose"
 EXPORT_FAMILY_S2_POSE = "s2_pose"
 EXPORT_FAMILY_S3_POSE = "s3_pose"
 EXPORT_FAMILY_S5_SEGMENTATION = "s5_segmentation"
+EXPORT_FAMILY_MIXED = "mixed_pose_behavior"
 
 STATUS_COMPLETED = "completed"
 STATUS_INCOMPLETE = "incomplete"
@@ -138,6 +141,12 @@ class OverlayQcProjectSummary:
             if job.export_family == EXPORT_FAMILY_S5_SEGMENTATION
         )
 
+    @property
+    def mixed_jobs(self) -> tuple[OverlayQcJobSummary, ...]:
+        return tuple(
+            job for job in self.jobs if job.export_family == EXPORT_FAMILY_MIXED
+        )
+
 
 def summarize_overlay_qc_project(
     session_root: Path | str,
@@ -147,9 +156,9 @@ def summarize_overlay_qc_project(
     """Scan ``results_exports/`` for overlay QC job prefixes.
 
     Discovers ``overlay_qc_behavioral__*``, ``overlay_qc_s4_pose__*``,
-    ``overlay_qc_s2_pose__*``, ``overlay_qc_s3_pose__*``, and
-    ``overlay_qc_s5_segmentation__*``. Other export families (media, CSV, PI
-    report) are ignored.
+    ``overlay_qc_s2_pose__*``, ``overlay_qc_s3_pose__*``,
+    ``overlay_qc_s5_segmentation__*``, and ``overlay_qc_mixed__*``. Other
+    export families (media, CSV, PI report) are ignored.
     """
 
     root = Path(session_root).expanduser().resolve()
@@ -185,6 +194,8 @@ def _family_for_dirname(name: str) -> str | None:
         return EXPORT_FAMILY_S3_POSE
     if name.startswith(OVERLAY_QC_S5_SEGMENTATION_JOB_PREFIX):
         return EXPORT_FAMILY_S5_SEGMENTATION
+    if name.startswith(OVERLAY_QC_MIXED_JOB_PREFIX):
+        return EXPORT_FAMILY_MIXED
     return None
 
 
@@ -197,6 +208,8 @@ def _video_filename_for_family(export_family: str) -> str:
         return OVERLAY_QC_S3_POSE_VIDEO_FILENAME
     if export_family == EXPORT_FAMILY_S5_SEGMENTATION:
         return OVERLAY_QC_S5_SEGMENTATION_VIDEO_FILENAME
+    if export_family == EXPORT_FAMILY_MIXED:
+        return OVERLAY_QC_MIXED_VIDEO_FILENAME
     return OVERLAY_QC_S4_POSE_VIDEO_FILENAME
 
 
@@ -403,6 +416,7 @@ def _optional_int(value: object) -> int | None:
 
 __all__ = [
     "EXPORT_FAMILY_BEHAVIORAL",
+    "EXPORT_FAMILY_MIXED",
     "EXPORT_FAMILY_S2_POSE",
     "EXPORT_FAMILY_S3_POSE",
     "EXPORT_FAMILY_S4_POSE",

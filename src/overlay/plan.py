@@ -17,7 +17,9 @@ from overlay.contracts import (
     OverlayContractError,
     OverlayExportScopeKind,
     PlateauPolicy,
+    PoseSourceKind,
     default_behavioral_qc_layers,
+    default_mixed_pose_behavior_qc_layers,
     default_s2_pose_qc_layers,
     default_s3_pose_qc_layers,
     default_s4_pose_qc_layers,
@@ -700,6 +702,158 @@ def plan_s5_prepared_interval(
         show_masks=bool(show_masks),
         show_scalar_text=bool(show_scalar_text),
         mask_opacity=opacity,
+        include_frame_counter=include_frame_counter,
+        style=draw_style,
+        pre_context_sec=float(pre_context_sec),
+        post_context_sec=float(post_context_sec),
+        clip_bounds=bounds,
+        notes=notes,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class MixedPoseBehaviorQcExportPlan:
+    """Explicit offline prepared-rate mixed pose + behavioral QC export plan."""
+
+    scope_kind: OverlayExportScopeKind
+    prepared_interval: PreparedFrameInterval
+    pose_source_kind: PoseSourceKind
+    hud_mode: HudDirectionMode
+    selected_layers: tuple[LayerId, ...]
+    plateau_policy: PlateauPolicy = PlateauPolicy.LAST_IN_PLATEAU
+    frame_domain: FrameDomain = FrameDomain.PREPARED
+    draw_skeleton: bool = True
+    include_contact: bool = True
+    include_sbs: bool = True
+    include_frame_counter: bool = True
+    style: DrawConfig = field(default_factory=DrawConfig)
+    pre_context_sec: float = 0.0
+    post_context_sec: float = 0.0
+    clip_bounds: ClipBounds | None = None
+    notes: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "scope_kind": self.scope_kind.value,
+            "prepared_interval": self.prepared_interval.to_dict(),
+            "pose_source_kind": self.pose_source_kind.value,
+            "hud_mode": self.hud_mode.value,
+            "selected_layers": [x.value for x in self.selected_layers],
+            "plateau_policy": self.plateau_policy.value,
+            "frame_domain": self.frame_domain.value,
+            "draw_skeleton": self.draw_skeleton,
+            "include_contact": self.include_contact,
+            "include_sbs": self.include_sbs,
+            "include_frame_counter": self.include_frame_counter,
+            "pre_context_sec": self.pre_context_sec,
+            "post_context_sec": self.post_context_sec,
+            "clip_bounds": None if self.clip_bounds is None else self.clip_bounds.to_dict(),
+            "style": self.style.to_dict(),
+            "notes": list(self.notes),
+        }
+
+
+def plan_mixed_prepared_interval(
+    *,
+    prepared_frame_idx_start: int,
+    prepared_frame_idx_end: int,
+    source_fps: float,
+    source_n_frames: int,
+    pose_source_kind: PoseSourceKind | str,
+    hud_mode: HudDirectionMode | str = HudDirectionMode.BOTH,
+    include_contact: bool = True,
+    include_sbs: bool = True,
+    include_frame_counter: bool = True,
+    draw_skeleton: bool = True,
+    selected_layers: list[str | LayerId] | tuple[str | LayerId, ...] | None = None,
+    plateau_policy: PlateauPolicy = PlateauPolicy.LAST_IN_PLATEAU,
+    pre_context_sec: float = 0.0,
+    post_context_sec: float = 0.0,
+    style: DrawConfig | None = None,
+    notes: tuple[str, ...] = (),
+) -> MixedPoseBehaviorQcExportPlan:
+    """Build a mixed pose + behavioral QC plan from an inclusive prepared interval."""
+
+    pose_kind = (
+        pose_source_kind
+        if isinstance(pose_source_kind, PoseSourceKind)
+        else PoseSourceKind(str(pose_source_kind))
+    )
+    mode = (
+        hud_mode
+        if isinstance(hud_mode, HudDirectionMode)
+        else HudDirectionMode(str(hud_mode))
+    )
+    interval = PreparedFrameInterval(
+        start=int(prepared_frame_idx_start),
+        end=int(prepared_frame_idx_end),
+    )
+    bounds = compute_clip_bounds(
+        prepared_frame_idx_start=interval.start,
+        prepared_frame_idx_end=interval.end,
+        source_fps=float(source_fps),
+        source_n_frames=int(source_n_frames),
+        pre_context_sec=float(pre_context_sec),
+        post_context_sec=float(post_context_sec),
+    )
+    export_interval = PreparedFrameInterval(
+        start=int(bounds.clip_frame_idx_start),
+        end=int(bounds.clip_frame_idx_end),
+    )
+    layers = (
+        validate_layer_selection(list(selected_layers))
+        if selected_layers is not None
+        else default_mixed_pose_behavior_qc_layers(
+            pose_source_kind=pose_kind,
+            hud_mode=mode,
+            include_contact=include_contact,
+            include_sbs=include_sbs,
+            include_frame_counter=include_frame_counter,
+        )
+    )
+    required_pose = (
+        LayerId.S4_POSE_FINAL
+        if pose_kind is PoseSourceKind.S4_FINALIZED
+        else LayerId.S3_POSE_TRACKED
+    )
+    if required_pose not in layers:
+        raise OverlayContractError(
+            f"Mixed QC plan requires the {required_pose.value} pose layer for "
+            f"{pose_kind.value}."
+        )
+    if LayerId.S4_POSE_FINAL in layers and LayerId.S3_POSE_TRACKED in layers:
+        raise OverlayContractError(
+            "Mixed QC plan must not select both S3 and S4 pose layers."
+        )
+    if pose_kind is PoseSourceKind.S4_FINALIZED and LayerId.S3_POSE_TRACKED in layers:
+        raise OverlayContractError(
+            "S4 mixed plan must not include s3.pose_tracked."
+        )
+    if pose_kind is PoseSourceKind.S3_ACCEPTED and LayerId.S4_POSE_FINAL in layers:
+        raise OverlayContractError(
+            "S3 mixed plan must not include s4.pose_final "
+            "(refusing silent finalization implication)."
+        )
+    draw_style = style or DrawConfig(
+        darken_alpha=0.90,
+        draw_skeleton=draw_skeleton,
+        node_radius=5,
+        edge_thickness=2,
+        legend_text=True,
+        hud_direction_mode=mode.value,
+        contact_led_enabled=include_contact,
+        sbs_led_enabled=include_sbs,
+    )
+    return MixedPoseBehaviorQcExportPlan(
+        scope_kind=OverlayExportScopeKind.PREPARED_INTERVAL,
+        prepared_interval=export_interval,
+        pose_source_kind=pose_kind,
+        hud_mode=mode,
+        selected_layers=layers,
+        plateau_policy=plateau_policy,
+        draw_skeleton=draw_skeleton,
+        include_contact=include_contact,
+        include_sbs=include_sbs,
         include_frame_counter=include_frame_counter,
         style=draw_style,
         pre_context_sec=float(pre_context_sec),

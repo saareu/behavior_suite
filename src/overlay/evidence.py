@@ -18,8 +18,14 @@ def collect_evidence(
     *,
     selected_layers: Sequence[str | LayerId],
     plateau_policy: PlateauPolicy = PlateauPolicy.LAST_IN_PLATEAU,
+    layer_timing: Mapping[LayerId, PreparedFrameTiming] | None = None,
 ) -> OverlayEvidenceBundle:
-    """Resolve timing and observe selected layers (read-only)."""
+    """Resolve timing and observe selected layers (read-only).
+
+    ``sync`` supplies the primary bundle timing (behavioral HUD / debug). Optional
+    ``layer_timing`` overrides pass an independent prepared→dense resolution to
+    specific adapters (C3-4 mixed S4 pose uses its own SyncMap).
+    """
 
     selected = tuple(parse_layer_id(x) for x in selected_layers)
     if not selected:
@@ -36,6 +42,7 @@ def collect_evidence(
         prepared_frame_idx,
         plateau_policy=plateau_policy,
     )
+    overrides = dict(layer_timing or {})
     observations: dict[LayerId, OverlayObservation] = {}
     for layer in selected:
         adapter = adapter_map.get(layer)
@@ -46,8 +53,9 @@ def collect_evidence(
                 reason=f"No adapter registered for layer {layer.value}.",
             )
             continue
+        observe_timing = overrides.get(layer, timing)
         observations[layer] = adapter.observe(
-            timing,
+            observe_timing,
             prepared_frame_idx=int(prepared_frame_idx),
         )
     return OverlayEvidenceBundle(

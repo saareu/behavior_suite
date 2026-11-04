@@ -31,6 +31,10 @@ from overlay.export import (
     export_behavioral_qc_clip,
     export_s4_pose_qc_clip,
 )
+from overlay.export_mixed import (
+    OverlayMixedQcExportResult,
+    export_mixed_pose_behavior_qc_clip,
+)
 from overlay.export_s2 import OverlayS2PoseQcExportResult, export_s2_pose_qc_clip
 from overlay.export_s3 import OverlayS3PoseQcExportResult, export_s3_pose_qc_clip
 from overlay.export_s5 import (
@@ -39,6 +43,7 @@ from overlay.export_s5 import (
 )
 from overlay.plan import (
     plan_bout_span,
+    plan_mixed_prepared_interval,
     plan_prepared_interval,
     plan_s2_prepared_interval,
     plan_s3_prepared_interval,
@@ -46,6 +51,7 @@ from overlay.plan import (
     plan_s5_prepared_interval,
 )
 from overlay.source import resolve_overlay_qc_source
+from overlay.source_mixed import resolve_overlay_mixed_qc_source
 from overlay.source_s2 import resolve_overlay_s2_qc_source
 from overlay.source_s3 import resolve_overlay_s3_qc_source
 from overlay.source_s4 import resolve_overlay_s4_qc_source
@@ -69,6 +75,7 @@ OverlayExportResult = (
     | OverlayS2PoseQcExportResult
     | OverlayS3PoseQcExportResult
     | OverlayS5SegmentationQcExportResult
+    | OverlayMixedQcExportResult
 )
 
 
@@ -111,6 +118,7 @@ class OverlayQcExportController:
         s2_exporter: Callable[..., OverlayS2PoseQcExportResult] | None = None,
         s3_exporter: Callable[..., OverlayS3PoseQcExportResult] | None = None,
         s5_exporter: Callable[..., OverlayS5SegmentationQcExportResult] | None = None,
+        mixed_exporter: Callable[..., OverlayMixedQcExportResult] | None = None,
         folder_opener: FolderOpener | None = None,
         file_opener: FileOpener | None = None,
         bout_loader: Callable[[Path], tuple[OverlayQcBoutOption, ...]] | None = None,
@@ -121,6 +129,7 @@ class OverlayQcExportController:
         self._s2_exporter = s2_exporter or export_s2_pose_qc_clip
         self._s3_exporter = s3_exporter or export_s3_pose_qc_clip
         self._s5_exporter = s5_exporter or export_s5_segmentation_qc_clip
+        self._mixed_exporter = mixed_exporter or export_mixed_pose_behavior_qc_clip
         self._folder_opener = folder_opener or open_folder_in_platform_explorer
         self._file_opener = file_opener or _default_file_opener
         self._bout_loader = bout_loader or load_bout_options_from_package
@@ -334,6 +343,49 @@ class OverlayQcExportController:
                     "(never auto-picks newest)."
                 )
             return None
+        if cfg.export_family == "mixed_pose_behavior":
+            if cfg.pose_source_kind == "s4_finalized":
+                if s4_run_dir is None or s4_run_id is None:
+                    return (
+                        "Select an eligible completed S4 run for mixed QC "
+                        "(never auto-picks newest)."
+                    )
+            else:
+                # pose_source_kind == "s3_accepted" after OverlayQcUiSettings.validated()
+                if s3_run_dir is None or s3_run_id is None:
+                    return (
+                        "Select an accepted S3 run for mixed QC "
+                        "(never auto-picks newest)."
+                    )
+                if cfg.source_kind != BehaviorSourceKind.S8_AUTOMATED.value:
+                    return (
+                        "Mixed S3 pose supports automated S8 behavior only "
+                        "(S3+S10 deferred; refusing silent substitution)."
+                    )
+            if cfg.source_kind not in {
+                BehaviorSourceKind.S8_AUTOMATED.value,
+                BehaviorSourceKind.S10_REVIEWED.value,
+            }:
+                return (
+                    "Choose Automated S8 via S9 package or Published S10 as the "
+                    "mixed behavioral source."
+                )
+            if package_dir is None or package_run_id is None:
+                return "Select an eligible S9 package for the mixed behavioral source."
+            if cfg.source_kind == BehaviorSourceKind.S10_REVIEWED.value:
+                if review_is_draft:
+                    return (
+                        "Working drafts cannot be used as mixed QC sources. "
+                        "Publish the review first, or choose automated S8."
+                    )
+                if review_run_dir is None or review_run_id is None:
+                    return "Select a published S10 review for mixed QC."
+            elif review_run_dir is not None:
+                return (
+                    "Automated mixed QC must not include a review run "
+                    "(refusing silent S10 substitution)."
+                )
+            return None
 
         if cfg.source_kind not in {
             BehaviorSourceKind.S8_AUTOMATED.value,
@@ -399,6 +451,8 @@ class OverlayQcExportController:
             raise OverlayQcExportUiError(reason)
 
         validated = (settings or self.state.settings).validated()
+        mixed = validated.export_family == "mixed_pose_behavior"
+        behavioral_like = validated.export_family in {"behavioral", "mixed_pose_behavior"}
         identity = OverlayQcRequestIdentity.new(
             session_root=Path(session_root),
             export_family=validated.export_family,
@@ -408,26 +462,46 @@ class OverlayQcExportController:
                 in {"s4_pose", "s2_pose", "s3_pose", "s5_segmentation"}
                 else validated.source_kind
             ),
-            package_run_id=package_run_id,
-            package_dir=package_dir,
+            package_run_id=package_run_id if behavioral_like else None,
+            package_dir=package_dir if behavioral_like else None,
             review_run_id=(
                 review_run_id
-                if validated.export_family == "behavioral"
+                if behavioral_like
                 and validated.source_kind == BehaviorSourceKind.S10_REVIEWED.value
                 else None
             ),
             review_run_dir=(
                 review_run_dir
-                if validated.export_family == "behavioral"
+                if behavioral_like
                 and validated.source_kind == BehaviorSourceKind.S10_REVIEWED.value
                 else None
             ),
-            s4_run_id=s4_run_id if validated.export_family == "s4_pose" else None,
-            s4_run_dir=s4_run_dir if validated.export_family == "s4_pose" else None,
+            s4_run_id=(
+                s4_run_id
+                if validated.export_family == "s4_pose"
+                or (mixed and validated.pose_source_kind == "s4_finalized")
+                else None
+            ),
+            s4_run_dir=(
+                s4_run_dir
+                if validated.export_family == "s4_pose"
+                or (mixed and validated.pose_source_kind == "s4_finalized")
+                else None
+            ),
             s2_run_id=s2_run_id if validated.export_family == "s2_pose" else None,
             s2_run_dir=s2_run_dir if validated.export_family == "s2_pose" else None,
-            s3_run_id=s3_run_id if validated.export_family == "s3_pose" else None,
-            s3_run_dir=s3_run_dir if validated.export_family == "s3_pose" else None,
+            s3_run_id=(
+                s3_run_id
+                if validated.export_family == "s3_pose"
+                or (mixed and validated.pose_source_kind == "s3_accepted")
+                else None
+            ),
+            s3_run_dir=(
+                s3_run_dir
+                if validated.export_family == "s3_pose"
+                or (mixed and validated.pose_source_kind == "s3_accepted")
+                else None
+            ),
             s5_run_id=(
                 s5_run_id if validated.export_family == "s5_segmentation" else None
             ),
@@ -594,6 +668,45 @@ class OverlayQcExportController:
             return self._s5_exporter(
                 source=s5_source,
                 plan=s5_plan,
+                output_root=output_root,
+                progress_callback=_bridge,
+                cancellation_requested=cancellation_requested,
+            )
+        if settings.export_family == "mixed_pose_behavior":
+            if identity.source_kind is None or identity.package_dir is None:
+                raise OverlayQcExportUiError(
+                    "Mixed QC launch is missing behavioral package_dir/source_kind."
+                )
+            mixed_source = resolve_overlay_mixed_qc_source(
+                pose_source_kind=settings.pose_source_kind,
+                behavior_source_kind=identity.source_kind,
+                s4_run_dir=identity.s4_run_dir,
+                s3_run_dir=identity.s3_run_dir,
+                package_dir=identity.package_dir,
+                review_run_dir=identity.review_run_dir,
+                prepared_interval=(
+                    int(settings.prepared_frame_idx_start),
+                    int(settings.prepared_frame_idx_end),
+                ),
+            )
+            mixed_plan = plan_mixed_prepared_interval(
+                prepared_frame_idx_start=settings.prepared_frame_idx_start,
+                prepared_frame_idx_end=settings.prepared_frame_idx_end,
+                source_fps=float(mixed_source.video_probe.fps),
+                source_n_frames=int(mixed_source.video_probe.n_frames),
+                pose_source_kind=settings.pose_source_kind,
+                hud_mode=settings.hud_mode,
+                include_contact=settings.include_contact,
+                include_sbs=settings.include_sbs,
+                include_frame_counter=settings.include_frame_counter,
+                draw_skeleton=settings.draw_skeleton,
+                pre_context_sec=settings.pre_context_sec,
+                post_context_sec=settings.post_context_sec,
+            )
+            output_root = Path(identity.session_root) / OVERLAY_QC_EXPORT_DIRNAME
+            return self._mixed_exporter(
+                source=mixed_source,
+                plan=mixed_plan,
                 output_root=output_root,
                 progress_callback=_bridge,
                 cancellation_requested=cancellation_requested,
