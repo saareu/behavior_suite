@@ -405,6 +405,75 @@ class ResultsPackagingPage(QWidget):
         export_form.addRow("Packaged profile", self.export_profile_combo)
         export_form.addRow("pre_context_sec", self.export_pre_context_spin)
         export_form.addRow("post_context_sec", self.export_post_context_spin)
+
+        # C3-5: opt-in overlay annotations for bout media (default = naked video).
+        self.export_overlay_checkbox = QCheckBox(
+            "Annotate bout videos with overlays (writes media_export_overlay__*)"
+        )
+        self.export_overlay_checkbox.setChecked(False)
+        self.export_overlay_checkbox.stateChanged.connect(self._export_settings_changed)
+        self.export_overlay_behavior_checkbox = QCheckBox(
+            "Automated behavioral labels (package-pinned S8; both focals + CONTACT/SBS)"
+        )
+        self.export_overlay_behavior_checkbox.setChecked(True)
+        self.export_overlay_behavior_checkbox.stateChanged.connect(
+            self._export_settings_changed
+        )
+        self.export_overlay_pose_checkbox = QCheckBox("Pose overlay")
+        self.export_overlay_pose_checkbox.setChecked(False)
+        self.export_overlay_pose_checkbox.stateChanged.connect(
+            self._export_settings_changed
+        )
+        self.export_overlay_pose_kind_combo = QComboBox()
+        self.export_overlay_pose_kind_combo.addItem(
+            "Accepted S3 tracked pose", "s3_accepted"
+        )
+        self.export_overlay_pose_kind_combo.addItem(
+            "Finalized S4 pose", "s4_finalized"
+        )
+        self.export_overlay_pose_kind_combo.currentIndexChanged.connect(
+            self._overlay_pose_kind_changed
+        )
+        self.export_overlay_pose_run_combo = QComboBox()
+        self.export_overlay_pose_run_combo.currentIndexChanged.connect(
+            self._export_settings_changed
+        )
+        self.export_overlay_hud_combo = QComboBox()
+        self.export_overlay_hud_combo.addItem("Both focals", "both")
+        self.export_overlay_hud_combo.addItem("Focal 0 only", "focal_0_only")
+        self.export_overlay_hud_combo.addItem("Focal 1 only", "focal_1_only")
+        self.export_overlay_hud_combo.currentIndexChanged.connect(
+            self._export_settings_changed
+        )
+        self.export_overlay_contact_checkbox = QCheckBox("CONTACT indicator")
+        self.export_overlay_contact_checkbox.setChecked(True)
+        self.export_overlay_contact_checkbox.stateChanged.connect(
+            self._export_settings_changed
+        )
+        self.export_overlay_sbs_checkbox = QCheckBox("SBS indicator")
+        self.export_overlay_sbs_checkbox.setChecked(True)
+        self.export_overlay_sbs_checkbox.stateChanged.connect(
+            self._export_settings_changed
+        )
+        self.export_overlay_skeleton_checkbox = QCheckBox("Draw pose skeleton")
+        self.export_overlay_skeleton_checkbox.setChecked(True)
+        self.export_overlay_skeleton_checkbox.stateChanged.connect(
+            self._export_settings_changed
+        )
+        self.export_overlay_dest_label = QLabel(
+            "Destination: results_exports/media_export__* (unannotated)"
+        )
+        self.export_overlay_dest_label.setWordWrap(True)
+        export_form.addRow(self.export_overlay_checkbox)
+        export_form.addRow(self.export_overlay_behavior_checkbox)
+        export_form.addRow(self.export_overlay_pose_checkbox)
+        export_form.addRow("Overlay pose kind", self.export_overlay_pose_kind_combo)
+        export_form.addRow("Overlay pose run", self.export_overlay_pose_run_combo)
+        export_form.addRow("Overlay HUD", self.export_overlay_hud_combo)
+        export_form.addRow(self.export_overlay_contact_checkbox)
+        export_form.addRow(self.export_overlay_sbs_checkbox)
+        export_form.addRow(self.export_overlay_skeleton_checkbox)
+        export_form.addRow(self.export_overlay_dest_label)
         export_layout.addLayout(export_form)
         self.export_preview_label = QLabel("")
         self.export_preview_label.setWordWrap(True)
@@ -988,6 +1057,7 @@ class ResultsPackagingPage(QWidget):
         self.export_post_context_spin.setValue(float(settings.post_context_sec))
         self.export_post_context_spin.blockSignals(False)
         self._sync_pose_picker_widgets(settings)
+        self._sync_overlay_widgets(settings)
         # Bout-selection widgets apply to media / historical bout CSV only.
         framewise = str(settings.format_profile) == "legacy_framewise_v1"
         for widget in (
@@ -997,6 +1067,111 @@ class ResultsPackagingPage(QWidget):
             self.export_profile_combo,
         ):
             widget.setEnabled(not framewise)
+
+    def _sync_overlay_widgets(self, settings: ExportUiSettings) -> None:
+        enabled = bool(settings.overlay_enabled)
+        for widget, checked in (
+            (self.export_overlay_checkbox, enabled),
+            (
+                self.export_overlay_behavior_checkbox,
+                bool(settings.overlay_include_behavior),
+            ),
+            (self.export_overlay_pose_checkbox, bool(settings.overlay_include_pose)),
+            (
+                self.export_overlay_contact_checkbox,
+                bool(settings.overlay_include_contact),
+            ),
+            (self.export_overlay_sbs_checkbox, bool(settings.overlay_include_sbs)),
+            (
+                self.export_overlay_skeleton_checkbox,
+                bool(settings.overlay_draw_skeleton),
+            ),
+        ):
+            widget.blockSignals(True)
+            widget.setChecked(checked)
+            widget.blockSignals(False)
+        kind = settings.overlay_pose_source_kind or "s4_finalized"
+        kind_index = self.export_overlay_pose_kind_combo.findData(kind)
+        self.export_overlay_pose_kind_combo.blockSignals(True)
+        self.export_overlay_pose_kind_combo.setCurrentIndex(
+            kind_index if kind_index >= 0 else 1
+        )
+        self.export_overlay_pose_kind_combo.blockSignals(False)
+        hud_index = self.export_overlay_hud_combo.findData(
+            settings.overlay_hud_mode or "both"
+        )
+        self.export_overlay_hud_combo.blockSignals(True)
+        self.export_overlay_hud_combo.setCurrentIndex(hud_index if hud_index >= 0 else 0)
+        self.export_overlay_hud_combo.blockSignals(False)
+        self._refresh_overlay_pose_run_combo(settings)
+        for widget in (
+            self.export_overlay_behavior_checkbox,
+            self.export_overlay_pose_checkbox,
+            self.export_overlay_pose_kind_combo,
+            self.export_overlay_pose_run_combo,
+            self.export_overlay_hud_combo,
+            self.export_overlay_contact_checkbox,
+            self.export_overlay_sbs_checkbox,
+            self.export_overlay_skeleton_checkbox,
+        ):
+            widget.setEnabled(enabled)
+        pose_needed = enabled and bool(settings.overlay_include_pose)
+        self.export_overlay_pose_kind_combo.setEnabled(pose_needed)
+        self.export_overlay_pose_run_combo.setEnabled(pose_needed)
+        behavior_needed = enabled and bool(settings.overlay_include_behavior)
+        self.export_overlay_hud_combo.setEnabled(behavior_needed)
+        self.export_overlay_contact_checkbox.setEnabled(behavior_needed)
+        self.export_overlay_sbs_checkbox.setEnabled(behavior_needed)
+        self.export_overlay_skeleton_checkbox.setEnabled(
+            enabled and bool(settings.overlay_include_pose)
+        )
+        if enabled:
+            self.export_overlay_dest_label.setText(
+                "Destination: results_exports/media_export_overlay__* "
+                "(annotated sibling; naked media_export__* unchanged)"
+            )
+        else:
+            self.export_overlay_dest_label.setText(
+                "Destination: results_exports/media_export__* (unannotated)"
+            )
+
+    def _refresh_overlay_pose_run_combo(self, settings: ExportUiSettings) -> None:
+        from pose_finalization.accepted_s3 import list_accepted_s3_runs
+        from results_packaging.legacy_framewise_csv import list_pose_run_candidates
+
+        kind = settings.overlay_pose_source_kind or "s4_finalized"
+        selected = settings.overlay_pose_run_dir
+        root = self.controller.state.session_root
+        self.export_overlay_pose_run_combo.blockSignals(True)
+        self.export_overlay_pose_run_combo.clear()
+        self.export_overlay_pose_run_combo.addItem("(select pose run…)", None)
+        selected_index = 0
+        if root is not None:
+            if kind == "s3_accepted":
+                for i, run in enumerate(list_accepted_s3_runs(root), start=1):
+                    self.export_overlay_pose_run_combo.addItem(
+                        run.run_id, str(Path(run.run_dir).resolve())
+                    )
+                    if selected is not None and str(Path(run.run_dir).resolve()) == selected:
+                        selected_index = i
+            else:
+                for i, candidate in enumerate(list_pose_run_candidates(root), start=1):
+                    self.export_overlay_pose_run_combo.addItem(
+                        candidate.label, str(candidate.run_dir)
+                    )
+                    if selected is not None and str(candidate.run_dir) == selected:
+                        selected_index = i
+        self.export_overlay_pose_run_combo.setCurrentIndex(selected_index)
+        self.export_overlay_pose_run_combo.blockSignals(False)
+
+    def _overlay_pose_kind_changed(self) -> None:
+        if self._syncing_widgets:
+            return
+        # Clear prior pose-run selection when kind changes (no silent reuse).
+        self.export_overlay_pose_run_combo.blockSignals(True)
+        self.export_overlay_pose_run_combo.setCurrentIndex(0)
+        self.export_overlay_pose_run_combo.blockSignals(False)
+        self._export_settings_changed()
 
     def _sync_pose_picker_widgets(self, settings: ExportUiSettings) -> None:
         pose_state = self.controller.legacy_pose_ui_state(settings=settings)
@@ -1035,6 +1210,20 @@ class ResultsPackagingPage(QWidget):
         # Only keep an explicit pose selection when the picker is active.
         if format_profile != "legacy_framewise_v1" or not self.export_pose_combo.isVisible():
             pose_dir = None
+        overlay_enabled = bool(self.export_overlay_checkbox.isChecked())
+        overlay_include_pose = bool(self.export_overlay_pose_checkbox.isChecked())
+        # Combo widgets retain prior pose-kind/run selections while pose is
+        # unchecked; ignore them unless pose overlay is actively requested.
+        overlay_pose_kind = None
+        overlay_pose_run = None
+        if overlay_enabled and overlay_include_pose:
+            if self.export_overlay_pose_kind_combo.currentData() is not None:
+                overlay_pose_kind = str(
+                    self.export_overlay_pose_kind_combo.currentData()
+                )
+            overlay_pose_data = self.export_overlay_pose_run_combo.currentData()
+            if overlay_pose_data is not None:
+                overlay_pose_run = str(overlay_pose_data)
         return ExportUiSettings(
             selection_mode=str(
                 self.export_selection_combo.currentData() or SELECTION_ALL_PACKAGE_BOUTS
@@ -1050,6 +1239,23 @@ class ResultsPackagingPage(QWidget):
             pre_context_sec=float(self.export_pre_context_spin.value()),
             post_context_sec=float(self.export_post_context_spin.value()),
             pose_run_dir=pose_dir,
+            overlay_enabled=overlay_enabled,
+            overlay_include_behavior=bool(
+                self.export_overlay_behavior_checkbox.isChecked()
+            ),
+            overlay_include_pose=overlay_include_pose,
+            overlay_pose_source_kind=overlay_pose_kind,
+            overlay_pose_run_dir=overlay_pose_run,
+            overlay_hud_mode=str(
+                self.export_overlay_hud_combo.currentData() or "both"
+            ),
+            overlay_include_contact=bool(
+                self.export_overlay_contact_checkbox.isChecked()
+            ),
+            overlay_include_sbs=bool(self.export_overlay_sbs_checkbox.isChecked()),
+            overlay_draw_skeleton=bool(
+                self.export_overlay_skeleton_checkbox.isChecked()
+            ),
         )
 
     def _export_settings_changed(self) -> None:
@@ -1065,6 +1271,13 @@ class ResultsPackagingPage(QWidget):
             self.status_message.emit(str(exc))
             self.refresh_from_state()
             return
+        # Re-sync overlay enablement / destination label without full refresh
+        # (full refresh would re-read widgets and can fight mid-edit).
+        self._syncing_widgets = True
+        try:
+            self._sync_overlay_widgets(self.controller.state.export_settings)
+        finally:
+            self._syncing_widgets = False
         self.export_preview_label.setText(self.controller.state.export_preview_text)
         self._update_enabled()
 
@@ -1145,14 +1358,34 @@ class ResultsPackagingPage(QWidget):
             self.status_message.emit(str(exc))
             self.refresh_from_state()
             return
+        overlay = bool(identity.settings.overlay_enabled)
+        # Build context first so overlay exports can cooperate with cancellation.
+        context = GuiTaskContext(
+            task_id=uuid4().hex,
+            task_kind=GuiTaskKind.RESULTS_MEDIA_EXPORT,
+            project_dir=identity.session_root,
+            raw_video_path=None,
+            generation=0,
+        )
+
+        def _media_operation(report: object) -> object:
+            return self.controller.execute_media_export_launch(
+                identity,
+                progress_callback=report,  # type: ignore[arg-type]
+                cancellation_requested=(
+                    context.is_cancellation_requested if overlay else None
+                ),
+            )
+
         self._start_export_task(
             identity,
             task_kind=GuiTaskKind.RESULTS_MEDIA_EXPORT,
-            task_name="S9 media export",
-            operation=lambda report: self.controller.execute_media_export_launch(
-                identity, progress_callback=report
+            task_name=(
+                "S9 overlay media export" if overlay else "S9 media export"
             ),
+            operation=_media_operation,
             on_success=self._on_media_export_success,
+            task_context=context,
         )
 
     def _retry_media_export(self) -> None:
@@ -1189,6 +1422,7 @@ class ResultsPackagingPage(QWidget):
         task_name: str,
         operation: object,
         on_success: object,
+        task_context: GuiTaskContext | None = None,
     ) -> None:
         self._active_export_identity = identity
         self._active_packaging_identity = None
@@ -1196,7 +1430,7 @@ class ResultsPackagingPage(QWidget):
         self.elapsed_timer.start()
         self._update_enabled()
         self._emit_running_changed()
-        context = GuiTaskContext(
+        context = task_context or GuiTaskContext(
             task_id=uuid4().hex,
             task_kind=task_kind,
             project_dir=identity.session_root,

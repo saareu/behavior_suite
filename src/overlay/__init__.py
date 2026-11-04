@@ -5,7 +5,7 @@ S8 ``execution.generate_overlay_video`` is deprecated and unsupported (O4
 closed); it remains parsed but unwired. Use ``export_behavioral_qc_clip`` /
 ``export_s4_pose_qc_clip`` / ``export_s2_pose_qc_clip`` /
 ``export_s3_pose_qc_clip`` / ``export_s5_segmentation_qc_clip`` /
-``export_mixed_pose_behavior_qc_clip`` instead.
+``export_mixed_pose_behavior_qc_clip`` / ``run_overlay_media_export`` instead.
 """
 
 from overlay.adapters import (
@@ -35,6 +35,8 @@ from overlay.adapters import (
 from overlay.compositor import ComposedFrame, OverlayCompositor
 from overlay.context import OverlayContext, OverlayEvidenceBundle, OverlayObservation
 from overlay.contracts import (
+    MEDIA_EXPORT_OVERLAY_JOB_KIND,
+    MEDIA_EXPORT_OVERLAY_JOB_PREFIX,
     OVERLAY_ARTIFACT_MANIFEST_SCHEMA,
     OVERLAY_MIXED_RENDERER_VERSION,
     OVERLAY_RENDERER_VERSION,
@@ -42,6 +44,7 @@ from overlay.contracts import (
     OVERLAY_S3_POSE_RENDERER_VERSION,
     OVERLAY_S4_POSE_RENDERER_VERSION,
     OVERLAY_S5_SEGMENTATION_RENDERER_VERSION,
+    OVERLAY_S9_MEDIA_RENDERER_VERSION,
     BehaviorSourceKind,
     FrameDomain,
     HudDirectionMode,
@@ -109,6 +112,15 @@ from overlay.export_s5 import (
     build_s5_segmentation_adapters,
     export_s5_segmentation_qc_clip,
 )
+from overlay.export_s9_media import (
+    OverlayMediaExportRequest,
+    OverlayMediaExportSettings,
+    OverlayMediaResolvedSources,
+    publish_overlay_media_export,
+    resolve_overlay_media_sources,
+    run_overlay_media_export,
+    verify_overlay_media_sources_integrity,
+)
 from overlay.plan import (
     BehavioralQcExportPlan,
     MixedPoseBehaviorQcExportPlan,
@@ -172,6 +184,8 @@ __all__ = [
     "EXPORT_FAMILY_S3_POSE",
     "EXPORT_FAMILY_S4_POSE",
     "EXPORT_FAMILY_S5_SEGMENTATION",
+    "MEDIA_EXPORT_OVERLAY_JOB_KIND",
+    "MEDIA_EXPORT_OVERLAY_JOB_PREFIX",
     "OVERLAY_ARTIFACT_MANIFEST_SCHEMA",
     "OVERLAY_MIXED_RENDERER_VERSION",
     "OVERLAY_RENDERER_VERSION",
@@ -179,6 +193,7 @@ __all__ = [
     "OVERLAY_S3_POSE_RENDERER_VERSION",
     "OVERLAY_S4_POSE_RENDERER_VERSION",
     "OVERLAY_S5_SEGMENTATION_RENDERER_VERSION",
+    "OVERLAY_S9_MEDIA_RENDERER_VERSION",
     "BehaviorSourceKind",
     "BehavioralQcExportPlan",
     "ComposedFrame",
@@ -198,6 +213,9 @@ __all__ = [
     "OverlayExportCancelled",
     "OverlayExportError",
     "OverlayExportScopeKind",
+    "OverlayMediaExportRequest",
+    "OverlayMediaExportSettings",
+    "OverlayMediaResolvedSources",
     "OverlayMixedQcExportResult",
     "OverlayMixedQcSource",
     "OverlayObservation",
@@ -277,6 +295,8 @@ __all__ = [
     "plan_s3_prepared_interval",
     "plan_s4_prepared_interval",
     "plan_s5_prepared_interval",
+    "publish_overlay_media_export",
+    "resolve_overlay_media_sources",
     "resolve_overlay_mixed_qc_source",
     "resolve_overlay_qc_source",
     "resolve_overlay_s2_qc_source",
@@ -284,10 +304,12 @@ __all__ = [
     "resolve_overlay_s4_qc_source",
     "resolve_overlay_s5_qc_source",
     "resolve_prepared_frame_timing",
+    "run_overlay_media_export",
     "s2_score_visual_intensity",
     "s4_provenance_visual_class",
     "summarize_overlay_qc_project",
     "validate_layer_selection",
+    "verify_overlay_media_sources_integrity",
     "verify_overlay_mixed_qc_source_integrity",
     "verify_overlay_qc_source_integrity",
     "verify_overlay_s2_qc_source_integrity",

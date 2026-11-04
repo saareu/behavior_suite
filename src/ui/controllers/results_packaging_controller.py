@@ -16,6 +16,11 @@ from typing import Any
 from uuid import uuid4
 
 from behavioral_arbitration.run_discovery import summarize_behavioral_arbitration_project
+from overlay.contracts import MEDIA_EXPORT_OVERLAY_JOB_KIND
+from overlay.export_s9_media import (
+    OverlayMediaExportRequest,
+    run_overlay_media_export,
+)
 from preprocess.models import OperationProgress
 from results_packaging import (
     ELIGIBLE_DOWNSTREAM,
@@ -705,11 +710,22 @@ class ResultsPackagingController:
         if run is None or root is None:
             raise ResultsPackagingUiError("Select an eligible S9 package first.")
         validated = (settings or self.state.export_settings).validated()
+        if validated.overlay_enabled:
+            # Validate overlay settings eagerly (explicit pose selection, etc.).
+            try:
+                validated.to_overlay_media_settings()
+            except ExportConfigError as exc:
+                raise ResultsPackagingUiError(str(exc)) from exc
+        job_kind = (
+            MEDIA_EXPORT_OVERLAY_JOB_KIND
+            if validated.overlay_enabled
+            else JOB_KIND_MEDIA
+        )
         identity = ExportRequestIdentity.new(
             session_root=root,
             package_run_id=run.run_id,
             package_dir=run.run_dir,
-            job_kind=JOB_KIND_MEDIA,
+            job_kind=job_kind,
             settings=validated,
         )
         self.state.export_settings = validated
@@ -717,29 +733,52 @@ class ResultsPackagingController:
         self.state.active_packaging_identity = None
         self.state.task_running = True
         self.state.run_error = None
-        self.state.run_stage = "Launching media export…"
+        self.state.run_stage = (
+            "Launching overlay media export…"
+            if validated.overlay_enabled
+            else "Launching media export…"
+        )
         return identity
 
     def execute_media_export_launch(
         self,
         identity: ExportRequestIdentity,
         progress_callback: ProgressCallback | None = None,
+        cancellation_requested: Callable[[], bool] | None = None,
     ) -> MediaExportJobResult:
         if not self._is_current_export_result(identity):
             raise ResultsPackagingUiError(
                 "Media export launch was superseded by a newer session/package selection."
             )
+        overlay = bool(identity.settings.overlay_enabled)
         if progress_callback is not None:
             progress_callback(
                 OperationProgress(
                     phase="validate",
-                    message="Validating eligible S9 package and prepared video…",
+                    message=(
+                        "Validating eligible S9 package, overlay sources, "
+                        "and prepared video…"
+                        if overlay
+                        else "Validating eligible S9 package and prepared video…"
+                    ),
                     completed_units=0,
                     total_units=None,
                     total_is_estimate=True,
                     is_indeterminate=True,
                     processed_video_time_sec=None,
                 )
+            )
+        if overlay:
+            self.state.run_stage = "Running overlay media export…"
+            return run_overlay_media_export(
+                OverlayMediaExportRequest(
+                    session_root=identity.session_root,
+                    package_dir=identity.package_dir,
+                    settings=identity.settings.to_overlay_media_settings(),
+                    allow_stale_source=False,
+                    cancellation_requested=cancellation_requested,
+                ),
+                progress_callback=progress_callback,
             )
         self.state.run_stage = "Running media export…"
         return self._media_export_runner(

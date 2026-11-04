@@ -1,9 +1,11 @@
 # Post-v0.1.1 — Overlay Architecture (C0 audit → C1 foundation → C2-A/C2-B QC export)
 
-**Status:** **C3-4 accepted** (Mixed Pose + Behavioral QC Video). Builds on C1 + C2-A + C2-B + C2-C + C3-0 + C3-1 + C3-2 + C3-3.
+**Status:** **C3-5 accepted** (Overlay-Enabled S9 Media Export). Builds on C1 + C2-A + C2-B + C2-C + C3-0 + C3-1 + C3-2 + C3-3 + C3-4.
+**C3-5 base commit:** `fa903c68e580614eedb70a23ac23615af7baf29a`
+**C3-5 implementation date:** 2026-11-04
+**C3-5 accepted:** 2026-11-04 (final multi-frame + S9 GUI acceptance)
+**C3-4 accepted:** 2026-11-04 (Mixed Pose + Behavioral QC Video)
 **C3-4 base commit:** `17b03044acd328cad6bf7659e48df00a8c9a0a47`
-**C3-4 implementation date:** 2026-11-04
-**C3-4 final acceptance date:** 2026-11-04
 **C3-3 accepted:** 2026-11-04 (S5 Blob Segmentation QC Video)
 **C3-2 accepted:** 2026-11-04 (S3 Tracking Correction QC Video)
 **C3-1 accepted:** 2026-11-04 (S2 Pose Inference QC Video)
@@ -15,7 +17,7 @@
 **C0 date:** 2026-11-01  
 **C2-B base commit:** `a1da1e170297619b338a1d63f0c8239f5cbf5ea0` (`origin/main` — C1/C2-A + mainline CSV)  
 **Companion:** [`post_v011_s10_review_and_visualization.md`](post_v011_s10_review_and_visualization.md) (Increment B closed; overlays → this document)  
-**Non-scope (still):** full-session QC exporter, PI/gallery overlay integration, live overlays, S9/S10 overlay-media integration, scientific algorithm / schema mutation. S5 contour **QC replay** shipped in C3-3; S5 mixing and S9/S10 media burn-in remain deferred.  
+**Non-scope (still):** full-session QC exporter, PI/gallery overlay integration, live overlays, S10 reviewed/PI-report overlay media, scientific algorithm / schema mutation. S5 contour **QC replay** shipped in C3-3; S5 mixing remains deferred. S9 overlay media shipped as opt-in sibling in C3-5.  
 **O4 closed:** S8 `execution.generate_overlay_video` is **deprecated and unsupported** (parsed for settings compatibility; runtime unchanged; never produced video).
 
 **Legend**
@@ -1853,3 +1855,170 @@ scripts/_overlay_c34_e_session_mixed_qc_smoke.py
 **C3-4 accepted** after provisional architectural review + independent timing-authority correction + irregular/plateau fixture + isolated published S10 mixed export + GUI selection hardening. Commit/push authorized on this closure pass. Stop before C3-5. No S5 mixing, S9/S10 media or PI-report integration, full-session/dense-rate export, or scientific schema changes.
 
 _End of C3-4 acceptance record._
+
+---
+
+## 23. C3-5 — Overlay-Enabled S9 Media Export (2026-11-04)
+
+### 23.1 Objective
+
+Enable **opt-in** overlay annotations inside S9's existing bout-based media export workflow without modifying naked `media_export__*` runs, CSV exports, scientific schemas, or the shared compositor / ffmpeg pipeline.
+
+### 23.2 Integration point (**fact**)
+
+| Concern | Decision |
+| --- | --- |
+| Naked media contract | `MediaExportSettings` / `run_media_export` / `encode_mp4_clip` remain closed and unannotated |
+| Sibling family | `results_exports/media_export_overlay__{timestamp}/` |
+| Job kind | `media_export_overlay` |
+| Renderer stamp | `overlay_renderer_c3_5_v1` |
+| Bout selection | Reuses `SelectionSpec` + `select_bouts_for_export` + `compute_clip_bounds` / clip_index |
+| Encode path | Shared compositor + `overlay.stream_clip.stream_composed_prepared_clip` (reuse of `overlay.export` ffmpeg pipe) |
+| GUI | Opt-in checkbox on existing S9 Export Bout Videos panel (default **unannotated**) |
+
+### 23.3 Supported overlay configurations
+
+| Configuration | Behavior source | Pose source |
+| --- | --- | --- |
+| Automated behavior only | Package-pinned S8 | — |
+| Accepted S3 pose only | — (package still required for bout identity/spans) | Explicit accepted S3 |
+| Finalized S4 pose only | — | Explicit finalized S4 |
+| S3 + automated behavior | Package-pinned S8 | Explicit accepted S3 |
+| S4 + automated behavior | Package-pinned S8 | Explicit finalized S4 |
+
+**Rejected / deferred:** S10 reviewed substitution, S3+S10, S5 mixing, auto-newest pose, full-session / dense-rate export, PI-report burn-in.
+
+### 23.4 Source selection and compatibility
+
+- Eligible S9 package is always explicit.
+- Behavioral overlays always use the package-pinned automated S8 source (never S10).
+- Pose overlays require an explicitly selected compatible S3 accepted or S4 finalized run.
+- Compatibility reuses the C3-4 matrix / digest / session / prepared-video gates (`resolve_overlay_mixed_qc_source` for mixed; path+digest match for pose-only).
+- Never auto-selects the newest pose run.
+
+### 23.5 Timing
+
+- Output FPS = prepared-video FPS.
+- Behavioral evidence: package SyncMap + `LAST_IN_PLATEAU`.
+- S4 pose: independent pose SyncMap + `LAST_IN_PLATEAU`.
+- S3 pose: prepared-frame direct indexing.
+- Dense sample indices are never treated as interchangeable with prepared frames.
+- Bout prepared spans and context padding preserve naked media semantics.
+
+### 23.6 Output structure and manifest
+
+```text
+{session}/results_exports/media_export_overlay__{timestamp}/
+  run_meta.json
+  settings_used.yaml
+  export_job_manifest.json
+  overlay_artifact_manifest.json
+  qc.json
+  processing_log.txt
+  clip_index.parquet
+  failures.jsonl                 # if any
+  clips/{channel}/{behavior}/{bout_id}.mp4
+```
+
+Manifest records: S9 package identity, pinned S8, optional S3/S4 pose, video/sync digests, bout IDs + prepared spans, enabled layers/settings, per-source timing authority, and per-clip SHA-256 hashes. Source integrity is revalidated before publication. No scientific artifact writes.
+
+### 23.7 GUI behavior
+
+- Default: unannotated `media_export__*` (unchanged Export Bout Videos path).
+- When overlays enabled: choose behavioral and/or pose layers, explicit pose run, both-focal HUD / CONTACT / SBS / skeleton options; same bout selection + context padding.
+- Destination label switches to `media_export_overlay__*`.
+- Cooperative cancellation is wired for overlay media jobs.
+- Researchers stay on the S9 page (no required standalone QC dialog).
+
+### 23.8 Tests and real-session acceptance
+
+- Unit/integration: naked default unchanged; behavior-only; S3-only; S4-only; S3+S8; S4+S8; bout identity/order/span; focal + CONTACT/SBS; independent/plateau timing; compatibility + digest rejection; no S10 substitution; GUI settings; cancellation/cleanup; discovery + portable paths; CSV/media regressions; scientific immutability.
+- Lab smoke: `scripts/_overlay_c35_e_session_s9_overlay_media_smoke.py` on E-session package `results_package__20261028T183759` with selected bouts for behavior-only and S4+behavior.
+  - Evidence: `tmp_overlay_c35_e_session_s9_overlay_media/C35_S9_OVERLAY_MEDIA_SMOKE_REPORT.json`
+  - Both jobs completed (`media_export_overlay__20261104T190001`, `…190002`); clip frame counts matched packaged prepared spans; portable clip relpaths; scientific digests unchanged.
+
+### 23.9 Final acceptance (2026-11-04)
+
+#### Multi-frame visual/timing
+
+Session: `test_cases/E_full_session_integration`  
+Package: `results_package__20261028T183759`  
+Bout: `behavioral_arbitration__20261028T133953__bout_00000366` (`exclusive` / `engaged`)  
+Prepared bout span: `[7517, 7536]` (20 frames)  
+Context padding: `pre=post=0.05s` → inclusive clip `[7511, 7542]` (32 frames @ prepared FPS `119.048`)  
+Job: `media_export_overlay__20261104T201500` (`s4_finalized+s8_automated`)
+
+| Check | Result |
+| --- | --- |
+| Bout identity + channel | **Pass** — exclusive engaged bout id preserved; portable `clips/exclusive/engaged/…mp4` |
+| Exact prepared start/end | **Pass** — clip_index prepared endpoints match packaged bout; padding uses prepared FPS only |
+| Encoded/decoded continuity | **Pass** — 32 encoded, 32 decoded, 32 unique hashes (no dup/omit) |
+| Package-pinned S8 | **Pass** — manifest pins `behavioral_arbitration__20261028T133953` states digest |
+| Both focal HUD rows | **Pass** — sampled frames show `0→1` and `1→0` exclusive labels |
+| CONTACT / SBS | **Pass** — CONTACT:ON / SBS:OFF visible on sampled frames |
+| Independent S4 + behavior timing | **Pass** — package SyncMap LAST_IN_PLATEAU for behavior; S4 prepared-sync LAST_IN_PLATEAU for pose; counters show prep/dense |
+| S4 provenance visualization | **Pass** — gap_fill / identity / missing legend + diamond markers on sampled frames |
+| Source digests | **Pass** — S4 final_pose, S8 states, package bouts/sync/manifest, prepared video unchanged |
+| Authoritative row cross-check | **Pass** — sampled prep frames match exclusive labels + S4 nose coords / provenance counts |
+
+Evidence: `tmp_overlay_c35_final_acceptance/C35_MULTIFRAME_ACCEPTANCE_REPORT.json` + `multiframe/frames/`.
+
+Transition note: padded context frames show exclusive-label changes (`nose_to_nose` → `nose_to_body` / `engaged`) without mutating scientific sources. Irregular plateau timing remains fixture-covered (`test_irregular_plateau_timing_authority_behavior_only`).
+
+#### S9 GUI workflow
+
+| Check | Result |
+| --- | --- |
+| Overlays disabled by default | **Pass** |
+| Naked export → existing exporter | **Pass** |
+| Overlay enable → sibling exporter | **Pass** |
+| Same bout selection + padding | **Pass** |
+| Source/layer controls + actionable errors | **Pass** |
+| Background progress + cancellation wiring | **Pass** |
+| Incomplete overlay not presented completed | **Pass** |
+| Overlay same-job retry refused | **Pass** — “Only media export jobs support same-job retry.” |
+| Open export folder for MP4 access | **Pass** |
+| Media/CSV defaults unaffected | **Pass** |
+
+Evidence: `tmp_overlay_c35_final_acceptance/C35_GUI_ACCEPTANCE_REPORT.json`.
+
+#### Acceptance corrections
+
+1. Behavior-only overlay widget read ignored retained pose-kind/run combo values (otherwise enabling overlays with pose unchecked failed validation and reverted).
+2. After successful export-settings apply, overlay destination label / layer enablement now re-syncs (previously only refreshed on error revert).
+
+#### Retry limitation (documented)
+
+Failed/canceled overlay media exports are classified incomplete/failed and are **not** same-job-retryable. Researchers must launch a **new** `media_export_overlay__*` job. Naked `media_export__*` retry is unchanged.
+
+### 23.10 Deferred
+
+- S10 reviewed overlay media / PI-report integration
+- S5 mixing
+- Full-session or dense-rate export
+- Same-job retry for incomplete overlay media jobs (naked media retry remains unchanged)
+
+### 23.11 Files touched (C3-5)
+
+```text
+src/overlay/contracts.py
+src/overlay/stream_clip.py
+src/overlay/export_s9_media.py
+src/overlay/__init__.py
+src/results_packaging/media_csv_export/discovery.py
+src/ui/controllers/results_export_support.py
+src/ui/controllers/results_packaging_controller.py
+src/ui/pages/results_packaging_page.py
+tests/overlay/test_export_s9_overlay_media.py
+tests/ui/test_overlay_s9_media_export_gui.py
+docs/roadmap/post_v011_overlay_architecture.md
+scripts/_overlay_c35_e_session_s9_overlay_media_smoke.py
+```
+
+(Acceptance smoke / MP4 / PNG / tmp lab outputs remain local and are **not** committed.)
+
+### 23.12 Closure
+
+**C3-5 accepted** after provisional architectural review + multi-frame E-session export + S9 GUI workflow acceptance + incomplete-job retry disclosure + GUI behavior-only/widget-sync corrections. Commit/push authorized on this closure pass. Stop before C3-6. No S10 reviewed media, PI-report integration, S5 mixing, full-session/dense-rate export, or scientific schema changes.
+
+_End of C3-5 acceptance record._

@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from overlay.contracts import MEDIA_EXPORT_OVERLAY_JOB_KIND, MEDIA_EXPORT_OVERLAY_JOB_PREFIX
 from results_packaging.contracts import (
     QC_FILENAME,
     RUN_META_FILENAME,
@@ -69,6 +70,10 @@ class ExportProjectSummary:
         return tuple(j for j in self.jobs if j.job_kind == JOB_KIND_MEDIA)
 
     @property
+    def overlay_media_jobs(self) -> tuple[ExportJobSummary, ...]:
+        return tuple(j for j in self.jobs if j.job_kind == MEDIA_EXPORT_OVERLAY_JOB_KIND)
+
+    @property
     def csv_jobs(self) -> tuple[ExportJobSummary, ...]:
         return tuple(j for j in self.jobs if j.job_kind == JOB_KIND_CSV)
 
@@ -127,7 +132,10 @@ def reopen_export_job(job_dir: Path | str) -> dict[str, Any]:
     if not package_dir_text:
         raise ExportPublicationError("Export job missing source_package.path.")
 
-    require_video = meta.get("job_kind") == JOB_KIND_MEDIA
+    require_video = meta.get("job_kind") in (
+        JOB_KIND_MEDIA,
+        MEDIA_EXPORT_OVERLAY_JOB_KIND,
+    )
     source = validate_package_for_export(
         Path(str(package_dir_text)),
         require_video=require_video,
@@ -162,7 +170,10 @@ def reopen_export_job(job_dir: Path | str) -> dict[str, Any]:
     qc_path = path / QC_FILENAME
     if qc_path.is_file():
         payload["qc"] = json.loads(qc_path.read_text(encoding="utf-8"))
-    if meta.get("job_kind") == JOB_KIND_MEDIA and (path / CLIP_INDEX_FILENAME).is_file():
+    if meta.get("job_kind") in (
+        JOB_KIND_MEDIA,
+        MEDIA_EXPORT_OVERLAY_JOB_KIND,
+    ) and (path / CLIP_INDEX_FILENAME).is_file():
         import pandas as pd  # type: ignore[import-untyped]
 
         payload["clip_index"] = pd.read_parquet(path / CLIP_INDEX_FILENAME)
@@ -179,7 +190,8 @@ def _discover_jobs(exports_root: Path) -> list[ExportJobSummary]:
         if not child.is_dir():
             continue
         if not (
-            child.name.startswith(f"{MEDIA_EXPORT_RUN_PREFIX}__")
+            child.name.startswith(MEDIA_EXPORT_OVERLAY_JOB_PREFIX)
+            or child.name.startswith(f"{MEDIA_EXPORT_RUN_PREFIX}__")
             or child.name.startswith(f"{CSV_EXPORT_RUN_PREFIX}__")
         ):
             continue
@@ -262,7 +274,11 @@ def _summarize_job(job_dir: Path) -> ExportJobSummary:
         n_succeeded=n_succeeded,
         n_failed=n_failed,
         n_rows=n_rows,
-        error_message=_optional_str(meta.get("error") if isinstance(meta, dict) else None),
+        error_message=_optional_str(
+            (meta.get("error_message") or meta.get("error"))
+            if isinstance(meta, dict)
+            else None
+        ),
         staleness_reasons=stale,
     )
 
@@ -286,7 +302,7 @@ def _classify(
         base = EXPORT_FAILED_OR_INCOMPLETE
 
     required = [RUN_META_FILENAME, EXPORT_JOB_MANIFEST_FILENAME, QC_FILENAME]
-    if job_kind == JOB_KIND_MEDIA:
+    if job_kind in (JOB_KIND_MEDIA, MEDIA_EXPORT_OVERLAY_JOB_KIND):
         required.append(CLIP_INDEX_FILENAME)
     if job_kind == JOB_KIND_CSV and status in (
         STATUS_COMPLETED,
@@ -304,7 +320,10 @@ def _classify(
         source_package = meta.get("source_package")
         if isinstance(source_package, Mapping) and source_package.get("path"):
             try:
-                require_video = job_kind == JOB_KIND_MEDIA
+                require_video = job_kind in (
+                    JOB_KIND_MEDIA,
+                    MEDIA_EXPORT_OVERLAY_JOB_KIND,
+                )
                 source = validate_package_for_export(
                     Path(str(source_package["path"])),
                     require_video=require_video,
@@ -326,6 +345,9 @@ def _classify(
 
 
 def _infer_kind(name: str) -> str | None:
+    # Overlay sibling prefix must be checked before naked media_export__.
+    if name.startswith(MEDIA_EXPORT_OVERLAY_JOB_PREFIX):
+        return MEDIA_EXPORT_OVERLAY_JOB_KIND
     if name.startswith(f"{MEDIA_EXPORT_RUN_PREFIX}__"):
         return JOB_KIND_MEDIA
     if name.startswith(f"{CSV_EXPORT_RUN_PREFIX}__"):

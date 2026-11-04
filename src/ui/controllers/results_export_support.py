@@ -53,6 +53,16 @@ class ExportUiSettings:
     post_context_sec: float = 0.0
     # Explicit S4 when lineage missing (legacy_framewise_v1 only; never auto-newest).
     pose_run_dir: str | None = None
+    # C3-5 opt-in overlay media (default remains naked / unannotated).
+    overlay_enabled: bool = False
+    overlay_include_behavior: bool = True
+    overlay_include_pose: bool = False
+    overlay_pose_source_kind: str | None = None  # s3_accepted | s4_finalized
+    overlay_pose_run_dir: str | None = None
+    overlay_hud_mode: str = "both"
+    overlay_include_contact: bool = True
+    overlay_include_sbs: bool = True
+    overlay_draw_skeleton: bool = True
 
     def validated(self) -> ExportUiSettings:
         mode = str(self.selection_mode).strip() or SELECTION_ALL_PACKAGE_BOUTS
@@ -84,6 +94,44 @@ class ExportUiSettings:
                 "pose_run_dir is only valid with format_profile="
                 f"{LEGACY_FRAMEWISE_PROFILE_ID!r}."
             )
+        overlay_enabled = bool(self.overlay_enabled)
+        overlay_include_behavior = bool(self.overlay_include_behavior)
+        overlay_include_pose = bool(self.overlay_include_pose)
+        overlay_pose_kind = (
+            None
+            if self.overlay_pose_source_kind is None
+            else str(self.overlay_pose_source_kind).strip().lower() or None
+        )
+        overlay_pose_dir = (
+            str(Path(str(self.overlay_pose_run_dir).strip()).expanduser().resolve())
+            if self.overlay_pose_run_dir is not None
+            and str(self.overlay_pose_run_dir).strip()
+            else None
+        )
+        overlay_hud = str(self.overlay_hud_mode or "both").strip().lower() or "both"
+        if overlay_enabled:
+            if not overlay_include_behavior and not overlay_include_pose:
+                raise ExportConfigError(
+                    "Overlay media requires behavioral labels and/or pose enabled."
+                )
+            if overlay_include_pose:
+                if overlay_pose_kind not in {"s3_accepted", "s4_finalized"}:
+                    raise ExportConfigError(
+                        "Overlay pose requires explicit s3_accepted or s4_finalized."
+                    )
+                if overlay_pose_dir is None:
+                    raise ExportConfigError(
+                        "Overlay pose requires an explicitly selected pose run "
+                        "(never auto-selects newest)."
+                    )
+            elif overlay_pose_dir is not None or overlay_pose_kind is not None:
+                raise ExportConfigError(
+                    "Overlay pose source fields require overlay_include_pose=True."
+                )
+            if overlay_hud not in {"both", "focal_0_only", "focal_1_only"}:
+                raise ExportConfigError(
+                    "overlay_hud_mode must be both, focal_0_only, or focal_1_only."
+                )
         # Validate via SelectionSpec construction (bout selection unused for
         # legacy_framewise_v1 but still kept valid for media export).
         self.to_selection_spec()
@@ -97,6 +145,15 @@ class ExportUiSettings:
             pre_context_sec=float(self.pre_context_sec),
             post_context_sec=float(self.post_context_sec),
             pose_run_dir=pose_dir,
+            overlay_enabled=overlay_enabled,
+            overlay_include_behavior=overlay_include_behavior,
+            overlay_include_pose=overlay_include_pose,
+            overlay_pose_source_kind=overlay_pose_kind,
+            overlay_pose_run_dir=overlay_pose_dir,
+            overlay_hud_mode=overlay_hud,
+            overlay_include_contact=bool(self.overlay_include_contact),
+            overlay_include_sbs=bool(self.overlay_include_sbs),
+            overlay_draw_skeleton=bool(self.overlay_draw_skeleton),
         )
 
     def to_selection_spec(self) -> SelectionSpec:
@@ -133,6 +190,32 @@ class ExportUiSettings:
             selection=self.to_selection_spec(),
             pre_context_sec=float(self.pre_context_sec),
             post_context_sec=float(self.post_context_sec),
+        ).validated()
+
+    def to_overlay_media_settings(self) -> Any:
+        """Build C3-5 overlay media settings (opt-in sibling of naked media)."""
+
+        from overlay.export_s9_media import OverlayMediaExportSettings
+
+        cfg = self.validated()
+        if not cfg.overlay_enabled:
+            raise ExportConfigError(
+                "to_overlay_media_settings requires overlay_enabled=True."
+            )
+        return OverlayMediaExportSettings(
+            selection=cfg.to_selection_spec(),
+            pre_context_sec=float(cfg.pre_context_sec),
+            post_context_sec=float(cfg.post_context_sec),
+            include_behavior=bool(cfg.overlay_include_behavior),
+            include_pose=bool(cfg.overlay_include_pose),
+            pose_source_kind=cfg.overlay_pose_source_kind,
+            pose_run_dir=cfg.overlay_pose_run_dir,
+            hud_mode=str(cfg.overlay_hud_mode),
+            include_contact=bool(cfg.overlay_include_contact),
+            include_sbs=bool(cfg.overlay_include_sbs),
+            draw_skeleton=bool(cfg.overlay_draw_skeleton),
+            include_frame_counter=True,
+            hash_clips=True,
         ).validated()
 
 
@@ -239,6 +322,20 @@ def export_provenance_summary(
             parts.append(f"behaviors={settings.behaviors_text}")
     if settings.pose_run_dir:
         parts.append(f"pose_run_dir={Path(settings.pose_run_dir).name}")
+    if settings.overlay_enabled:
+        parts.append("media_family=media_export_overlay")
+        layers = []
+        if settings.overlay_include_behavior:
+            layers.append("s8_automated")
+        if settings.overlay_include_pose:
+            layers.append(str(settings.overlay_pose_source_kind or "pose"))
+        parts.append(f"overlay_layers={'+'.join(layers) if layers else 'none'}")
+        if settings.overlay_pose_run_dir:
+            parts.append(
+                f"overlay_pose_run={Path(settings.overlay_pose_run_dir).name}"
+            )
+    else:
+        parts.append("media_family=media_export")
     if n_selected is not None:
         parts.append(f"n_selected={n_selected}")
     return "; ".join(parts)
