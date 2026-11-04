@@ -90,6 +90,7 @@ class OverlayQcExportDialog(QDialog):
         self._launch = launch
         self.controller.set_session(launch.session_root)
         self._populate_source_combos(launch)
+        self._configure_source_kind_combo(launch)
         self._syncing = True
         try:
             family_idx = self.family_combo.findData(launch.export_family)
@@ -102,15 +103,8 @@ class OverlayQcExportDialog(QDialog):
                 self._select_combo_by_run_id(self.package_combo, launch.package_run_id)
             if launch.review_run_id:
                 self._select_combo_by_run_id(self.review_combo, launch.review_run_id)
-            source_kind = (
-                "s10_reviewed"
-                if launch.review_run_id and not launch.review_is_draft
-                else "s8_automated"
-            )
-            # Prefer reviewed only when opener intended a published review.
+            source_kind = self._resolved_launch_source_kind(launch)
             if launch.export_family == EXPORT_FAMILY_BEHAVIORAL:
-                if launch.review_run_id and launch.review_is_draft is False:
-                    source_kind = "s10_reviewed"
                 idx = self.source_kind_combo.findData(source_kind)
                 if idx >= 0:
                     self.source_kind_combo.setCurrentIndex(idx)
@@ -132,6 +126,40 @@ class OverlayQcExportDialog(QDialog):
         self._apply_settings_from_widgets()
         self._refresh_jobs_table()
         self._update_enabled()
+
+    @staticmethod
+    def _resolved_launch_source_kind(launch: OverlayQcLaunchContext) -> str:
+        if launch.lock_source_kind:
+            locked = launch.locked_source_kind or "s8_automated"
+            return str(locked)
+        if launch.review_run_id and launch.review_is_draft is False:
+            return "s10_reviewed"
+        return "s8_automated"
+
+    def _configure_source_kind_combo(self, launch: OverlayQcLaunchContext) -> None:
+        """Offer only the locked source when entry context forbids switching."""
+
+        current = self.source_kind_combo.currentData()
+        self.source_kind_combo.blockSignals(True)
+        self.source_kind_combo.clear()
+        if launch.lock_source_kind:
+            locked = str(launch.locked_source_kind or "s8_automated")
+            label = (
+                "Automated S8 via S9 package"
+                if locked == "s8_automated"
+                else "Published S10 reviewed"
+            )
+            self.source_kind_combo.addItem(label, locked)
+        else:
+            self.source_kind_combo.addItem(
+                "Automated S8 via S9 package", "s8_automated"
+            )
+            self.source_kind_combo.addItem("Published S10 reviewed", "s10_reviewed")
+            if current is not None:
+                idx = self.source_kind_combo.findData(current)
+                if idx >= 0:
+                    self.source_kind_combo.setCurrentIndex(idx)
+        self.source_kind_combo.blockSignals(False)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -506,9 +534,12 @@ class OverlayQcExportDialog(QDialog):
             if match is not None:
                 packaged_start = match.prepared_frame_idx_start
                 packaged_end = match.prepared_frame_idx_end
+        source_kind = str(self.source_kind_combo.currentData())
+        if self._launch is not None and self._launch.lock_source_kind:
+            source_kind = str(self._launch.locked_source_kind or "s8_automated")
         return OverlayQcUiSettings(
             export_family=family,  # type: ignore[arg-type]
-            source_kind=str(self.source_kind_combo.currentData()),  # type: ignore[arg-type]
+            source_kind=source_kind,  # type: ignore[arg-type]
             scope_kind=str(self.scope_combo.currentData()),  # type: ignore[arg-type]
             prepared_frame_idx_start=int(self.prep_start_spin.value()),
             prepared_frame_idx_end=int(self.prep_end_spin.value()),
@@ -793,14 +824,17 @@ class OverlayQcExportDialog(QDialog):
             return
 
         lock = bool(self._launch.lock_family) if self._launch else False
+        source_locked = (
+            bool(self._launch.lock_source_kind) if self._launch is not None else False
+        )
         family = self.family_combo.currentData()
         behavioral = family == EXPORT_FAMILY_BEHAVIORAL
         bout = self.scope_combo.currentData() == "bout_span"
         reviewed = self.source_kind_combo.currentData() == "s10_reviewed"
         self.family_combo.setEnabled(not lock)
-        self.source_kind_combo.setEnabled(behavioral)
+        self.source_kind_combo.setEnabled(behavioral and not source_locked)
         self.package_combo.setEnabled(behavioral)
-        self.review_combo.setEnabled(behavioral and reviewed)
+        self.review_combo.setEnabled(behavioral and reviewed and not source_locked)
         self.s4_combo.setEnabled(not behavioral)
         self.scope_combo.setEnabled(behavioral)
         self.hud_combo.setEnabled(behavioral)

@@ -143,8 +143,10 @@ class BehavioralArbitrationPage(QWidget):
             "Arbitrate eligible Subsystem 7 predictions with the linked Subsystem 6 "
             "features into an exclusive ethogram, parallel contact/side-by-side "
             "channels, and bout tables (Pipeline 100). Does not train models, edit "
-            "bouts, or generate overlays. Cancellation is not supported; partial "
-            "artifacts are never published as completed."
+            "bouts, or auto-generate overlays after arbitration. Optional QC overlay "
+            "video export uses the shared dialog and an eligible S9 package that pins "
+            "this S8 run. Cancellation is not supported; partial artifacts are never "
+            "published as completed."
         )
         scope.setWordWrap(True)
 
@@ -317,10 +319,13 @@ class BehavioralArbitrationPage(QWidget):
         self.run_button.clicked.connect(self._run_arbitration)
         self.open_output_button = QPushButton("Open S8 run folder")
         self.open_output_button.clicked.connect(self._open_output_folder)
+        self.overlay_qc_button = QPushButton("Export QC Overlay Video…")
+        self.overlay_qc_button.clicked.connect(self._open_overlay_qc_export)
         self.apply_settings_button = QPushButton("Apply settings")
         self.apply_settings_button.clicked.connect(self._apply_settings)
         run_row.addWidget(self.run_button)
         run_row.addWidget(self.open_output_button)
+        run_row.addWidget(self.overlay_qc_button)
         run_row.addWidget(self.apply_settings_button)
         run_row.addStretch(1)
 
@@ -971,6 +976,58 @@ class BehavioralArbitrationPage(QWidget):
             self.status_message.emit("Could not open the S8 run folder.")
         else:
             self.status_message.emit("Opened S8 run folder.")
+
+    def _open_overlay_qc_export(self) -> None:
+        from results_packaging.contracts import PublicationError
+        from results_packaging.run_discovery import summarize_results_package_project
+        from ui.controllers.overlay_qc_export_support import (
+            plan_s8_behavioral_overlay_launch,
+        )
+        from ui.dialogs.overlay_qc_export_dialog import open_overlay_qc_export_dialog
+
+        state = self.controller.state
+        session = state.session_root
+        if session is None:
+            QMessageBox.warning(
+                self, "No session", "Open a session before exporting QC overlay video."
+            )
+            return
+        try:
+            s9_summary = summarize_results_package_project(session)
+            eligible = s9_summary.eligible_runs
+        except (OSError, PublicationError) as exc:
+            QMessageBox.warning(
+                self,
+                "S9 discovery failed",
+                (
+                    "Could not discover eligible S9 packages required for automated "
+                    f"S8 behavioral QC overlay export.\n\n{exc}"
+                ),
+            )
+            self.status_message.emit(f"S9 discovery failed for QC overlay: {exc}")
+            return
+        selected = self.controller.selected_s8_run()
+        plan = plan_s8_behavioral_overlay_launch(
+            session_root=Path(session),
+            selected_s8_run_id=None if selected is None else selected.run_id,
+            eligible_s9_runs=eligible,
+        )
+        if plan.blocked or plan.launch is None:
+            QMessageBox.information(
+                self,
+                plan.block_title or "No eligible S9 package",
+                plan.block_message
+                or (
+                    "Behavioral QC overlay export requires an eligible S9 package "
+                    "that pins this S8 run."
+                ),
+            )
+            self.status_message.emit(
+                plan.block_message or "No eligible S9 package for QC overlay export."
+            )
+            return
+        open_overlay_qc_export_dialog(self, launch=plan.launch)
+        self.status_message.emit("QC overlay export dialog closed.")
 
     def _update_elapsed(self) -> None:
         if self._started_at is None:

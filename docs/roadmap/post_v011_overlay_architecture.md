@@ -1,8 +1,9 @@
 # Post-v0.1.1 — Overlay Architecture (C0 audit → C1 foundation → C2-A/C2-B QC export)
 
-**Status:** **C2-C final acceptance complete — pending architectural review / commit** (shared QC Overlay Export GUI). Builds on C1 + C2-A + C2-B.  
-**C2-C base commit:** `f84ddd1714046fee477a18a8de805068a629bbdd`  
-**C2-C final acceptance date:** 2026-11-02  
+**Status:** **C3-0 accepted** (S8 Behavioral QC Export Accessibility; bounded GUI source-lock correction). Builds on C1 + C2-A + C2-B + C2-C.
+**C2-C base commit:** `f84ddd1714046fee477a18a8de805068a629bbdd`
+**C2-C final acceptance date:** 2026-11-02
+**C3-0 implementation date:** 2026-11-04
 **C2-B final acceptance date:** 2026-11-02  
 **C2-A / C1 final acceptance date:** 2026-11-02  
 **C0 date:** 2026-11-01  
@@ -983,6 +984,7 @@ Shared modal **QC Overlay Video Export** dialog (PI-report style), opened from:
 | Page | Button | Prefill |
 | --- | --- | --- |
 | S4 Pose Finalization | `Export QC Overlay Video…` | `export_family=s4_pose`, selected eligible S4 run |
+| S8 Behavioral Arbitration | `Export QC Overlay Video…` | `export_family=behavioral` (locked); eligible S9 package(s) that pin the selected S8 run (see §18 C3-0) |
 | S9 Results Packaging | `Export QC Overlay Video…` (separate from CSV/media) | `export_family=behavioral`, selected eligible S9 package |
 | S10 Behavioral Review | `Open QC Overlay Export…` | behavioral; package + optional published review; optional gallery bout |
 
@@ -1150,3 +1152,60 @@ Probe artifact note: one pre-fix acceptance attempt briefly wrote two overlay jo
 Evidence root: `tmp_overlay_c2c_final_acceptance/`.
 
 _End of C2-C record._
+
+## 18. Increment C3-0 — S8 Behavioral QC Export Accessibility (2026-11-04)
+
+### 18.1 Scope
+
+Make the existing shared **QC Overlay Video Export** dialog reachable from the S8 Behavioral Arbitration page. **No** new exporter, renderer, scientific algorithm, source schema, or overlay layer. **No** automatic overlay generation when S8 arbitration completes. Naked S9 CSV/media defaults and S10 PI reports are untouched.
+
+### 18.2 Operator-visible behavior
+
+| Item | Behavior |
+| --- | --- |
+| Button | `Export QC Overlay Video…` on the S8 run row (beside Open S8 run folder) |
+| Family | `export_family=behavioral`, `lock_family=True` |
+| Source lock | `lock_source_kind=True`, `locked_source_kind=s8_automated` — S8 entry does **not** offer published S10 as an alternative; shared dialog/controller only (no separate exporter). |
+| Source contract | Automated S8 evidence only via a **currently eligible S9 package** that pins the selected S8 run (`source_s8_run_id`). Never a raw S8 directory. |
+| Prefill | Prefill package only when exactly one eligible S9 package pins the selected S8. Otherwise require explicit eligible package selection. |
+| Unrelated sources | Do not list S9 packages that pin a different S8; do not prefill reviewed S10 (`review_*` / `review_options` empty). |
+| No eligible S9 | Block with an explicit message that packaging in S9 is required — do not bypass eligibility. |
+| HUD defaults | Both focal directions; CONTACT and SBS LEDs optional and on by default (shared dialog defaults). |
+| S9/S10 entries | Unchanged: source-kind selection remains available from Results Packaging and Behavioral Review openers. |
+
+Helper: `plan_s8_behavioral_overlay_launch` in `overlay_qc_export_support.py`. Page opener discovers via `summarize_results_package_project(...).eligible_runs`.
+
+### 18.3 Safety preserved from C2-C
+
+Existing eligibility, explicit source identity, pinned digests, bound-session `results_exports/` root, background execution/cancellation, workspace retarget protection, immutable export publication, draft rejection, and S8-automated vs S10-reviewed separation remain enforced by the shared controller/exporters.
+
+### 18.4 Files touched (C3-0)
+
+```text
+src/ui/controllers/overlay_qc_export_support.py   # plan_s8_behavioral_overlay_launch + lock_source_kind
+src/ui/dialogs/overlay_qc_export_dialog.py        # honor lock_source_kind (hide S10 option)
+src/ui/pages/behavioral_arbitration_page.py       # entry button + opener
+tests/ui/test_overlay_qc_export_gui.py            # S8 launch / source lock / S9·S10 retain
+docs/roadmap/post_v011_overlay_architecture.md    # this section
+```
+
+### 18.5 Acceptance evidence (targeted)
+
+| Check | Expected |
+| --- | --- |
+| S8 button visible + launches shared dialog | Pass (GUI unit) |
+| Behavioral family locked; session bound | Pass |
+| Unambiguous S9 prefill / ambiguous explicit selection | Pass |
+| No eligible S9 → clear dependency message; dialog not opened | Pass |
+| S8 entry cannot switch to reviewed S10 (`lock_source_kind`) | Pass |
+| S8 package filtering by selected S8 remains correct | Pass |
+| S9/S10 retain source-selection behavior | Pass |
+| HUD both + CONTACT/SBS defaults propagate | Pass |
+| S4/S9/S10 entry buttons unchanged | Pass |
+| Overlay / S8 / S9 / workspace GUI regressions + Ruff + targeted Mypy | Recorded in closure report |
+
+### 18.6 Closure
+
+**C3-0 accepted** after architectural review + bounded GUI source-lock correction. Commit/push authorized on this closure pass. Stop before C3-1. Deferred C3 live/full-session work remains out of scope.
+
+_End of C3-0 record._

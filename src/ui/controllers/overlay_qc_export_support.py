@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 from uuid import uuid4
 
 from overlay.contracts import HudDirectionMode
@@ -13,6 +14,19 @@ from overlay.discovery import OverlayQcJobSummary
 OverlayQcExportFamily = Literal["behavioral", "s4_pose"]
 OverlayQcBehaviorSource = Literal["s8_automated", "s10_reviewed"]
 OverlayQcScopeKind = Literal["prepared_interval", "bout_span"]
+
+
+class _S9PackageOption(Protocol):
+    """Minimal S9 discovery fields needed for S8 overlay launch planning."""
+
+    @property
+    def run_id(self) -> str: ...
+
+    @property
+    def run_dir(self) -> Path: ...
+
+    @property
+    def source_s8_run_id(self) -> str | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +216,8 @@ class OverlayQcLaunchContext:
     s4_run_dir: Path | None = None
     s4_run_id: str | None = None
     lock_family: bool = True
+    lock_source_kind: bool = False
+    locked_source_kind: OverlayQcBehaviorSource | None = None
     preferred_bout_id: str | None = None
     preferred_start_sample_idx: int | None = None
     preferred_end_sample_idx: int | None = None
@@ -210,6 +226,125 @@ class OverlayQcLaunchContext:
     package_options: tuple[tuple[str, Path], ...] = ()
     review_options: tuple[tuple[str, Path, bool, str | None], ...] = ()
     s4_options: tuple[tuple[str, Path], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class S8BehavioralOverlayLaunchPlan:
+    """S8 page opener outcome: either a shared-dialog launch or a clear block."""
+
+    launch: OverlayQcLaunchContext | None = None
+    block_title: str | None = None
+    block_message: str | None = None
+
+    @property
+    def blocked(self) -> bool:
+        return self.launch is None
+
+
+_S8_NO_ELIGIBLE_PACKAGE_MESSAGE = (
+    "Behavioral QC overlay export resolves automated S8 evidence only through an "
+    "eligible S9 results package that pins this S8 run. Package this S8 run in "
+    "Results Packaging (S9) first, then reopen Export QC Overlay Video."
+)
+
+_S8_NO_SESSION_PACKAGES_MESSAGE = (
+    "Behavioral QC overlay export requires an eligible S9 results package. "
+    "No currently eligible S9 package was found in this session. Package an S8 "
+    "run in Results Packaging (S9) first."
+)
+
+
+def _s8_behavioral_launch_context(
+    *,
+    session_root: Path,
+    package_dir: Path | None,
+    package_run_id: str | None,
+    package_options: tuple[tuple[str, Path], ...],
+) -> OverlayQcLaunchContext:
+    """Shared S8 opener context: behavioral family + locked automated source."""
+
+    return OverlayQcLaunchContext(
+        session_root=session_root,
+        export_family="behavioral",
+        package_dir=package_dir,
+        package_run_id=package_run_id,
+        lock_family=True,
+        lock_source_kind=True,
+        locked_source_kind="s8_automated",
+        package_options=package_options,
+        preferred_prepared_start=0,
+        preferred_prepared_end=29,
+    )
+
+
+def plan_s8_behavioral_overlay_launch(
+    *,
+    session_root: Path | str,
+    selected_s8_run_id: str | None,
+    eligible_s9_runs: Sequence[_S9PackageOption],
+) -> S8BehavioralOverlayLaunchPlan:
+    """Build S8-page launch context for automated behavioral QC via eligible S9.
+
+    Preserves the exporter contract: never uses a raw S8 directory, never prefills
+    an unrelated package, and never substitutes a reviewed S10 source. Locks the
+    dialog behavioral source kind to ``s8_automated`` so S8 entry cannot switch to
+    published S10. Prefills a package only when exactly one eligible S9 package
+    pins the selected S8 run. Otherwise leaves package selection explicit.
+    """
+
+    root = Path(session_root).expanduser().resolve(strict=False)
+    eligible = tuple(eligible_s9_runs)
+    selected = None if selected_s8_run_id is None else str(selected_s8_run_id).strip()
+    if selected == "":
+        selected = None
+
+    if selected is not None:
+        matching = tuple(
+            run
+            for run in eligible
+            if run.source_s8_run_id is not None
+            and str(run.source_s8_run_id).strip() == selected
+        )
+        if not matching:
+            return S8BehavioralOverlayLaunchPlan(
+                block_title="No eligible S9 package",
+                block_message=_S8_NO_ELIGIBLE_PACKAGE_MESSAGE,
+            )
+        package_options = tuple((run.run_id, Path(run.run_dir)) for run in matching)
+        if len(matching) == 1:
+            only = matching[0]
+            return S8BehavioralOverlayLaunchPlan(
+                launch=_s8_behavioral_launch_context(
+                    session_root=root,
+                    package_dir=Path(only.run_dir),
+                    package_run_id=str(only.run_id),
+                    package_options=package_options,
+                )
+            )
+        return S8BehavioralOverlayLaunchPlan(
+            launch=_s8_behavioral_launch_context(
+                session_root=root,
+                package_dir=None,
+                package_run_id=None,
+                package_options=package_options,
+            )
+        )
+
+    if not eligible:
+        return S8BehavioralOverlayLaunchPlan(
+            block_title="No eligible S9 package",
+            block_message=_S8_NO_SESSION_PACKAGES_MESSAGE,
+        )
+    return S8BehavioralOverlayLaunchPlan(
+        launch=_s8_behavioral_launch_context(
+            session_root=root,
+            package_dir=None,
+            package_run_id=None,
+            package_options=tuple(
+                (run.run_id, Path(run.run_dir)) for run in eligible
+            ),
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,7 +468,9 @@ __all__ = [
     "OverlayQcRequestIdentity",
     "OverlayQcScopeKind",
     "OverlayQcUiSettings",
+    "S8BehavioralOverlayLaunchPlan",
     "actionable_overlay_error",
     "overlay_qc_table_rows",
+    "plan_s8_behavioral_overlay_launch",
     "source_identity_summary",
 ]

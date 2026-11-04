@@ -25,8 +25,13 @@ from ui.controllers.overlay_qc_export_support import (
     OverlayQcLaunchContext,
     OverlayQcUiSettings,
     actionable_overlay_error,
+    plan_s8_behavioral_overlay_launch,
 )
 from ui.dialogs.overlay_qc_export_dialog import OverlayQcExportDialog
+from ui.pages.behavioral_arbitration_page import BehavioralArbitrationPage
+from ui.pages.behavioral_review_page import BehavioralReviewPage
+from ui.pages.pose_finalization_page import PoseFinalizationPage
+from ui.pages.results_packaging_page import ResultsPackagingPage
 from ui.tasks import GuiTaskKind
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -579,3 +584,344 @@ def test_stale_session_mismatch_rejects_success(tmp_path: Path) -> None:
         )
         is False
     )
+
+
+def _s9_option(
+    tmp_path: Path,
+    *,
+    run_id: str,
+    source_s8_run_id: str | None,
+) -> MagicMock:
+    run = MagicMock()
+    run.run_id = run_id
+    run.run_dir = tmp_path / "results_package" / run_id
+    run.run_dir.mkdir(parents=True, exist_ok=True)
+    run.source_s8_run_id = source_s8_run_id
+    return run
+
+
+def test_s8_page_overlay_button_visible_and_launches(tmp_path: Path, monkeypatch) -> None:
+    page = BehavioralArbitrationPage()
+    assert page.overlay_qc_button.text() == "Export QC Overlay Video…"
+    assert page.overlay_qc_button.isVisibleTo(page) or page.overlay_qc_button.isVisible()
+
+    session = tmp_path / "session"
+    session.mkdir()
+    page.controller.state.session_root = session
+    matching = _s9_option(
+        session, run_id="results_package__match", source_s8_run_id="behavioral_inference__s8a"
+    )
+    selected = MagicMock()
+    selected.run_id = "behavioral_inference__s8a"
+    monkeypatch.setattr(page.controller, "selected_s8_run", lambda: selected)
+    monkeypatch.setattr(
+        "results_packaging.run_discovery.summarize_results_package_project",
+        lambda _root: MagicMock(eligible_runs=(matching,)),
+    )
+    opened: list[OverlayQcLaunchContext] = []
+
+    def _fake_open(_parent, *, launch, controller=None):
+        opened.append(launch)
+        return MagicMock()
+
+    monkeypatch.setattr(
+        "ui.dialogs.overlay_qc_export_dialog.open_overlay_qc_export_dialog",
+        _fake_open,
+    )
+    monkeypatch.setattr(
+        "ui.pages.behavioral_arbitration_page.QMessageBox.warning",
+        staticmethod(lambda *a, **k: 0),
+    )
+    monkeypatch.setattr(
+        "ui.pages.behavioral_arbitration_page.QMessageBox.information",
+        staticmethod(lambda *a, **k: 0),
+    )
+    page._open_overlay_qc_export()
+    assert len(opened) == 1
+    launch = opened[0]
+    assert launch.export_family == "behavioral"
+    assert launch.lock_family is True
+    assert launch.session_root == session.resolve()
+    assert launch.package_run_id == "results_package__match"
+    assert launch.package_dir == matching.run_dir
+    assert launch.review_run_id is None
+    assert launch.review_run_dir is None
+    assert launch.review_options == ()
+    assert launch.lock_source_kind is True
+    assert launch.locked_source_kind == "s8_automated"
+
+
+def test_plan_s8_behavioral_overlay_launch_prefill_and_eligibility(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    session.mkdir()
+    match_a = _s9_option(
+        session, run_id="results_package__a", source_s8_run_id="s8_run_a"
+    )
+    match_b = _s9_option(
+        session, run_id="results_package__b", source_s8_run_id="s8_run_a"
+    )
+    other = _s9_option(
+        session, run_id="results_package__other", source_s8_run_id="s8_run_other"
+    )
+
+    blocked = plan_s8_behavioral_overlay_launch(
+        session_root=session,
+        selected_s8_run_id="s8_run_a",
+        eligible_s9_runs=(),
+    )
+    assert blocked.blocked is True
+    assert blocked.launch is None
+    assert blocked.block_message is not None
+    assert "S9" in blocked.block_message
+    assert "pins this S8" in blocked.block_message
+
+    unambiguous = plan_s8_behavioral_overlay_launch(
+        session_root=session,
+        selected_s8_run_id="s8_run_a",
+        eligible_s9_runs=(match_a, other),
+    )
+    assert unambiguous.blocked is False
+    assert unambiguous.launch is not None
+    assert unambiguous.launch.export_family == "behavioral"
+    assert unambiguous.launch.lock_family is True
+    assert unambiguous.launch.lock_source_kind is True
+    assert unambiguous.launch.locked_source_kind == "s8_automated"
+    assert unambiguous.launch.package_run_id == "results_package__a"
+    assert unambiguous.launch.package_options == (
+        ("results_package__a", match_a.run_dir),
+    )
+    assert unambiguous.launch.review_options == ()
+    assert unambiguous.launch.review_run_id is None
+    assert unambiguous.launch.review_run_dir is None
+
+    ambiguous = plan_s8_behavioral_overlay_launch(
+        session_root=session,
+        selected_s8_run_id="s8_run_a",
+        eligible_s9_runs=(match_a, match_b, other),
+    )
+    assert ambiguous.launch is not None
+    assert ambiguous.launch.package_run_id is None
+    assert ambiguous.launch.package_dir is None
+    assert ambiguous.launch.package_options == (
+        ("results_package__a", match_a.run_dir),
+        ("results_package__b", match_b.run_dir),
+    )
+    # Unrelated S9 for a different S8 must not appear when an S8 is selected.
+    assert all(run_id != "results_package__other" for run_id, _ in ambiguous.launch.package_options)
+
+    no_selection = plan_s8_behavioral_overlay_launch(
+        session_root=session,
+        selected_s8_run_id=None,
+        eligible_s9_runs=(match_a, other),
+    )
+    assert no_selection.launch is not None
+    assert no_selection.launch.package_run_id is None
+    assert {run_id for run_id, _ in no_selection.launch.package_options} == {
+        "results_package__a",
+        "results_package__other",
+    }
+
+    empty_session = plan_s8_behavioral_overlay_launch(
+        session_root=session,
+        selected_s8_run_id=None,
+        eligible_s9_runs=(),
+    )
+    assert empty_session.blocked is True
+    assert empty_session.block_message is not None
+    assert "eligible S9" in empty_session.block_message
+
+
+def test_s8_launch_dialog_defaults_both_focal_and_contact_sbs(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    session.mkdir()
+    package = session / "results_package" / "results_package__demo"
+    package.mkdir(parents=True)
+    plan = plan_s8_behavioral_overlay_launch(
+        session_root=session,
+        selected_s8_run_id="s8_demo",
+        eligible_s9_runs=(
+            _s9_option(
+                session,
+                run_id="results_package__demo",
+                source_s8_run_id="s8_demo",
+            ),
+        ),
+    )
+    assert plan.launch is not None
+    dialog = OverlayQcExportDialog(launch=plan.launch)
+    dialog.show()
+    assert dialog.family_combo.currentData() == "behavioral"
+    assert dialog.family_combo.isEnabled() is False
+    assert dialog.source_kind_combo.currentData() == "s8_automated"
+    assert dialog.source_kind_combo.isEnabled() is False
+    assert dialog.source_kind_combo.count() == 1
+    assert dialog.source_kind_combo.findData("s10_reviewed") < 0
+    assert dialog.review_combo.isEnabled() is False
+    assert dialog.hud_combo.currentData() == "both"
+    assert dialog.include_contact.isChecked() is True
+    assert dialog.include_sbs.isChecked() is True
+    settings = dialog._read_settings()
+    assert settings.hud_mode == "both"
+    assert settings.include_contact is True
+    assert settings.include_sbs is True
+    assert settings.source_kind == "s8_automated"
+    dialog.close()
+
+
+def test_s8_entry_cannot_switch_to_reviewed_s10(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    session.mkdir()
+    match_a = _s9_option(
+        session, run_id="results_package__a", source_s8_run_id="s8_run_a"
+    )
+    match_b = _s9_option(
+        session, run_id="results_package__b", source_s8_run_id="s8_run_a"
+    )
+    other = _s9_option(
+        session, run_id="results_package__other", source_s8_run_id="s8_run_other"
+    )
+    plan = plan_s8_behavioral_overlay_launch(
+        session_root=session,
+        selected_s8_run_id="s8_run_a",
+        eligible_s9_runs=(match_a, match_b, other),
+    )
+    assert plan.launch is not None
+    assert plan.launch.lock_source_kind is True
+    assert plan.launch.package_run_id is None
+    assert plan.launch.package_options == (
+        ("results_package__a", match_a.run_dir),
+        ("results_package__b", match_b.run_dir),
+    )
+
+    dialog = OverlayQcExportDialog(launch=plan.launch)
+    dialog.show()
+    assert dialog.source_kind_combo.findData("s10_reviewed") < 0
+    assert dialog.source_kind_combo.isEnabled() is False
+    assert dialog.review_combo.isEnabled() is False
+    # Explicit package choice among S8-filtered options remains available.
+    assert dialog.package_combo.isEnabled() is True
+    package_ids = {
+        None
+        if dialog.package_combo.itemData(i) is None
+        else dialog.package_combo.itemData(i)[0]
+        for i in range(dialog.package_combo.count())
+    }
+    assert "results_package__a" in package_ids
+    assert "results_package__b" in package_ids
+    assert "results_package__other" not in package_ids
+
+    # Even if the combo were forced, settings stay locked to automated S8.
+    dialog.source_kind_combo.blockSignals(True)
+    dialog.source_kind_combo.clear()
+    dialog.source_kind_combo.addItem("Published S10 reviewed", "s10_reviewed")
+    dialog.source_kind_combo.setCurrentIndex(0)
+    dialog.source_kind_combo.blockSignals(False)
+    settings = dialog._read_settings()
+    assert settings.source_kind == "s8_automated"
+    dialog.close()
+
+
+def test_s9_and_s10_entry_retain_source_selection(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    session.mkdir()
+    package = session / "results_package" / "results_package__demo"
+    package.mkdir(parents=True)
+    review = session / "behavioral_review" / "behavioral_review__pub"
+    review.mkdir(parents=True)
+
+    s9_launch = OverlayQcLaunchContext(
+        session_root=session,
+        export_family="behavioral",
+        package_dir=package,
+        package_run_id="results_package__demo",
+        lock_family=True,
+        package_options=(("results_package__demo", package),),
+        preferred_prepared_start=0,
+        preferred_prepared_end=29,
+    )
+    assert s9_launch.lock_source_kind is False
+    s9_dialog = OverlayQcExportDialog(launch=s9_launch)
+    s9_dialog.show()
+    assert s9_dialog.source_kind_combo.isEnabled() is True
+    assert s9_dialog.source_kind_combo.findData("s8_automated") >= 0
+    assert s9_dialog.source_kind_combo.findData("s10_reviewed") >= 0
+    s9_dialog.source_kind_combo.setCurrentIndex(
+        s9_dialog.source_kind_combo.findData("s10_reviewed")
+    )
+    assert s9_dialog.source_kind_combo.currentData() == "s10_reviewed"
+    assert s9_dialog.review_combo.isEnabled() is True
+    assert s9_dialog._read_settings().source_kind == "s10_reviewed"
+    s9_dialog.close()
+
+    s10_launch = OverlayQcLaunchContext(
+        session_root=session,
+        export_family="behavioral",
+        package_dir=package,
+        package_run_id="results_package__demo",
+        review_run_dir=review,
+        review_run_id="behavioral_review__pub",
+        review_is_draft=False,
+        lock_family=False,
+        package_options=(("results_package__demo", package),),
+        review_options=(
+            ("behavioral_review__pub", review, False, "results_package__demo"),
+        ),
+    )
+    assert s10_launch.lock_source_kind is False
+    s10_dialog = OverlayQcExportDialog(launch=s10_launch)
+    s10_dialog.show()
+    assert s10_dialog.source_kind_combo.isEnabled() is True
+    assert s10_dialog.source_kind_combo.currentData() == "s10_reviewed"
+    assert s10_dialog.source_kind_combo.findData("s8_automated") >= 0
+    assert s10_dialog.review_combo.isEnabled() is True
+    s10_dialog.source_kind_combo.setCurrentIndex(
+        s10_dialog.source_kind_combo.findData("s8_automated")
+    )
+    assert s10_dialog.source_kind_combo.currentData() == "s8_automated"
+    assert s10_dialog._read_settings().source_kind == "s8_automated"
+    s10_dialog.close()
+
+
+def test_s8_opener_blocks_without_eligible_s9(tmp_path: Path, monkeypatch) -> None:
+    page = BehavioralArbitrationPage()
+    session = tmp_path / "session"
+    session.mkdir()
+    page.controller.state.session_root = session
+    selected = MagicMock()
+    selected.run_id = "s8_missing_pkg"
+    monkeypatch.setattr(page.controller, "selected_s8_run", lambda: selected)
+    monkeypatch.setattr(
+        "results_packaging.run_discovery.summarize_results_package_project",
+        lambda _root: MagicMock(eligible_runs=()),
+    )
+    messages: list[tuple[str, str]] = []
+
+    def _info(_parent, title, text):
+        messages.append((str(title), str(text)))
+        return 0
+
+    monkeypatch.setattr(
+        "ui.pages.behavioral_arbitration_page.QMessageBox.information",
+        staticmethod(_info),
+    )
+    opened: list[object] = []
+    monkeypatch.setattr(
+        "ui.dialogs.overlay_qc_export_dialog.open_overlay_qc_export_dialog",
+        lambda *a, **k: opened.append(k.get("launch")),
+    )
+    page._open_overlay_qc_export()
+    assert opened == []
+    assert messages
+    assert "S9" in messages[0][1]
+
+
+def test_existing_s4_s9_s10_overlay_entry_points_unchanged() -> None:
+    s4 = PoseFinalizationPage()
+    s9 = ResultsPackagingPage()
+    s10 = BehavioralReviewPage()
+    assert s4.overlay_qc_button.text() == "Export QC Overlay Video…"
+    assert s9.overlay_qc_button.text() == "Export QC Overlay Video…"
+    assert s10.overlay_qc_button.text() == "Open QC Overlay Export…"
+    assert callable(s4._open_overlay_qc_export)
+    assert callable(s9._open_overlay_qc_export)
+    assert callable(s10._open_overlay_qc_export)
