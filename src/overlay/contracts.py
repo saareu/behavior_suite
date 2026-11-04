@@ -13,6 +13,7 @@ OVERLAY_PACKAGE_NAME: Final[str] = "overlay"
 OVERLAY_RENDERER_VERSION: Final[str] = "overlay_renderer_c2a_v1"
 OVERLAY_S4_POSE_RENDERER_VERSION: Final[str] = "overlay_renderer_c2b_v1"
 OVERLAY_S2_POSE_RENDERER_VERSION: Final[str] = "overlay_renderer_c3_1_v1"
+OVERLAY_S3_POSE_RENDERER_VERSION: Final[str] = "overlay_renderer_c3_2_v1"
 OVERLAY_ARTIFACT_MANIFEST_SCHEMA: Final[str] = "overlay_artifact_manifest_v1"
 OVERLAY_QC_EXPORT_DIRNAME: Final[str] = "results_exports"
 OVERLAY_QC_JOB_PREFIX: Final[str] = "overlay_qc_behavioral__"
@@ -23,6 +24,8 @@ OVERLAY_QC_S4_POSE_JOB_PREFIX: Final[str] = "overlay_qc_s4_pose__"
 OVERLAY_QC_S4_POSE_VIDEO_FILENAME: Final[str] = "s4_pose_qc.mp4"
 OVERLAY_QC_S2_POSE_JOB_PREFIX: Final[str] = "overlay_qc_s2_pose__"
 OVERLAY_QC_S2_POSE_VIDEO_FILENAME: Final[str] = "s2_pose_qc.mp4"
+OVERLAY_QC_S3_POSE_JOB_PREFIX: Final[str] = "overlay_qc_s3_pose__"
+OVERLAY_QC_S3_POSE_VIDEO_FILENAME: Final[str] = "s3_pose_qc.mp4"
 OVERLAY_QC_PROCESSING_LOG_FILENAME: Final[str] = "processing_log.txt"
 OVERLAY_QC_RUN_META_FILENAME: Final[str] = "run_meta.json"
 OVERLAY_QC_SETTINGS_FILENAME: Final[str] = "settings_used.yaml"
@@ -329,6 +332,18 @@ def default_s2_pose_qc_layers(
     """Build the default C3-1 S2 inferred-pose QC layer selection."""
 
     layers: list[LayerId] = [LayerId.S2_POSE_INFERRED]
+    if include_frame_counter:
+        layers.append(LayerId.DEBUG_FRAME_COUNTER)
+    return validate_layer_selection(layers)
+
+
+def default_s3_pose_qc_layers(
+    *,
+    include_frame_counter: bool = True,
+) -> tuple[LayerId, ...]:
+    """Build the default C3-2 S3 accepted tracked-pose QC layer selection."""
+
+    layers: list[LayerId] = [LayerId.S3_POSE_TRACKED]
     if include_frame_counter:
         layers.append(LayerId.DEBUG_FRAME_COUNTER)
     return validate_layer_selection(layers)

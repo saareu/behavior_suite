@@ -68,6 +68,15 @@ class PoseLayer:
                     or "inferred pose (S2 predictions; provisional IDs)"
                 ),
             )
+        if self._layer_id is LayerId.S3_POSE_TRACKED:
+            return _render_s3_pose(
+                frame_bgr,
+                points_raw,
+                context=context,
+                legend=str(
+                    observation.payload.get("legend") or "S3 accepted tracked pose"
+                ),
+            )
 
         node_points = _to_node_points(points_raw, layer_id=self._layer_id)
         if not node_points:
@@ -637,6 +646,367 @@ def _draw_s4_legend(
         1,
         lineType=cv2.LINE_AA,
     )
+
+
+_MACHINE_EVENT_BGR = (0, 140, 255)  # orange
+_MANUAL_EVENT_BGR = (200, 180, 40)  # teal
+
+
+def _render_s3_pose(
+    frame_bgr: np.ndarray,
+    points_raw: Sequence[Mapping[str, Any]],
+    *,
+    context: OverlayContext,
+    legend: str,
+) -> np.ndarray:
+    """Draw accepted S3 tracked pose + optional journal correction indicators."""
+
+    canvas = np.ascontiguousarray(frame_bgr.copy())
+    drawable = _s3_drawable_points(points_raw)
+    by_track: dict[int, dict[str, dict[str, Any]]] = {}
+    for point in drawable:
+        by_track.setdefault(int(point["track"]), {})[str(point["node"])] = point
+
+    edges: Sequence[tuple[str, str]] = ()
+    if context.style.draw_skeleton:
+        edges = tuple(context.style.extra.get("skeleton_edges", ()))
+
+    radius = max(3, int(context.style.node_radius))
+    edge_thickness = max(1, int(context.style.edge_thickness))
+
+    for track, nodes in by_track.items():
+        color = TRACK_COLORS_BGR.get(int(track), (200, 200, 200))
+        for start_name, end_name in edges:
+            start = nodes.get(start_name)
+            end = nodes.get(end_name)
+            if start is None or end is None:
+                continue
+            _draw_edge(
+                canvas,
+                start,
+                end,
+                color=color,
+                thickness=edge_thickness,
+            )
+
+    for track, nodes in by_track.items():
+        color = TRACK_COLORS_BGR.get(int(track), (200, 200, 200))
+        for point in nodes.values():
+            center = (
+                int(round(float(point["x"]))),
+                int(round(float(point["y"]))),
+            )
+            cv2.circle(canvas, center, radius + 1, _OUTLINE_BGR, 2, lineType=cv2.LINE_AA)
+            cv2.circle(canvas, center, radius, color, -1, lineType=cv2.LINE_AA)
+            cv2.circle(canvas, center, radius, _HALO_BGR, 1, lineType=cv2.LINE_AA)
+        _draw_track_label(canvas, track=int(track), nodes=nodes, color=color)
+
+    show_machine = bool(context.style.extra.get("show_machine_corrections", False))
+    show_manual = bool(context.style.extra.get("show_manual_corrections", False))
+    prepared_idx = int(context.prepared_frame_idx)
+    machine_events = (
+        _events_for_prepared_frame(
+            context.style.extra.get("s3_machine_events_by_frame"), prepared_idx
+        )
+        if show_machine
+        else []
+    )
+    manual_events = (
+        _events_for_prepared_frame(
+            context.style.extra.get("s3_manual_events_by_frame"), prepared_idx
+        )
+        if show_manual
+        else []
+    )
+    _draw_s3_correction_events(
+        canvas,
+        machine_events=machine_events,
+        manual_events=manual_events,
+        by_track=by_track,
+    )
+
+    if context.style.legend_text:
+        _draw_s3_legend(
+            canvas,
+            legend=legend,
+            tracks=tuple(sorted(by_track)),
+            skeleton_nodes_only=len(edges) == 0,
+            show_machine=show_machine,
+            show_manual=show_manual,
+            machine_status=str(
+                context.style.extra.get("s3_machine_events_status") or ""
+            ),
+            manual_status=str(
+                context.style.extra.get("s3_manual_events_status") or ""
+            ),
+        )
+    return canvas
+
+
+def _s3_drawable_points(
+    points_raw: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for item in points_raw:
+        x = item.get("x")
+        y = item.get("y")
+        if x is None or y is None:
+            continue
+        out.append(
+            {
+                "track": int(item["track"]),
+                "node": str(item["node"]),
+                "x": float(x),
+                "y": float(y),
+            }
+        )
+    return out
+
+
+def _events_for_prepared_frame(
+    by_frame: object, prepared_frame_idx: int
+) -> list[Mapping[str, Any]]:
+    if not isinstance(by_frame, Mapping):
+        return []
+    raw = by_frame.get(prepared_frame_idx)
+    if raw is None:
+        raw = by_frame.get(str(prepared_frame_idx))
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return []
+    return [item for item in raw if isinstance(item, Mapping)]
+
+
+def _draw_s3_correction_events(
+    canvas: np.ndarray,
+    *,
+    machine_events: Sequence[Mapping[str, Any]],
+    manual_events: Sequence[Mapping[str, Any]],
+    by_track: Mapping[int, Mapping[str, Mapping[str, Any]]],
+) -> None:
+    unlocalized_y = 36
+    for event in machine_events:
+        unlocalized_y = _draw_one_correction_event(
+            canvas,
+            event,
+            color=_MACHINE_EVENT_BGR,
+            prefix="AUTO",
+            by_track=by_track,
+            unlocalized_y=unlocalized_y,
+        )
+    for event in manual_events:
+        unlocalized_y = _draw_one_correction_event(
+            canvas,
+            event,
+            color=_MANUAL_EVENT_BGR,
+            prefix="MAN",
+            by_track=by_track,
+            unlocalized_y=unlocalized_y,
+        )
+
+
+def _draw_one_correction_event(
+    canvas: np.ndarray,
+    event: Mapping[str, Any],
+    *,
+    color: tuple[int, int, int],
+    prefix: str,
+    by_track: Mapping[int, Mapping[str, Mapping[str, Any]]],
+    unlocalized_y: int,
+) -> int:
+    action = str(event.get("action_type") or "event").strip() or "event"
+    label = f"{prefix}:{action}"
+    attribution = str(event.get("attribution") or "unlocalized")
+    track = event.get("track")
+    node = event.get("node")
+    anchor = _correction_anchor(
+        by_track=by_track,
+        attribution=attribution,
+        track=track,
+        node=node,
+    )
+    if anchor is None:
+        _draw_unlocalized_event_pill(canvas, label=label, color=color, y=unlocalized_y)
+        return unlocalized_y + 18
+
+    x, y = anchor
+    # Marker uses accepted-pose geometry for placement only; never from journal XY.
+    diamond = np.array(
+        [
+            [x, y - 7],
+            [x + 7, y],
+            [x, y + 7],
+            [x - 7, y],
+        ],
+        dtype=np.int32,
+    )
+    cv2.fillConvexPoly(canvas, diamond, color, lineType=cv2.LINE_AA)
+    cv2.polylines(canvas, [diamond], True, _OUTLINE_BGR, 1, lineType=cv2.LINE_AA)
+    cv2.putText(
+        canvas,
+        label,
+        (x + 10, y - 2),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.38,
+        _OUTLINE_BGR,
+        2,
+        lineType=cv2.LINE_AA,
+    )
+    cv2.putText(
+        canvas,
+        label,
+        (x + 10, y - 2),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.38,
+        color,
+        1,
+        lineType=cv2.LINE_AA,
+    )
+    return unlocalized_y
+
+
+def _correction_anchor(
+    *,
+    by_track: Mapping[int, Mapping[str, Mapping[str, Any]]],
+    attribution: str,
+    track: object,
+    node: object,
+) -> tuple[int, int] | None:
+    if attribution == "unlocalized":
+        return None
+    if isinstance(track, bool) or track is None:
+        return None
+    if isinstance(track, int):
+        track_i = track
+    elif isinstance(track, float) and track.is_integer():
+        track_i = int(track)
+    elif isinstance(track, str) and (
+        track.strip().isdigit()
+        or (track.strip().startswith("-") and track.strip()[1:].isdigit())
+    ):
+        track_i = int(track.strip())
+    else:
+        return None
+    nodes = by_track.get(track_i)
+    if not nodes:
+        return None
+    if attribution == "track_node":
+        # Require the attributed node's accepted-pose geometry. Never fall back to
+        # another node (e.g. blanked neck must not localize onto nose).
+        if not isinstance(node, str) or node not in nodes:
+            return None
+        point = nodes[node]
+        return int(round(float(point["x"]))), int(round(float(point["y"])))
+    # track-level: place above a preferred visible node on that track.
+    preferred = nodes.get("nose") or nodes.get("neck") or next(iter(nodes.values()))
+    return int(round(float(preferred["x"]))), int(round(float(preferred["y"]))) - 18
+
+
+def _draw_unlocalized_event_pill(
+    canvas: np.ndarray,
+    *,
+    label: str,
+    color: tuple[int, int, int],
+    y: int,
+) -> None:
+    width = canvas.shape[1]
+    text_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+    tw, th = text_size
+    x = max(8, (width - tw) // 2)
+    pad = 4
+    cv2.rectangle(
+        canvas,
+        (x - pad, y - th - pad),
+        (x + tw + pad, y + pad),
+        color,
+        thickness=-1,
+        lineType=cv2.LINE_AA,
+    )
+    cv2.putText(
+        canvas,
+        label,
+        (x, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.42,
+        _OUTLINE_BGR,
+        1,
+        lineType=cv2.LINE_AA,
+    )
+
+
+def _draw_s3_legend(
+    canvas: np.ndarray,
+    *,
+    legend: str,
+    tracks: Sequence[int],
+    skeleton_nodes_only: bool,
+    show_machine: bool,
+    show_manual: bool,
+    machine_status: str,
+    manual_status: str,
+) -> None:
+    x0, y0 = 8, 16
+    cv2.putText(
+        canvas,
+        legend,
+        (x0, y0),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.45,
+        _HALO_BGR,
+        1,
+        lineType=cv2.LINE_AA,
+    )
+    row = y0 + 18
+    for track in tracks:
+        color = TRACK_COLORS_BGR.get(int(track), (200, 200, 200))
+        cv2.circle(canvas, (x0 + 8, row - 3), 4, color, -1, lineType=cv2.LINE_AA)
+        cv2.putText(
+            canvas,
+            f"M{track} accepted identity",
+            (x0 + 20, row),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            _HALO_BGR,
+            1,
+            lineType=cv2.LINE_AA,
+        )
+        row += 16
+    if skeleton_nodes_only:
+        cv2.putText(
+            canvas,
+            "skeleton: nodes-only (no invented edges)",
+            (x0, row),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            (180, 180, 180),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+        row += 16
+    if show_machine:
+        status = machine_status or "on"
+        cv2.putText(
+            canvas,
+            f"AUTO events ({status})",
+            (x0, row),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            _MACHINE_EVENT_BGR,
+            1,
+            lineType=cv2.LINE_AA,
+        )
+        row += 16
+    if show_manual:
+        status = manual_status or "on"
+        cv2.putText(
+            canvas,
+            f"MAN events ({status})",
+            (x0, row),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            _MANUAL_EVENT_BGR,
+            1,
+            lineType=cv2.LINE_AA,
+        )
 
 
 def _to_node_points(

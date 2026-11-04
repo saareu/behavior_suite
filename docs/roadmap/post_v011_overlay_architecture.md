@@ -1,8 +1,10 @@
 # Post-v0.1.1 — Overlay Architecture (C0 audit → C1 foundation → C2-A/C2-B QC export)
 
-**Status:** **C3-1 implemented — stop for architectural review** (S2 Pose Inference QC Video). Builds on C1 + C2-A + C2-B + C2-C + C3-0.
-**C3-1 base commit:** `f3c4f1e08f4a55fb8ef09d57d0bda94771a50fb8`
-**C3-1 implementation date:** 2026-11-04
+**Status:** **C3-2 accepted** (S3 Tracking Correction QC Video). Builds on C1 + C2-A + C2-B + C2-C + C3-0 + C3-1.
+**C3-2 base commit:** `183a3d06709a1c3b2923c21769b1cd9ab05d1ceb`
+**C3-2 implementation date:** 2026-11-04
+**C3-2 final acceptance date:** 2026-11-04
+**C3-1 accepted:** 2026-11-04 (S2 Pose Inference QC Video)
 **C3-0 accepted:** 2026-11-04 (S8 Behavioral QC Export Accessibility)
 **C2-C base commit:** `f84ddd1714046fee477a18a8de805068a629bbdd`
 **C2-C final acceptance date:** 2026-11-02
@@ -11,7 +13,7 @@
 **C0 date:** 2026-11-01  
 **C2-B base commit:** `a1da1e170297619b338a1d63f0c8239f5cbf5ea0` (`origin/main` — C1/C2-A + mainline CSV)  
 **Companion:** [`post_v011_s10_review_and_visualization.md`](post_v011_s10_review_and_visualization.md) (Increment B closed; overlays → this document)  
-**Non-scope (still):** full-session QC exporter, PI/gallery overlay integration, S5 contour generation, live overlays, S3 exporters, scientific algorithm / schema mutation.  
+**Non-scope (still):** full-session QC exporter, PI/gallery overlay integration, S5 contour generation, live overlays, S5/S9/S10 overlay-media integration, scientific algorithm / schema mutation.  
 **O4 closed:** S8 `execution.generate_overlay_video` is **deprecated and unsupported** (parsed for settings compatibility; runtime unchanged; never produced video).
 
 **Legend**
@@ -1053,7 +1055,7 @@ docs/roadmap/post_v011_overlay_architecture.md
 ### 17.6 Known limitations
 
 - No full-session export.
-- No S2/S3 exporters; no S5 contours; no live S10/PI/gallery overlay burn-in.
+- No S5 contours; no live S10/PI/gallery overlay burn-in. (S2/S3 offline QC exporters shipped in C3-1/C3-2.)
 - Bout combo lists exclusive packaged bouts only (first 250 by dense start); dense endpoints remain editable; S10 preferred bouts outside the window are injected into the combo.
 - Published S10 reviewed export requires an explicit published review (working drafts rejected). Live E-session review tree remains draft-only; published S10 validation uses the isolated PI B2 session copy.
 - Topology / `sleap_io` remains optional (nodes-only disclosure unchanged from C2-B).
@@ -1355,7 +1357,6 @@ docs/roadmap/post_v011_overlay_architecture.md
 ### 19.10 Remaining limitations / risks
 
 - Full-session / dense-rate export still deferred (C3 live/full-session out of scope).
-- S3 tracking-corrected QC family not implemented (stop before C3-2).
 - Topology requires optional `sleap_io`; otherwise honest nodes-only.
 - Loading full `pose.parquet` then windowing can be heavy for very long sessions.
 - Existing S2 `overlay.mp4` generation path remains the S2 runner product (unchanged by this QC family).
@@ -1365,3 +1366,210 @@ docs/roadmap/post_v011_overlay_architecture.md
 **C3-1 accepted** after architectural review + final confidence-visualization verification. Commit/push authorized on this closure pass. Stop before C3-2. No S3/S5/S9-media/S10 overlay-media / science or artifact-schema changes.
 
 _End of C3-1 record._
+
+---
+
+## 20. Increment C3-2 — S3 Tracking Correction QC Video (2026-11-04)
+
+### 20.1 Operator-visible product
+
+Offline prepared-rate S3 accepted tracked-pose QC MP4 under:
+
+```text
+{session}/results_exports/overlay_qc_s3_pose__{timestamp}/
+  s3_pose_qc.mp4
+  overlay_artifact_manifest.json
+  run_meta.json
+  settings_used.yaml
+  processing_log.txt
+```
+
+- Opt-in only; explicit **accepted** S3 run required (never auto-picks newest).
+- H.264 / yuv420p via the shared C2-A/C2-B streaming ffmpeg pipe; prepared-video FPS.
+- Immutable job directories; digest revalidation before publication.
+- S3 working-pose visualization and Accept Tracking workflow **unchanged**.
+- Naked S9 / PI / S2 / S4 / behavioral QC exports unchanged.
+
+### 20.2 Accepted-run source contract
+
+| Pin | Authority |
+| --- | --- |
+| S3 eligibility | Explicit `s3_run_dir`; `pose_finalization.accepted_s3.validate_accepted_s3_run` (`acceptance_state == accepted` + recorded `tracked_pose.parquet` digest match). **Not** `complete_reviewable` / working-only. |
+| S3 artifact digest | `tracked_pose.parquet` sha256 |
+| S1 prepared video/timing | Prefer `{session}/preprocess/` layout; else recorded S3 `run_meta.json` input paths. Prepared-identity SyncMap (1:1) — **no** dense 120 Hz duplication. |
+| S2 lineage | Recorded `input.s2_run_dir` / `pose_parquet` when present (for skeleton topology via `pose.slp`). Missing topology → nodes-only disclosure. |
+| Journals | Authoritative `machine_corrections.json` / `manual_corrections.json` only; digests pinned when present |
+
+Reject unaccepted / superseded / working-only / mismatched lineage / digest-mismatched sources. Never silently select the newest S3 run.
+
+### 20.3 Journal schema findings (binding)
+
+**`machine_corrections.json`** — list of automatic events:
+
+| Field | Role |
+| --- | --- |
+| `frame` | Prepared-frame index (single-frame event) |
+| `type` | Action type (`node_overlap`, `identity_swap`, `headstage_reassigned`, …) |
+| `track` | Optional track attribution |
+| `node` | Optional structured node (rare); **never** scraped from free-text `action` |
+| `action` | Optional human-readable text (display/debug only) |
+
+**`manual_corrections.json`** — list of inclusive edit records:
+
+| Field | Role |
+| --- | --- |
+| `action` | `swap_identities` / `swap_node` / `blank_node` |
+| `start_frame` / `end_frame` | Inclusive prepared-frame interval |
+| `track` | Optional dedicated track (e.g. `blank_node`) |
+| `tracks` | Involved tracks; multi-track alone does **not** force per-track attribution |
+| `node` | Present for `swap_node` / `blank_node` |
+| `source` | `"user"` |
+
+**Attribution rules:** `track_node` only when structured track+node recorded; `track` when only structured track; otherwise **unlocalized**. Frame-wide parquet `was_track_swapped` is **never** treated as a per-node event and never invents suspicious-frame markers. Absent/malformed/empty journals are disclosed; events are never fabricated.
+
+### 20.3a Event-to-frame semantics (binding)
+
+| Origin | Frame coverage | Renderer rule |
+| --- | --- | --- |
+| Machine | Exact recorded `frame` only (`start_frame == end_frame == frame`) | Draw on that prepared frame only; **never** extend into neighbors |
+| Manual | Inclusive `[start_frame, end_frame]` | Draw on every prepared frame in the closed interval; nothing on `start-1` or `end+1` |
+| Event identity | One journal record → one drawable event | **No silent merge/dedup** of identical `(type, track, node, action)` rows; **no fabricated** events |
+| Attribution locality | Structured fields only | Unlocalized events → top-center pill; never imply a localized correction without structured track/node |
+| Missing attributed geometry | `track_node` whose node is absent from accepted pose (e.g. blanked NaNs) | Unlocalized pill — **never** fall back to another node on the same track |
+
+`machine_event_draws_in_clip` / `manual_event_draws_in_clip` count **per-frame event applications** (one journal event spanning N frames contributes N draws).
+
+### 20.4 Pose / event visualization
+
+| Concern | Design |
+| --- | --- |
+| Pose | Accepted `tracked_pose.parquet` coordinates via `make_s3_tracked_pose_adapter` + shared `PoseLayer` S3 path |
+| Identity | `M{id}` labels + track colors; legend **“S3 accepted tracked pose”** |
+| Skeleton | Recorded S2 `pose.slp` topology when readable; otherwise nodes-only with disclosure |
+| AUTO events | Orange (`BGR 0,140,255`) indicators; action type shown; localized diamond when track/node attribution + accepted-pose geometry available; else top-center unlocalized pill |
+| MAN events | Teal (`BGR 200,180,40`) indicators; same attribution rules over inclusive intervals |
+| Placement | Uses accepted-pose geometry for display placement only — never geometry invented from correction metadata |
+| Overlap | Multiple events on one frame remain separate drawables; unlocalized pills stack vertically; localized diamonds use attributed anchors. Same-anchor journal duplicates may visually coincide but are not merged |
+
+### 20.5 Timing / export
+
+- Frame domain: prepared video indices + prepared FPS.
+- Inclusive prepared interval `[start, end]`; optional prepared-FPS context padding.
+- Cooperative cancel; staging + atomic publish; integrity recheck before publish.
+- Renderer version: `overlay_renderer_c3_2_v1`.
+- Debug counter uses prepared-identity sample idx (equal to prepared frame).
+
+### 20.6 GUI
+
+| Item | Behavior |
+| --- | --- |
+| Shared dialog family | `export_family=s3_pose` |
+| S3 Tracking Review page | `Export QC Overlay Video…` beside Accept Tracking |
+| Prefill | Prefill selected accepted S3 when eligible; otherwise explicit selection among accepted options |
+| Options | Skeleton; optional machine indicators; optional manual indicators; frame/time counter; prepared interval + pad |
+| Unaccepted | Export blocked with actionable explanation (Accept Tracking / select accepted run) |
+| Safety | Bound-session `results_exports/` (D0); background runner; cancel; session retarget block |
+
+### 20.7 Laboratory evidence (E-session)
+
+Explicit accepted run: `current_lab_two_mouse_headstage_v1__20260919T181948`.
+
+Published artifact:
+
+```text
+test_cases/E_full_session_integration/results_exports/overlay_qc_s3_pose__20261104T153251/
+  s3_pose_qc.mp4
+  overlay_artifact_manifest.json
+  run_meta.json
+  settings_used.yaml
+  processing_log.txt
+```
+
+Clip: prepared inclusive `[971, 1000]` (30 frames @ 119.048 fps).  
+Evidence: `tmp_overlay_c32_e_session_s3_pose_qc/` (+ `C32_S3_POSE_QC_SMOKE_REPORT.json`, sampled frames).
+
+| Check | Result |
+| --- | --- |
+| M0/M1 identities on accepted pose | **Pass** — orange/blue nodes + `M0`/`M1` labels |
+| AUTO indicators match journal | **Pass** — see §20.7a event-count interpretation |
+| MAN indicators | **Empty on this run** (`manual_corrections.json` = `[]`); disclosed on-frame + manifest. Manual inclusive-interval pixels validated by controlled fixture (§20.7b) |
+| Frame counters / FPS | **Pass** — 30 frames, 119.048 fps, libx264/yuv420p; counters show prep=dense prepared-identity |
+| Nodes-only disclosure | **Pass** — `sleap_io` absent on host; no invented edges |
+| Upstream digests | **Pass** — S1 prepared video/sync + S2 pose + S3 `tracked_pose.parquet` + journals unchanged |
+
+### 20.7a Real-session machine event-count interpretation (90 draws)
+
+Published clip `overlay_qc_s3_pose__20261104T153251` reports `machine_event_draws_in_clip = 90` across 30 exported prepared frames `[971, 1000]`.
+
+| Quantity | Value | Meaning |
+| --- | --- | --- |
+| Unique machine journal records in interval | **90** | Exact rows in `machine_corrections.json` with `frame ∈ [971, 1000]` |
+| Distinct prepared frames containing corrections | **30** | Every exported frame has journaled events |
+| Events per frame | **3** | `1× identity_swap` (unlocalized) + `2× headstage_reassigned` (track=1) |
+| Rendered event indicators | **90 draws** | One draw per journal record per covered frame |
+
+**Why 90 is expected (not a defect):**
+
+1. Machine events are single-frame only; the renderer uses exact recorded `frame` values and does not extend into neighbors.
+2. The source journal itself contains exact-duplicate `headstage_reassigned` rows (same `frame`/`type`/`track`/`action`) — a journal pattern across ~16k frames in this run, not exporter duplication.
+3. The renderer preserves each journal identity (no silent merge/dedup), so both `headstage_reassigned` rows are drawn.
+4. Unlocalized `identity_swap` uses a top pill (no invented localization). Track-attributed `headstage_reassigned` uses accepted-pose track anchors only when structured `track` is present.
+5. Overlapping same-anchor duplicates may visually coincide; unlocalized vs track-attributed remain distinguishable (pill vs diamond).
+
+### 20.7b Manual-event boundary fixture (pixel-level)
+
+Controlled test `test_manual_inclusive_interval_pixel_boundaries_and_styling`:
+
+- Inclusive multi-frame `blank_node` (`track_node` on neck) over `[10, 14]`.
+- Overlapping `swap_identities` (unlocalized) over `[12, 13]`.
+- Additional unlocalized `review_note` over `[10, 14]`.
+- Machine single-frame `node_overlap` at frame `12` only.
+
+Probed frames: before (`9`), first (`10`), intermediate (`12`), last (`14`), after (`15`).
+
+| Confirmation | Result |
+| --- | --- |
+| No off-by-one | No pixels before/after; indicators present on first/last inclusive |
+| Multiple events distinguishable | Unlocalized pills (top band) vs neck-localized diamond vs machine track diamond |
+| Manual vs machine styling | Teal manual vs orange machine both present and separable on overlap frame |
+| No inferred pose/track attribution | Unlocalized events never get diamonds; localization uses accepted-pose geometry only |
+
+### 20.8 Files touched (C3-2)
+
+```text
+src/overlay/corrections_s3.py
+src/overlay/source_s3.py
+src/overlay/export_s3.py
+src/overlay/contracts.py
+src/overlay/plan.py
+src/overlay/adapters/pose.py
+src/overlay/layers/pose.py
+src/overlay/discovery.py
+src/overlay/__init__.py
+src/ui/controllers/overlay_qc_export_support.py
+src/ui/controllers/overlay_qc_export_controller.py
+src/ui/dialogs/overlay_qc_export_dialog.py
+src/ui/pages/tracking_review_page.py
+tests/overlay/test_export_s3_pose_qc.py
+tests/overlay/test_s3_correction_events.py
+tests/overlay/test_adapters.py
+tests/ui/test_overlay_qc_export_gui.py
+docs/roadmap/post_v011_overlay_architecture.md
+```
+
+(Smoke script / generated MP4 / PNG / tmp lab outputs remain local and are **not** committed.)
+
+### 20.9 Remaining limitations / risks
+
+- Full-session / dense-rate export still deferred (C3-3+).
+- Topology requires optional `sleap_io`; otherwise honest nodes-only (E-session validation path).
+- Loading full `tracked_pose.parquet` + full machine journal then windowing can be heavy for very long sessions / large journals (performance limitation; clip export remains the supported path).
+- E-session accepted run has empty manual journal; manual visuals validated by fixtures.
+- Same-anchor journal duplicates (common in this machine journal) may visually coincide; identities are preserved, not merged.
+- S5 / S9-media / S10 overlay-media integration remain out of scope.
+
+### 20.10 Closure
+
+**C3-2 accepted** after provisional architectural review + final machine-event count verification + manual inclusive-interval pixel fixture. Commit/push authorized on this closure pass. Stop before C3-3. No S5 / S9-media / S10 overlay-media / science or artifact-schema changes.
+
+_End of C3-2 record._

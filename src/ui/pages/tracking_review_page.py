@@ -101,6 +101,7 @@ class TrackingReviewPage(QWidget):
         self.prev_correction_button = QPushButton("◀ Auto")
         self.next_correction_button = QPushButton("Auto ▶")
         self.accept_button = QPushButton("Accept Tracking")
+        self.export_qc_overlay_button = QPushButton("Export QC Overlay Video…")
         self.jump_edit = QLineEdit()
         self.jump_edit.setPlaceholderText("frame index")
         self.jump_button = QPushButton("Jump")
@@ -211,6 +212,7 @@ class TrackingReviewPage(QWidget):
         status_form.addRow(self.skeleton_label)
         status_form.addRow(self.acceptance_label)
         status_form.addRow(self.accept_button)
+        status_form.addRow(self.export_qc_overlay_button)
         status_form.addRow(self.provenance_label)
 
         side_toolbox = QToolBox()
@@ -253,6 +255,7 @@ class TrackingReviewPage(QWidget):
         self.source_combo.currentIndexChanged.connect(self._source_changed)
         self.speed_combo.currentIndexChanged.connect(self._speed_changed)
         self.accept_button.clicked.connect(self._accept_tracking)
+        self.export_qc_overlay_button.clicked.connect(self._open_overlay_qc_export)
         self.use_current_start_button.clicked.connect(self._use_current_as_start)
         self.use_current_end_button.clicked.connect(self._use_current_as_end)
         self.swap_identities_button.clicked.connect(self._swap_identities)
@@ -475,6 +478,7 @@ class TrackingReviewPage(QWidget):
             self.source_combo,
             self.speed_combo,
             self.accept_button,
+            self.export_qc_overlay_button,
             self.interval_start_spin,
             self.interval_end_spin,
             self.use_current_start_button,
@@ -730,6 +734,60 @@ class TrackingReviewPage(QWidget):
         self.status_message.emit(message)
         self.accepted.emit(result)
         self._refresh_view()
+
+    def _open_overlay_qc_export(self) -> None:
+        from pose_finalization.accepted_s3 import list_accepted_s3_runs
+        from ui.controllers.overlay_qc_export_support import plan_s3_pose_overlay_launch
+        from ui.dialogs.overlay_qc_export_dialog import open_overlay_qc_export_dialog
+
+        session = self.controller.session
+        project = self.controller.project
+        if session is None:
+            QMessageBox.warning(
+                self,
+                "No S3 run",
+                "Open an S3 tracking-correction run before exporting QC overlay video.",
+            )
+            return
+        session_root = (
+            None if project is None else Path(project.session_root)
+        )
+        if session_root is None:
+            session_root = session.session_root
+        if session_root is None:
+            QMessageBox.warning(
+                self,
+                "No session",
+                "S3 QC overlay export requires a bound session root.",
+            )
+            return
+        try:
+            accepted = list_accepted_s3_runs(session_root)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(
+                self,
+                "Cannot list accepted S3 runs",
+                str(exc),
+            )
+            return
+        eligible = tuple((run.run_id, run.run_dir) for run in accepted)
+        plan = plan_s3_pose_overlay_launch(
+            session_root=session_root,
+            selected_s3_run_id=session.run_id,
+            selected_s3_run_dir=session.run_dir,
+            selected_acceptance_state=session.acceptance_state,
+            accepted_s3_runs=eligible,
+        )
+        if plan.blocked or plan.launch is None:
+            QMessageBox.warning(
+                self,
+                plan.block_title or "S3 run not eligible",
+                plan.block_message
+                or "Select an accepted S3 run before exporting QC overlay video.",
+            )
+            return
+        open_overlay_qc_export_dialog(self, launch=plan.launch)
+        self.status_message.emit("QC overlay export dialog closed.")
 
     def _use_current_as_start(self) -> None:
         session = self.controller.session

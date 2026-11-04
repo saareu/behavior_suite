@@ -11,7 +11,7 @@ from uuid import uuid4
 from overlay.contracts import HudDirectionMode
 from overlay.discovery import OverlayQcJobSummary
 
-OverlayQcExportFamily = Literal["behavioral", "s4_pose", "s2_pose"]
+OverlayQcExportFamily = Literal["behavioral", "s4_pose", "s2_pose", "s3_pose"]
 OverlayQcBehaviorSource = Literal["s8_automated", "s10_reviewed"]
 OverlayQcScopeKind = Literal["prepared_interval", "bout_span"]
 
@@ -49,14 +49,16 @@ class OverlayQcUiSettings:
     include_frame_counter: bool = True
     draw_skeleton: bool = True
     show_confidence: bool = False
+    show_machine_corrections: bool = True
+    show_manual_corrections: bool = True
     pre_context_sec: float = 0.0
     post_context_sec: float = 0.0
 
     def validated(self) -> OverlayQcUiSettings:
         family = str(self.export_family).strip().lower()
-        if family not in {"behavioral", "s4_pose", "s2_pose"}:
+        if family not in {"behavioral", "s4_pose", "s2_pose", "s3_pose"}:
             raise ValueError(
-                "export_family must be behavioral, s4_pose, or s2_pose, "
+                "export_family must be behavioral, s4_pose, s2_pose, or s3_pose, "
                 f"got {family!r}."
             )
         source = str(self.source_kind).strip().lower()
@@ -80,7 +82,7 @@ class OverlayQcUiSettings:
 
         start = int(self.prepared_frame_idx_start)
         end = int(self.prepared_frame_idx_end)
-        if family in {"s4_pose", "s2_pose"} or scope == "prepared_interval":
+        if family in {"s4_pose", "s2_pose", "s3_pose"} or scope == "prepared_interval":
             if start < 0 or end < 0:
                 raise ValueError("Prepared frame indices must be >= 0.")
             if start > end:
@@ -129,6 +131,8 @@ class OverlayQcUiSettings:
             include_frame_counter=bool(self.include_frame_counter),
             draw_skeleton=bool(self.draw_skeleton),
             show_confidence=bool(self.show_confidence),
+            show_machine_corrections=bool(self.show_machine_corrections),
+            show_manual_corrections=bool(self.show_manual_corrections),
             pre_context_sec=float(self.pre_context_sec),
             post_context_sec=float(self.post_context_sec),
         )
@@ -143,6 +147,11 @@ class OverlayQcUiSettings:
         if settings.export_family == "s2_pose":
             return (
                 f"S2 pose QC prepared [{settings.prepared_frame_idx_start}, "
+                f"{settings.prepared_frame_idx_end}]"
+            )
+        if settings.export_family == "s3_pose":
+            return (
+                f"S3 pose QC prepared [{settings.prepared_frame_idx_start}, "
                 f"{settings.prepared_frame_idx_end}]"
             )
         if settings.scope_kind == "bout_span":
@@ -173,6 +182,8 @@ class OverlayQcRequestIdentity:
     s4_run_dir: Path | None
     s2_run_id: str | None
     s2_run_dir: Path | None
+    s3_run_id: str | None
+    s3_run_dir: Path | None
     settings: OverlayQcUiSettings
 
     @staticmethod
@@ -189,6 +200,8 @@ class OverlayQcRequestIdentity:
         s4_run_dir: Path | None,
         s2_run_id: str | None = None,
         s2_run_dir: Path | None = None,
+        s3_run_id: str | None = None,
+        s3_run_dir: Path | None = None,
         settings: OverlayQcUiSettings,
     ) -> OverlayQcRequestIdentity:
         return OverlayQcRequestIdentity(
@@ -214,6 +227,10 @@ class OverlayQcRequestIdentity:
             s2_run_dir=(
                 s2_run_dir.resolve(strict=False) if s2_run_dir is not None else None
             ),
+            s3_run_id=None if s3_run_id is None else str(s3_run_id),
+            s3_run_dir=(
+                s3_run_dir.resolve(strict=False) if s3_run_dir is not None else None
+            ),
             settings=settings.validated(),
         )
 
@@ -233,6 +250,8 @@ class OverlayQcLaunchContext:
     s4_run_id: str | None = None
     s2_run_dir: Path | None = None
     s2_run_id: str | None = None
+    s3_run_dir: Path | None = None
+    s3_run_id: str | None = None
     lock_family: bool = True
     lock_source_kind: bool = False
     locked_source_kind: OverlayQcBehaviorSource | None = None
@@ -245,7 +264,9 @@ class OverlayQcLaunchContext:
     review_options: tuple[tuple[str, Path, bool, str | None], ...] = ()
     s4_options: tuple[tuple[str, Path], ...] = ()
     s2_options: tuple[tuple[str, Path], ...] = ()
+    s3_options: tuple[tuple[str, Path], ...] = ()
     skeleton_nodes_only_disclosure: str | None = None
+    unaccepted_s3_message: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -396,6 +417,8 @@ def overlay_qc_table_rows(
             source = job.s4_run_id
         elif job.export_family == "s2_pose":
             source = job.s2_run_id
+        elif job.export_family == "s3_pose":
+            source = job.s3_run_id
         else:
             source = job.review_run_id or job.package_run_id or job.source_kind or "—"
         interval = "—"
@@ -428,6 +451,7 @@ def source_identity_summary(
     review_run_id: str | None,
     s4_run_id: str | None,
     s2_run_id: str | None = None,
+    s3_run_id: str | None = None,
 ) -> str:
     cfg = settings.validated()
     parts = [f"family={cfg.export_family}"]
@@ -438,6 +462,11 @@ def source_identity_summary(
         parts.append(f"s2={s2_run_id or '—'}")
         parts.append(f"skeleton={'yes' if cfg.draw_skeleton else 'no'}")
         parts.append(f"confidence={'yes' if cfg.show_confidence else 'no'}")
+    elif cfg.export_family == "s3_pose":
+        parts.append(f"s3={s3_run_id or '—'}")
+        parts.append(f"skeleton={'yes' if cfg.draw_skeleton else 'no'}")
+        parts.append(f"auto={'yes' if cfg.show_machine_corrections else 'no'}")
+        parts.append(f"manual={'yes' if cfg.show_manual_corrections else 'no'}")
     else:
         parts.append(f"source={cfg.source_kind}")
         parts.append(f"package={package_run_id or '—'}")
@@ -502,6 +531,99 @@ def plan_s2_pose_overlay_launch(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class S3PoseOverlayLaunchPlan:
+    """S3 page opener outcome: shared-dialog launch or an actionable block."""
+
+    launch: OverlayQcLaunchContext | None = None
+    block_title: str | None = None
+    block_message: str | None = None
+
+    @property
+    def blocked(self) -> bool:
+        return self.launch is None
+
+
+_S3_UNACCEPTED_MESSAGE = (
+    "S3 Tracking Correction QC export requires an accepted S3 run "
+    "(acceptance_state == accepted) with authoritative tracked_pose.parquet. "
+    "Accept Tracking first, or select a different accepted run. "
+    "Working-only / not_accepted / superseded runs are not eligible."
+)
+
+
+def plan_s3_pose_overlay_launch(
+    *,
+    session_root: Path | str,
+    selected_s3_run_id: str | None,
+    selected_s3_run_dir: Path | None,
+    selected_acceptance_state: str | None,
+    accepted_s3_runs: Sequence[tuple[str, Path]],
+) -> S3PoseOverlayLaunchPlan:
+    """Build S3-page launch context for accepted tracked-pose QC.
+
+    Prefills only an explicitly selected accepted run (or the sole accepted
+    option). Never auto-picks newest. Blocks unaccepted selections with an
+    actionable explanation.
+    """
+
+    root = Path(session_root).expanduser().resolve(strict=False)
+    options = tuple((str(run_id), Path(run_dir)) for run_id, run_dir in accepted_s3_runs)
+    selected_id = (
+        None if selected_s3_run_id is None else str(selected_s3_run_id).strip() or None
+    )
+    selected_dir = (
+        None if selected_s3_run_dir is None else Path(selected_s3_run_dir)
+    )
+    selected_state = (
+        None
+        if selected_acceptance_state is None
+        else str(selected_acceptance_state).strip() or None
+    )
+
+    if selected_id is not None and selected_dir is not None:
+        in_accepted = any(run_id == selected_id for run_id, _ in options)
+        if not in_accepted:
+            # accepted_s3_runs is the dialog authority — never inject a run that
+            # discovery did not list, even if page state claims "accepted".
+            return S3PoseOverlayLaunchPlan(
+                block_title="S3 run not accepted",
+                block_message=(
+                    f"Selected run {selected_id!r} has acceptance_state="
+                    f"{selected_state!r}. {_S3_UNACCEPTED_MESSAGE}"
+                ),
+            )
+        prefill_id = selected_id
+        prefill_dir = selected_dir
+    elif len(options) == 1:
+        prefill_id, prefill_dir = options[0]
+    else:
+        prefill_id, prefill_dir = None, None
+
+    if not options and prefill_dir is None:
+        return S3PoseOverlayLaunchPlan(
+            block_title="No accepted S3 run",
+            block_message=_S3_UNACCEPTED_MESSAGE,
+        )
+
+    return S3PoseOverlayLaunchPlan(
+        launch=OverlayQcLaunchContext(
+            session_root=root,
+            export_family="s3_pose",
+            s3_run_dir=prefill_dir,
+            s3_run_id=prefill_id,
+            lock_family=True,
+            s3_options=options,
+            preferred_prepared_start=0,
+            preferred_prepared_end=29,
+            skeleton_nodes_only_disclosure=(
+                "If SLEAP topology cannot be read from S2 lineage, export is "
+                "nodes-only (no invented edges); disclosed in the QC manifest/log."
+            ),
+        )
+    )
+
+
 def actionable_overlay_error(exc: BaseException) -> str:
     """Map backend exceptions to short operator-facing messages."""
 
@@ -525,6 +647,12 @@ def actionable_overlay_error(exc: BaseException) -> str:
         return f"Missing S4 pose artifacts: {message}"
     if "pose.parquet" in lowered or ("s2" in lowered and "missing" in lowered):
         return f"Missing or ineligible S2 pose artifacts: {message}"
+    if (
+        "tracked_pose" in lowered
+        or "acceptance" in lowered
+        or ("s3" in lowered and ("missing" in lowered or "not eligible" in lowered))
+    ):
+        return f"Missing or ineligible accepted S3 tracked pose: {message}"
     if "states" in lowered and ("s8" in lowered or "s10" in lowered or "missing" in lowered):
         return f"Missing S8/S10 behavioral states: {message}"
     if "topology" in lowered or "skeleton" in lowered or "sleap" in lowered:
@@ -546,10 +674,12 @@ __all__ = [
     "OverlayQcRequestIdentity",
     "OverlayQcScopeKind",
     "OverlayQcUiSettings",
+    "S3PoseOverlayLaunchPlan",
     "S8BehavioralOverlayLaunchPlan",
     "actionable_overlay_error",
     "overlay_qc_table_rows",
     "plan_s2_pose_overlay_launch",
+    "plan_s3_pose_overlay_launch",
     "plan_s8_behavioral_overlay_launch",
     "source_identity_summary",
 ]

@@ -49,7 +49,7 @@ def test_s2_s3_s4_source_distinctions(tmp_path: Path) -> None:
     assert s2.source_identity.extra["legend"] == (
         "inferred pose (S2 predictions; provisional IDs)"
     )
-    assert s3.source_identity.extra["legend"] == "tracking-corrected identities"
+    assert s3.source_identity.extra["legend"] == "S3 accepted tracked pose"
 
     timing = resolve_prepared_frame_timing(sync, 1)
     obs2 = s2.observe(timing, prepared_frame_idx=1)
@@ -58,7 +58,7 @@ def test_s2_s3_s4_source_distinctions(tmp_path: Path) -> None:
     assert obs2.available and obs2.payload["legend"] == (
         "inferred pose (S2 predictions; provisional IDs)"
     )
-    assert obs3.available and obs3.payload["legend"] == "tracking-corrected identities"
+    assert obs3.available and obs3.payload["legend"] == "S3 accepted tracked pose"
     assert obs4.available
     assert obs4.payload["domain"] == "dense"
     assert obs4.payload["dense_sample_idx"] == timing.dense_sample_idx

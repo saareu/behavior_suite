@@ -27,6 +27,7 @@ from ui.controllers.overlay_qc_export_support import (
     OverlayQcUiSettings,
     actionable_overlay_error,
     plan_s2_pose_overlay_launch,
+    plan_s3_pose_overlay_launch,
     plan_s8_behavioral_overlay_launch,
 )
 from ui.dialogs.overlay_qc_export_dialog import OverlayQcExportDialog
@@ -1055,3 +1056,83 @@ def test_s2_opener_prefills_only_when_unambiguous(tmp_path: Path) -> None:
     )
     assert ambiguous.s2_run_id is None
     assert len(ambiguous.s2_options) == 2
+
+
+def test_s3_dialog_family_launch_and_event_toggles(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    session.mkdir()
+    s3_a = session / "tracking_correction" / "s3__a"
+    s3_b = session / "tracking_correction" / "s3__b"
+    s3_a.mkdir(parents=True)
+    s3_b.mkdir(parents=True)
+    plan = plan_s3_pose_overlay_launch(
+        session_root=session,
+        selected_s3_run_id="s3__a",
+        selected_s3_run_dir=s3_a,
+        selected_acceptance_state="accepted",
+        accepted_s3_runs=(("s3__a", s3_a), ("s3__b", s3_b)),
+    )
+    assert plan.blocked is False
+    assert plan.launch is not None
+    launch = plan.launch
+    assert launch.export_family == "s3_pose"
+    assert launch.lock_family is True
+    assert launch.s3_run_id == "s3__a"
+
+    dialog = OverlayQcExportDialog(launch=launch)
+    dialog.show()
+    assert dialog.family_combo.currentData() == "s3_pose"
+    assert dialog.family_combo.isEnabled() is False
+    assert dialog.s3_combo.isEnabled() is True
+    assert dialog.s2_combo.isEnabled() is False
+    assert dialog.draw_skeleton.isEnabled() is True
+    assert dialog.show_machine_corrections.isEnabled() is True
+    assert dialog.show_manual_corrections.isEnabled() is True
+    assert dialog.show_confidence.isEnabled() is False
+    dialog.show_machine_corrections.setChecked(False)
+    dialog.show_manual_corrections.setChecked(True)
+    settings = dialog._read_settings()
+    assert settings.export_family == "s3_pose"
+    assert settings.show_machine_corrections is False
+    assert settings.show_manual_corrections is True
+    dialog.close()
+
+
+def test_s3_unaccepted_run_blocks_with_actionable_message(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    session.mkdir()
+    s3 = session / "tracking_correction" / "s3__working"
+    s3.mkdir(parents=True)
+    plan = plan_s3_pose_overlay_launch(
+        session_root=session,
+        selected_s3_run_id="s3__working",
+        selected_s3_run_dir=s3,
+        selected_acceptance_state="not_accepted",
+        accepted_s3_runs=(),
+    )
+    assert plan.blocked is True
+    assert plan.launch is None
+    assert plan.block_title == "S3 run not accepted"
+    assert "accepted" in (plan.block_message or "").lower()
+
+    # Page state claiming "accepted" is not enough when discovery omitted the run.
+    claimed = session / "tracking_correction" / "s3__stale"
+    claimed.mkdir(parents=True)
+    stale = plan_s3_pose_overlay_launch(
+        session_root=session,
+        selected_s3_run_id="s3__stale",
+        selected_s3_run_dir=claimed,
+        selected_acceptance_state="accepted",
+        accepted_s3_runs=(),
+    )
+    assert stale.blocked is True
+    assert stale.launch is None
+
+
+def test_s3_page_entry_button_present() -> None:
+    from ui.controllers.tracking_review_controller import TrackingReviewController
+    from ui.pages.tracking_review_page import TrackingReviewPage
+
+    page = TrackingReviewPage(TrackingReviewController())
+    assert page.export_qc_overlay_button.text() == "Export QC Overlay Video…"
+    assert callable(page._open_overlay_qc_export)

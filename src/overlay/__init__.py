@@ -3,7 +3,8 @@
 Overlays are opt-in. This package never mutates scientific artifacts.
 S8 ``execution.generate_overlay_video`` is deprecated and unsupported (O4
 closed); it remains parsed but unwired. Use ``export_behavioral_qc_clip`` /
-``export_s4_pose_qc_clip`` / ``export_s2_pose_qc_clip`` instead.
+``export_s4_pose_qc_clip`` / ``export_s2_pose_qc_clip`` /
+``export_s3_pose_qc_clip`` instead.
 """
 
 from overlay.adapters import (
@@ -33,6 +34,7 @@ from overlay.contracts import (
     OVERLAY_ARTIFACT_MANIFEST_SCHEMA,
     OVERLAY_RENDERER_VERSION,
     OVERLAY_S2_POSE_RENDERER_VERSION,
+    OVERLAY_S3_POSE_RENDERER_VERSION,
     OVERLAY_S4_POSE_RENDERER_VERSION,
     BehaviorSourceKind,
     FrameDomain,
@@ -51,6 +53,7 @@ from overlay.contracts import (
     S4ProvenanceVisualClass,
     default_behavioral_qc_layers,
     default_s2_pose_qc_layers,
+    default_s3_pose_qc_layers,
     default_s4_pose_qc_layers,
     layers_for_hud_mode,
     s2_score_visual_intensity,
@@ -60,6 +63,7 @@ from overlay.contracts import (
 from overlay.discovery import (
     EXPORT_FAMILY_BEHAVIORAL,
     EXPORT_FAMILY_S2_POSE,
+    EXPORT_FAMILY_S3_POSE,
     EXPORT_FAMILY_S4_POSE,
     OverlayQcJobSummary,
     OverlayQcProjectSummary,
@@ -79,15 +83,22 @@ from overlay.export_s2 import (
     build_s2_pose_adapters,
     export_s2_pose_qc_clip,
 )
+from overlay.export_s3 import (
+    OverlayS3PoseQcExportResult,
+    build_s3_pose_adapters,
+    export_s3_pose_qc_clip,
+)
 from overlay.plan import (
     BehavioralQcExportPlan,
     PreparedFrameInterval,
     S2PoseQcExportPlan,
+    S3PoseQcExportPlan,
     S4PoseQcExportPlan,
     dense_sample_window_for_prepared_interval,
     plan_bout_span,
     plan_prepared_interval,
     plan_s2_prepared_interval,
+    plan_s3_prepared_interval,
     plan_s4_prepared_interval,
 )
 from overlay.provenance import (
@@ -106,6 +117,11 @@ from overlay.source_s2 import (
     resolve_overlay_s2_qc_source,
     verify_overlay_s2_qc_source_integrity,
 )
+from overlay.source_s3 import (
+    OverlayS3QcSource,
+    resolve_overlay_s3_qc_source,
+    verify_overlay_s3_qc_source_integrity,
+)
 from overlay.source_s4 import (
     OverlayS4QcSource,
     resolve_overlay_s4_qc_source,
@@ -117,10 +133,12 @@ from overlay.timing import PreparedFrameTiming, resolve_prepared_frame_timing
 __all__ = [
     "EXPORT_FAMILY_BEHAVIORAL",
     "EXPORT_FAMILY_S2_POSE",
+    "EXPORT_FAMILY_S3_POSE",
     "EXPORT_FAMILY_S4_POSE",
     "OVERLAY_ARTIFACT_MANIFEST_SCHEMA",
     "OVERLAY_RENDERER_VERSION",
     "OVERLAY_S2_POSE_RENDERER_VERSION",
+    "OVERLAY_S3_POSE_RENDERER_VERSION",
     "OVERLAY_S4_POSE_RENDERER_VERSION",
     "BehaviorSourceKind",
     "BehavioralQcExportPlan",
@@ -148,6 +166,8 @@ __all__ = [
     "OverlayRenderError",
     "OverlayS2PoseQcExportResult",
     "OverlayS2QcSource",
+    "OverlayS3PoseQcExportResult",
+    "OverlayS3QcSource",
     "OverlayS4PoseQcExportResult",
     "OverlayS4QcSource",
     "OverlaySourceError",
@@ -160,6 +180,7 @@ __all__ = [
     "PreparedPoseAdapter",
     "PreparedVideoIdentity",
     "S2PoseQcExportPlan",
+    "S3PoseQcExportPlan",
     "S4FinalPoseAdapter",
     "S4PoseQcExportPlan",
     "S4ProvenanceVisualClass",
@@ -168,14 +189,17 @@ __all__ = [
     "build_behavioral_adapters",
     "build_overlay_artifact_manifest",
     "build_s2_pose_adapters",
+    "build_s3_pose_adapters",
     "build_s4_pose_adapters",
     "collect_evidence",
     "default_behavioral_qc_layers",
     "default_s2_pose_qc_layers",
+    "default_s3_pose_qc_layers",
     "default_s4_pose_qc_layers",
     "dense_sample_window_for_prepared_interval",
     "export_behavioral_qc_clip",
     "export_s2_pose_qc_clip",
+    "export_s3_pose_qc_clip",
     "export_s4_pose_qc_clip",
     "layers_for_hud_mode",
     "make_s2_inferred_pose_adapter",
@@ -194,9 +218,11 @@ __all__ = [
     "plan_bout_span",
     "plan_prepared_interval",
     "plan_s2_prepared_interval",
+    "plan_s3_prepared_interval",
     "plan_s4_prepared_interval",
     "resolve_overlay_qc_source",
     "resolve_overlay_s2_qc_source",
+    "resolve_overlay_s3_qc_source",
     "resolve_overlay_s4_qc_source",
     "resolve_prepared_frame_timing",
     "s2_score_visual_intensity",
@@ -205,5 +231,6 @@ __all__ = [
     "validate_layer_selection",
     "verify_overlay_qc_source_integrity",
     "verify_overlay_s2_qc_source_integrity",
+    "verify_overlay_s3_qc_source_integrity",
     "verify_overlay_s4_qc_source_integrity",
 ]

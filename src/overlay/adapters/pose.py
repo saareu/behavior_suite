@@ -223,8 +223,9 @@ def make_s3_tracked_pose_adapter(
     *,
     run_id: str | None = None,
     run_dir: Path | str | None = None,
+    prepared_frame_range: tuple[int, int] | None = None,
 ) -> PreparedPoseAdapter:
-    """S3 tracking-corrected identities from accepted tracked pose."""
+    """S3 accepted tracked identities from authoritative tracked_pose.parquet."""
 
     return PreparedPoseAdapter(
         parquet_path,
@@ -232,8 +233,9 @@ def make_s3_tracked_pose_adapter(
         subsystem="tracking_correction",
         run_id=run_id,
         run_dir=run_dir,
-        legend="tracking-corrected identities",
+        legend="S3 accepted tracked pose",
         require_track=True,
+        prepared_frame_range=prepared_frame_range,
     )
 
 
