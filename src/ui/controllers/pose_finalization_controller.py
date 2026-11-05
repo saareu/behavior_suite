@@ -7,21 +7,21 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from pose_finalization import (
-    AcceptedS3Run,
     GAP_KALMAN_MAX_FRAMES_DEFAULT,
     GAP_LINEAR_MAX_FRAMES_DEFAULT,
+    SAVGOL_ENABLED_DEFAULT,
+    SAVGOL_POLYORDER_DEFAULT,
+    SAVGOL_WINDOW_LENGTH_DEFAULT,
+    TARGET_FPS_DEFAULT,
+    AcceptedS3Run,
     GapFillConfig,
     PoseFinalizationError,
     PoseFinalizationRequest,
     PoseFinalizationResult,
-    SAVGOL_ENABLED_DEFAULT,
-    SAVGOL_POLYORDER_DEFAULT,
-    SAVGOL_WINDOW_LENGTH_DEFAULT,
     SmoothConfig,
-    TARGET_FPS_DEFAULT,
-    find_latest_accepted_s3_run,
     list_accepted_s3_runs,
     run_pose_finalization,
     validate_accepted_s3_run,
@@ -54,6 +54,24 @@ class PoseFinalizationUiSettings:
     target_fps: float = TARGET_FPS_DEFAULT
 
 
+@dataclass(frozen=True, slots=True)
+class DiscoveryRequestIdentity:
+    """Identity used to reject stale asynchronous discovery results."""
+
+    request_id: str
+    generation: int
+    session_root: Path
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoverySnapshot:
+    """Payload collected off the GUI thread for one discovery generation."""
+
+    identity: DiscoveryRequestIdentity
+    summary: PoseFinalizationProjectSummary
+    accepted_s3_runs: tuple[AcceptedS3Run, ...]
+
+
 @dataclass(slots=True)
 class PoseFinalizationUiState:
     """Compact mutable state for the S4 page (no pose arrays)."""
@@ -65,6 +83,9 @@ class PoseFinalizationUiState:
     selected_s4_run_id: str | None = None
     settings: PoseFinalizationUiSettings = field(default_factory=PoseFinalizationUiSettings)
     task_running: bool = False
+    discovery_running: bool = False
+    discovery_generation: int = 0
+    active_discovery_identity: DiscoveryRequestIdentity | None = None
     run_stage: str = "Not started"
     run_error: str | None = None
     last_result: PoseFinalizationResult | None = None
@@ -85,37 +106,140 @@ class PoseFinalizationController:
         self._runner = runner
 
     def set_session(self, session_root: Path | str) -> PoseFinalizationProjectSummary:
-        """Open a project/session and refresh accepted-S3 / completed-S4 discovery."""
+        """Open a project/session and refresh accepted-S3 / completed-S4 discovery (sync)."""
+
+        self.prepare_session(session_root)
+        return self.refresh_discovery()
+
+    def prepare_session(self, session_root: Path | str) -> DiscoveryRequestIdentity:
+        """Bind a session and bump discovery generation without scanning yet."""
 
         root = Path(session_root).expanduser().resolve(strict=False)
         if not root.is_dir():
             raise PoseFinalizationUiError(f"Session directory does not exist: {root}")
+        previous = self.state.session_root
+        if (
+            self.state.task_running
+            and previous is not None
+            and previous.resolve(strict=False) != root
+        ):
+            raise PoseFinalizationUiError(
+                "Cannot change S4 session while pose finalization is active."
+            )
         self.state.session_root = root
         self.state.last_result = None
         self.state.run_error = None
         self.state.run_stage = "Not started"
-        return self.refresh_discovery()
+        if previous is None or previous.resolve(strict=False) != root:
+            self.state.summary = None
+            self.state.accepted_s3_runs = ()
+            self.state.selected_s3_run_id = None
+            self.state.selected_s4_run_id = None
+        return self.begin_discovery()
 
-    def refresh_discovery(self) -> PoseFinalizationProjectSummary:
-        """Re-scan accepted S3 inputs and completed S4 outputs for the session."""
+    def begin_discovery(self) -> DiscoveryRequestIdentity:
+        """Mark discovery in progress and return an identity for async apply."""
 
         root = self.state.session_root
         if root is None:
             raise PoseFinalizationUiError("Select a project/session first.")
+        self.state.discovery_generation += 1
+        identity = DiscoveryRequestIdentity(
+            request_id=str(uuid4()),
+            generation=self.state.discovery_generation,
+            session_root=root.resolve(strict=False),
+        )
+        self.state.active_discovery_identity = identity
+        self.state.discovery_running = True
+        return identity
+
+    def collect_discovery_snapshot(
+        self, identity: DiscoveryRequestIdentity
+    ) -> DiscoverySnapshot:
+        """Heavy filesystem / hashing work safe to run off the GUI thread."""
+
+        root = identity.session_root
         try:
             summary = summarize_pose_finalization_project(root)
             accepted = list_accepted_s3_runs(root)
-        except PoseFinalizationError as exc:
+        except (PoseFinalizationError, OSError) as exc:
             raise PoseFinalizationUiError(str(exc)) from exc
-        self.state.summary = summary
-        self.state.accepted_s3_runs = accepted
+        return DiscoverySnapshot(
+            identity=identity,
+            summary=summary,
+            accepted_s3_runs=tuple(accepted),
+        )
+
+    def apply_discovery_snapshot(self, snapshot: DiscoverySnapshot) -> bool:
+        """Apply a discovery result only when its generation is still current."""
+
+        if not self._is_current_discovery_result(snapshot.identity):
+            return False
+        self.state.discovery_running = False
+        self.state.active_discovery_identity = None
+        self.state.summary = snapshot.summary
+        self.state.accepted_s3_runs = snapshot.accepted_s3_runs
         self._reconcile_s3_selection()
         self._reconcile_s4_selection()
-        return summary
+        return True
+
+    def record_discovery_failure(
+        self, message: str, *, expected_identity: DiscoveryRequestIdentity | None
+    ) -> bool:
+        """Record a discovery failure when the request is still current."""
+
+        if not self._is_current_discovery_result(expected_identity):
+            return False
+        self.state.discovery_running = False
+        self.state.active_discovery_identity = None
+        self.state.run_error = message
+        return True
+
+    def refresh_discovery(self) -> PoseFinalizationProjectSummary:
+        """Re-scan accepted S3 inputs and completed S4 outputs (synchronous)."""
+
+        identity = self.begin_discovery()
+        try:
+            snapshot = self.collect_discovery_snapshot(identity)
+        except PoseFinalizationUiError:
+            # Synchronous callers see the error directly; do not leave discovery "running".
+            if self._is_current_discovery_result(identity):
+                self.state.discovery_running = False
+                self.state.active_discovery_identity = None
+            raise
+        applied = self.apply_discovery_snapshot(snapshot)
+        if not applied or self.state.summary is None:
+            raise PoseFinalizationUiError(
+                "Discovery result was superseded by a newer session selection."
+            )
+        return self.state.summary
+
+    def _is_current_discovery_result(
+        self, expected: DiscoveryRequestIdentity | None
+    ) -> bool:
+        if expected is None:
+            return False
+        active = self.state.active_discovery_identity
+        if active is None:
+            return False
+        if expected.request_id != active.request_id:
+            return False
+        if expected.generation != self.state.discovery_generation:
+            return False
+        current_root = self.state.session_root
+        if current_root is None:
+            return False
+        return current_root.resolve(strict=False) == expected.session_root.resolve(
+            strict=False
+        )
 
     def select_accepted_s3_run(self, run_id: str | None) -> AcceptedS3Run | None:
         """Select an accepted S3 run by id, or clear selection."""
 
+        if self.state.task_running or self.state.discovery_running:
+            raise PoseFinalizationUiError(
+                "Cannot change the accepted S3 source while an S4 task is active."
+            )
         if run_id is None or not str(run_id).strip():
             self.state.selected_s3_run_id = None
             return None
@@ -215,6 +339,7 @@ class PoseFinalizationController:
 
         return (
             not self.state.task_running
+            and not self.state.discovery_running
             and self.state.session_root is not None
             and self.selected_accepted_s3() is not None
         )
@@ -224,6 +349,8 @@ class PoseFinalizationController:
 
         if self.state.task_running:
             return "Pose finalization is already running."
+        if self.state.discovery_running:
+            return "S4 discovery is still running."
         if self.state.session_root is None:
             return "Select a project/session first."
         if self.selected_accepted_s3() is None:
@@ -239,6 +366,8 @@ class PoseFinalizationController:
     def build_request(self, *, timestamp: str | None = None) -> PoseFinalizationRequest:
         """Build a validated runner request from the current GUI state."""
 
+        if self.state.discovery_running:
+            raise PoseFinalizationUiError("S4 discovery is still running.")
         accepted = self.selected_accepted_s3()
         if accepted is None:
             reason = self.cannot_run_reason() or "No accepted S3 run selected."
@@ -380,10 +509,11 @@ class PoseFinalizationController:
         current = self.state.selected_s3_run_id
         if current is not None and any(run.run_id == current for run in accepted):
             return
-        latest = find_latest_accepted_s3_run(self.state.session_root) if self.state.session_root else None
-        self.state.selected_s3_run_id = (
-            latest.run_id if latest is not None else accepted[0].run_id
-        )
+        # ``accepted`` is already the validated, newest-first list produced by
+        # ``list_accepted_s3_runs``; its head is exactly what
+        # ``find_latest_accepted_s3_run`` would return, without a second full scan
+        # (and SHA validation) on the GUI thread.
+        self.state.selected_s3_run_id = accepted[0].run_id
 
     def _reconcile_s4_selection(self) -> None:
         summary = self.state.summary

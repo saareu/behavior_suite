@@ -214,6 +214,8 @@ def test_new_s3_run_becomes_reviewable_via_main_window(tmp_path: Path) -> None:
     )
     window.show()
     window.open_pose_inference(session_root)
+    # S2 session open/discovery is asynchronous; wait before selecting a run.
+    _wait_until(lambda: not window.pose_page.has_running_task)
     pose_controller.select_run(s2_run.name)
     window.pose_page.refresh_from_state()
     assert window.pose_page.continue_s3_button.isEnabled() is True
@@ -258,6 +260,8 @@ def test_s3_busy_indicator_disables_action_and_restores_on_success(
     )
     window.show()
     window.open_pose_inference(session_root)
+    # S2 session open/discovery is asynchronous; wait before selecting a run.
+    _wait_until(lambda: not window.pose_page.has_running_task)
     pose_controller.select_run(s2_run.name)
     page = window.pose_page
     page.refresh_from_state()

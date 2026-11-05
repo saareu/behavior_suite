@@ -63,6 +63,8 @@ ProgressCallback = Callable[[OperationProgress], None]
 FolderOpener = Callable[[Path], bool]
 BlobFeaturesRunner = Callable[..., BlobFeaturesResult]
 
+OPENING_SOURCE_MESSAGE = "Opening S1 source…"
+
 
 class BlobFeaturesUiError(ValueError):
     """Expected, actionable Subsystem 05 UI validation error."""
@@ -138,6 +140,56 @@ class ExtractionRequestIdentity:
     prepared_sync: Path
     prepared_sync_sha256: str
     settings: BlobFeaturesUiSettings
+
+
+@dataclass(frozen=True, slots=True)
+class OpenRequestIdentity:
+    """Identity used to reject stale asynchronous S1 source-open results."""
+
+    request_id: str
+    generation: int
+    session_root: Path
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveryRequestIdentity:
+    """Identity used to reject stale asynchronous S5 run-discovery results."""
+
+    request_id: str
+    generation: int
+    session_root: Path
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class OpenSnapshot:
+    """Payload collected off the GUI thread for one source-open generation.
+
+    Built by :meth:`BlobFeaturesController.collect_open_snapshot` (worker-safe,
+    never touches ``state``) and applied atomically on the GUI thread. An
+    ineligible S1 source is reported via ``eligibility_error`` (not raised) so
+    the GUI thread can surface a precise message.
+    """
+
+    identity: OpenRequestIdentity
+    eligible: EligibleS1Input | None = None
+    eligibility_error: str | None = None
+    source_identity: S1SourceIdentity | None = None
+    background_bgr: np.ndarray | None = None
+    working_settings: BlobFeaturesUiSettings | None = None
+    bookmarks: SegmentationBookmarkStore | None = None
+    current_frame_idx: int = 0
+    current_frame_bgr: np.ndarray | None = None
+    frame_load_error: str | None = None
+    summary: BlobFeaturesProjectSummary | None = None
+    discovery_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoverySnapshot:
+    """Payload collected off the GUI thread for one discovery generation."""
+
+    identity: DiscoveryRequestIdentity
+    summary: BlobFeaturesProjectSummary
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +292,13 @@ class BlobFeaturesUiState:
     preview_cache: PreviewResultCache = field(default_factory=PreviewResultCache)
     bookmarks: SegmentationBookmarkStore | None = None
     task_running: bool = False
+    open_running: bool = False
+    open_generation: int = 0
+    active_open_identity: OpenRequestIdentity | None = None
+    discovery_running: bool = False
+    discovery_generation: int = 0
+    active_discovery_identity: DiscoveryRequestIdentity | None = None
+    discovery_error: str | None = None
     active_preview_request_id: str | None = None
     active_extraction_identity: ExtractionRequestIdentity | None = None
     preview_error: str | None = None
@@ -285,106 +344,352 @@ class BlobFeaturesController:
         return settings
 
     def set_session(self, session_root: Path | str) -> EligibleS1Input:
-        """Open a session/project and validate eligible S1 independently of S2–S4."""
+        """Open a session/project synchronously (prepare + open + discovery).
+
+        Pages use the asynchronous ``prepare_session`` / ``collect_open_snapshot``
+        / ``apply_open_snapshot`` path; this entry point keeps headless callers
+        and unit tests simple. Validation failures raise
+        :class:`BlobFeaturesUiError` after the failure state has been applied.
+        """
+
+        identity = self.prepare_session(session_root)
+        try:
+            snapshot = self.collect_open_snapshot(identity)
+        except Exception as exc:
+            self.record_open_failure(str(exc), expected_identity=identity)
+            raise
+        if not self.apply_open_snapshot(snapshot):
+            raise BlobFeaturesUiError(
+                "S5 source open was superseded by a newer session selection."
+            )
+        if snapshot.eligible is None:
+            raise BlobFeaturesUiError(
+                snapshot.eligibility_error or "No eligible S1 result is available."
+            )
+        if snapshot.frame_load_error:
+            raise BlobFeaturesUiError(snapshot.frame_load_error)
+        if snapshot.discovery_error:
+            raise BlobFeaturesUiError(snapshot.discovery_error)
+        return snapshot.eligible
+
+    def prepare_session(self, session_root: Path | str) -> OpenRequestIdentity:
+        """Bind a session, drop previous-session frames, and begin an open request.
+
+        GUI-thread only and cheap: no hashing, decoding, or discovery happens
+        here. Everything derived from the previous source (eligibility, frames,
+        background, previews, bookmarks) is cleared immediately so stale imagery
+        can never be displayed while the new source opens.
+        """
 
         root = Path(session_root).expanduser().resolve(strict=False)
         if not root.is_dir():
             raise BlobFeaturesUiError(f"Session directory does not exist: {root}")
         previous = self.state.session_root
-        if (
-            self.state.task_running
-            and previous is not None
-            and previous != root
-        ):
+        if self.state.task_running:
             raise BlobFeaturesUiError(
                 "Cannot change S5 session while a preview or extraction task is active."
             )
+        same_root = previous is not None and previous == root
         self.state.session_root = root
-        self.state.eligibility_error = None
         self.state.preview_error = None
         self.state.frame_load_error = None
+        self.state.discovery_error = None
+        # Immediately drop all frame/thumbnail data bound to the previous source.
+        self.state.eligible = None
+        self.state.source_identity = None
+        self.state.background_bgr = None
+        self.state.current_frame_bgr = None
+        self.state.current_frame_idx = 0
+        self.state.bookmarks = None
         self.state.last_single_preview = None
         self.state.last_multi_preview = None
         self.state.preview_valid = False
         self.state.last_preview_settings = None
+        self.state.active_preview_request_id = None
         self.state.preview_cache.clear()
-        # Changing S1 source invalidates prior preview; completed extraction
-        # snapshots are session-local and cleared with the session.
-        if previous is None or previous != root:
+        if not same_root:
+            # Completed extraction snapshots are session-local.
             self.state.last_extraction_settings = None
             self.state.last_result = None
             self.state.selected_s5_run_id = None
+            self.state.summary = None
             self.state.run_error = None
             self.state.run_stage = "Not started"
+        return self.begin_open()
+
+    def begin_open(self) -> OpenRequestIdentity:
+        """Mark an S1 source open in progress and return its stale-guard identity.
+
+        A new open supersedes any in-flight open or discovery request (their
+        results are rejected on apply); the open snapshot carries its own
+        discovery summary.
+        """
+
+        root = self.state.session_root
+        if root is None:
+            raise BlobFeaturesUiError("Select a project/session first.")
+        self.state.open_generation += 1
+        identity = OpenRequestIdentity(
+            request_id=str(uuid4()),
+            generation=self.state.open_generation,
+            session_root=root.resolve(strict=False),
+        )
+        self.state.active_open_identity = identity
+        self.state.open_running = True
+        self.state.active_discovery_identity = None
+        self.state.discovery_running = False
+        self.state.eligibility_error = OPENING_SOURCE_MESSAGE
+        return identity
+
+    def collect_open_snapshot(self, identity: OpenRequestIdentity) -> OpenSnapshot:
+        """Heavy S1 validation/hashing/decoding safe to run off the GUI thread.
+
+        Never reads or writes ``self.state``. Ineligible sources are reported in
+        the snapshot; unexpected failures raise.
+        """
+
+        root = identity.session_root
         try:
             eligible = validate_s1_for_blob_features(root)
         except BlobFeaturesError as exc:
+            return OpenSnapshot(identity=identity, eligibility_error=str(exc))
+        try:
+            source_identity = S1SourceIdentity.from_eligible(eligible)
+        except (BlobFeaturesError, OSError) as exc:
+            return OpenSnapshot(identity=identity, eligibility_error=str(exc))
+        try:
+            background = self._background_loader(eligible.cropped_background)
+        except BlobFeaturesError as exc:
+            return OpenSnapshot(identity=identity, eligibility_error=str(exc))
+
+        try:
+            persisted = load_working_settings_for_source(source_identity)
+            if persisted is not None:
+                # Preserve the user's explicit saved working values for this source.
+                settings = BlobFeaturesUiSettings.from_config(persisted)
+            else:
+                # Do not carry scientific settings across distinct S1 identities.
+                settings = BlobFeaturesUiSettings.from_config(self._config_loader())
+        except BlobFeaturesError as exc:
+            raise BlobFeaturesUiError(str(exc)) from exc
+
+        bookmarks = load_bookmarks_or_empty(
+            session_root=eligible.session_root,
+            preprocess_dir=eligible.preprocess_dir,
+            prepared_video=eligible.prepared_video,
+            prepared_sync=eligible.prepared_sync,
+            prepared_video_sha256=source_identity.prepared_video_sha256,
+            prepared_sync_sha256=source_identity.prepared_sync_sha256,
+        )
+
+        frame: np.ndarray | None = None
+        frame_error: str | None = None
+        try:
+            frame = self._frame_reader(eligible.prepared_video, 0)
+        except (BlobFeaturesError, VideoProbeError) as exc:
+            frame_error = str(exc)
+
+        summary: BlobFeaturesProjectSummary | None = None
+        discovery_error: str | None = None
+        try:
+            summary = summarize_blob_features_project(root)
+        except BlobFeaturesError as exc:
+            discovery_error = str(exc)
+
+        return OpenSnapshot(
+            identity=identity,
+            eligible=eligible,
+            source_identity=source_identity,
+            background_bgr=background,
+            working_settings=settings,
+            bookmarks=bookmarks,
+            current_frame_idx=0,
+            current_frame_bgr=frame,
+            frame_load_error=frame_error,
+            summary=summary,
+            discovery_error=discovery_error,
+        )
+
+    def apply_open_snapshot(self, snapshot: OpenSnapshot) -> bool:
+        """Apply an open result on the GUI thread only when it is still current."""
+
+        if not self._is_current_open_result(snapshot.identity):
+            return False
+        self.state.open_running = False
+        self.state.active_open_identity = None
+        if snapshot.eligible is None or snapshot.source_identity is None:
             self.state.eligible = None
             self.state.source_identity = None
             self.state.background_bgr = None
             self.state.current_frame_bgr = None
             self.state.bookmarks = None
             self.state.summary = None
-            self.state.eligibility_error = str(exc)
-            raise BlobFeaturesUiError(str(exc)) from exc
-
-        self.state.eligible = eligible
-        identity = S1SourceIdentity.from_eligible(eligible)
-        self.state.source_identity = identity
-        self.state.current_frame_idx = 0
-        try:
-            self.state.background_bgr = self._background_loader(eligible.cropped_background)
-        except BlobFeaturesError as exc:
-            self.state.background_bgr = None
-            self.state.eligibility_error = str(exc)
-            raise BlobFeaturesUiError(str(exc)) from exc
-
-        persisted = load_working_settings_for_source(identity)
-        if persisted is not None:
-            # Preserve the user's explicit saved working values for this source.
-            self.state.working_settings = BlobFeaturesUiSettings.from_config(persisted)
-        else:
-            # Do not carry scientific settings across distinct S1 identities.
-            try:
-                self.state.working_settings = BlobFeaturesUiSettings.from_config(
-                    self._config_loader()
-                )
-            except BlobFeaturesError as exc:
-                raise BlobFeaturesUiError(str(exc)) from exc
-
-        self.state.bookmarks = load_bookmarks_or_empty(
-            session_root=eligible.session_root,
-            preprocess_dir=eligible.preprocess_dir,
-            prepared_video=eligible.prepared_video,
-            prepared_sync=eligible.prepared_sync,
-            prepared_video_sha256=identity.prepared_video_sha256,
-            prepared_sync_sha256=identity.prepared_sync_sha256,
-        )
-        self.load_current_frame()
-        self.refresh_discovery()
+            self.state.eligibility_error = (
+                snapshot.eligibility_error or "No eligible S1 result is available."
+            )
+            return True
+        self.state.eligible = snapshot.eligible
+        self.state.source_identity = snapshot.source_identity
+        self.state.eligibility_error = None
+        self.state.background_bgr = snapshot.background_bgr
+        if snapshot.working_settings is not None:
+            self.state.working_settings = snapshot.working_settings
+        self.state.bookmarks = snapshot.bookmarks
+        self.state.current_frame_idx = int(snapshot.current_frame_idx)
+        self.state.current_frame_bgr = snapshot.current_frame_bgr
+        self.state.frame_load_error = snapshot.frame_load_error
+        self.state.discovery_error = snapshot.discovery_error
+        if snapshot.summary is not None:
+            self.state.summary = snapshot.summary
+            self._reconcile_s5_selection()
         self._persist_working_settings()
-        return eligible
+        return True
+
+    def record_open_failure(
+        self,
+        message: str,
+        *,
+        expected_identity: OpenRequestIdentity | None,
+    ) -> bool:
+        """Record an unexpected open failure when the request is still current."""
+
+        if not self._is_current_open_result(expected_identity):
+            return False
+        self.state.open_running = False
+        self.state.active_open_identity = None
+        self.state.eligible = None
+        self.state.source_identity = None
+        self.state.background_bgr = None
+        self.state.current_frame_bgr = None
+        self.state.bookmarks = None
+        self.state.eligibility_error = message
+        return True
 
     def clear_session(self) -> None:
         if self.state.task_running:
             raise BlobFeaturesUiError(
                 "Cannot clear the S5 session while a task is active."
             )
-        self.state = BlobFeaturesUiState(working_settings=self.state.working_settings)
+        self.state = BlobFeaturesUiState(
+            working_settings=self.state.working_settings,
+            open_generation=self.state.open_generation,
+            discovery_generation=self.state.discovery_generation,
+        )
 
-    def refresh_discovery(self) -> BlobFeaturesProjectSummary:
-        """Re-scan completed S5 outputs for the current session."""
+    def begin_discovery(self) -> DiscoveryRequestIdentity:
+        """Mark run discovery in progress and return its stale-guard identity.
+
+        Assumes the session is already open; does not re-hash the S1 source.
+        """
 
         root = self.state.session_root
         if root is None:
             raise BlobFeaturesUiError("Select a project/session first.")
+        if self.state.open_running:
+            raise BlobFeaturesUiError(
+                "Cannot refresh S5 discovery while the S1 source is still opening."
+            )
+        self.state.discovery_generation += 1
+        identity = DiscoveryRequestIdentity(
+            request_id=str(uuid4()),
+            generation=self.state.discovery_generation,
+            session_root=root.resolve(strict=False),
+        )
+        self.state.active_discovery_identity = identity
+        self.state.discovery_running = True
+        self.state.discovery_error = None
+        return identity
+
+    def collect_discovery_snapshot(
+        self, identity: DiscoveryRequestIdentity
+    ) -> DiscoverySnapshot:
+        """Filesystem scan of completed S5 outputs; safe off the GUI thread."""
+
         try:
-            summary = summarize_blob_features_project(root)
+            summary = summarize_blob_features_project(identity.session_root)
         except BlobFeaturesError as exc:
             raise BlobFeaturesUiError(str(exc)) from exc
-        self.state.summary = summary
+        return DiscoverySnapshot(identity=identity, summary=summary)
+
+    def apply_discovery_snapshot(self, snapshot: DiscoverySnapshot) -> bool:
+        """Apply a discovery result only when its identity is still current."""
+
+        if not self._is_current_discovery_result(snapshot.identity):
+            return False
+        self.state.discovery_running = False
+        self.state.active_discovery_identity = None
+        self.state.discovery_error = None
+        self.state.summary = snapshot.summary
         self._reconcile_s5_selection()
-        return summary
+        return True
+
+    def record_discovery_failure(
+        self,
+        message: str,
+        *,
+        expected_identity: DiscoveryRequestIdentity | None,
+    ) -> bool:
+        """Record a discovery failure when the request is still current."""
+
+        if not self._is_current_discovery_result(expected_identity):
+            return False
+        self.state.discovery_running = False
+        self.state.active_discovery_identity = None
+        self.state.discovery_error = message
+        return True
+
+    def refresh_discovery(self) -> BlobFeaturesProjectSummary:
+        """Re-scan completed S5 outputs synchronously (session must be open)."""
+
+        identity = self.begin_discovery()
+        try:
+            snapshot = self.collect_discovery_snapshot(identity)
+        except BlobFeaturesUiError as exc:
+            self.record_discovery_failure(str(exc), expected_identity=identity)
+            raise
+        if not self.apply_discovery_snapshot(snapshot) or self.state.summary is None:
+            raise BlobFeaturesUiError(
+                "Discovery result was superseded by a newer session selection."
+            )
+        return self.state.summary
+
+    def _is_current_open_result(self, expected: OpenRequestIdentity | None) -> bool:
+        if expected is None:
+            return False
+        active = self.state.active_open_identity
+        if active is None or not self.state.open_running:
+            return False
+        if expected.request_id != active.request_id:
+            return False
+        if expected.generation != self.state.open_generation:
+            return False
+        current_root = self.state.session_root
+        if current_root is None:
+            return False
+        return current_root.resolve(strict=False) == expected.session_root.resolve(
+            strict=False
+        )
+
+    def _is_current_discovery_result(
+        self, expected: DiscoveryRequestIdentity | None
+    ) -> bool:
+        if expected is None:
+            return False
+        if self.state.open_running:
+            return False
+        active = self.state.active_discovery_identity
+        if active is None or not self.state.discovery_running:
+            return False
+        if expected.request_id != active.request_id:
+            return False
+        if expected.generation != self.state.discovery_generation:
+            return False
+        current_root = self.state.session_root
+        if current_root is None:
+            return False
+        return current_root.resolve(strict=False) == expected.session_root.resolve(
+            strict=False
+        )
 
     def require_eligible(self) -> EligibleS1Input:
         if self.state.eligible is None:
@@ -776,6 +1081,8 @@ class BlobFeaturesController:
     def can_run_extraction(self) -> bool:
         return (
             not self.state.task_running
+            and not self.state.open_running
+            and not self.state.discovery_running
             and self.state.session_root is not None
             and self.state.eligible is not None
         )
@@ -783,6 +1090,10 @@ class BlobFeaturesController:
     def cannot_run_reason(self) -> str | None:
         if self.state.task_running:
             return "A Subsystem 5 task is already running."
+        if self.state.open_running:
+            return "The S1 source is still opening."
+        if self.state.discovery_running:
+            return "S5 discovery is still running."
         if self.state.session_root is None:
             return "Select a project/session first."
         if self.state.eligible is None:

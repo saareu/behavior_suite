@@ -21,6 +21,7 @@ See also: [Implementation Contract](implementation_contract.md), [Architecture A
 | Model registry | Optional path selector; dyadic/focal discovery; obsolete `contact` shown unsupported; no inference |
 | QC / results | Historical status vs current eligibility; sources; samples/rows/tracks; implantation; compat summary |
 | Run discovery | `summarize_combined_features_project` table; reopen without recalculation |
+| Async discovery (PQ Sprint 1) | `COMBINED_FEATURES_DISCOVERY` worker for the S4+S5+S6/pair bundle; atomic apply; see [`../roadmap/product_quality_sprint_1_async_discovery.md`](../roadmap/product_quality_sprint_1_async_discovery.md) |
 | Task safety | Soft nav lock matching S5; S2/S4 hard lock unchanged; no Cancel button |
 | Tests | `tests/ui/test_combined_features_gui.py` (18 cases) + S5 nav regression updates |
 | Docs | This note; contract / README / roadmap status updates |

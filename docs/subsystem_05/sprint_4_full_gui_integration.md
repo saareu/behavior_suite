@@ -15,6 +15,7 @@ See also: [MVP Scope and Roadmap](mvp_scope_and_roadmap.md).
 | Group navigation | `MainWindow` Group 1 (S1–S4) / Group 2 (S5 + disabled S6) |
 | Full extraction GUI | `BlobFeaturesPage` + controller → `run_blob_feature_extraction` via `GuiTaskRunner.start_progressive` |
 | Run discovery | `blob_features.run_discovery` with eligible / warnings / stale / failed / invalid |
+| Async open/discovery (PQ Sprint 1) | `BLOB_FEATURES_OPEN` + `BLOB_FEATURES_DISCOVERY` workers; stale-session frame clear; see [`../roadmap/product_quality_sprint_1_async_discovery.md`](../roadmap/product_quality_sprint_1_async_discovery.md) |
 | Persistence | Working settings + bookmarks keyed by S1 digests under `blob_features/_gui/` |
 | Progress | Prepared-video frames processed via `OperationProgress` |
 | Docs | MVP roadmap + this sprint note |

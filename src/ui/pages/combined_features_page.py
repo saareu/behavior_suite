@@ -40,6 +40,8 @@ from ui.controllers.combined_features_controller import (
     CombinedFeaturesController,
     CombinedFeaturesUiError,
     CombinedFeaturesUiSettings,
+    DiscoveryRequestIdentity,
+    DiscoverySnapshot,
     ExtractionRequestIdentity,
 )
 from ui.tasks import (
@@ -70,10 +72,12 @@ class CombinedFeaturesPage(QWidget):
         super().__init__(parent)
         self.controller = controller or CombinedFeaturesController()
         self.task_runner = GuiTaskRunner(self)
+        self.discovery_runner = GuiTaskRunner(self)
         self._syncing_widgets = False
         self._started_at: float | None = None
         self._last_running_state: bool | None = None
         self._active_extraction_identity: ExtractionRequestIdentity | None = None
+        self._active_discovery_identity: DiscoveryRequestIdentity | None = None
         self._build_ui()
         self.elapsed_timer = QTimer(self)
         self.elapsed_timer.setInterval(500)
@@ -82,20 +86,35 @@ class CombinedFeaturesPage(QWidget):
 
     @property
     def has_running_task(self) -> bool:
-        return self.task_runner.is_running or self.controller.state.task_running
+        return (
+            self.task_runner.is_running
+            or self.discovery_runner.is_running
+            or self.controller.state.task_running
+            or self.controller.state.discovery_running
+        )
 
     def set_session(self, session_root: Path | str) -> None:
-        """Open a project/session and refresh S4/S5/S6 discovery."""
+        """Open a project/session and refresh S4/S5/S6 discovery in the background."""
 
+        if self.controller.state.task_running or self.task_runner.is_running:
+            QMessageBox.warning(
+                self,
+                "Cannot open S6 session",
+                "Cannot change S6 session while combined-feature extraction is active.",
+            )
+            return
         try:
-            self.controller.set_session(session_root)
+            identity = self.controller.prepare_session(session_root)
         except CombinedFeaturesUiError as exc:
             QMessageBox.warning(self, "Cannot open S6 session", str(exc))
             self.status_message.emit(str(exc))
             self.refresh_from_state()
             return
         self.refresh_from_state()
-        self.status_message.emit(f"Opened session for S6: {session_root}")
+        self.status_message.emit(
+            f"Opened session for S6: {session_root} (discovering in background…)"
+        )
+        self._start_discovery_task(identity)
 
     def refresh_from_state(self) -> None:
         state = self.controller.state
@@ -291,7 +310,11 @@ class CombinedFeaturesPage(QWidget):
         layout.addWidget(runs_group, 1)
 
     def _browse_session(self) -> None:
-        if not self._guard_idle("change session"):
+        # Discovery may be superseded; only extraction blocks session changes.
+        if self.controller.state.task_running or self.task_runner.is_running:
+            self.status_message.emit(
+                "Cannot change session while combined-feature extraction is active."
+            )
             return
         start = self.session_path.text().strip()
         chosen = QFileDialog.getExistingDirectory(
@@ -304,7 +327,10 @@ class CombinedFeaturesPage(QWidget):
         self.set_session(chosen)
 
     def _open_typed_session(self) -> None:
-        if not self._guard_idle("change session"):
+        if self.controller.state.task_running or self.task_runner.is_running:
+            self.status_message.emit(
+                "Cannot change session while combined-feature extraction is active."
+            )
             return
         text = self.session_path.text().strip()
         if not text:
@@ -333,16 +359,118 @@ class CombinedFeaturesPage(QWidget):
         self._apply_settings()
 
     def _refresh_discovery(self) -> None:
-        if not self._guard_idle("refresh discovery"):
+        if self.controller.state.task_running or self.task_runner.is_running:
+            self.status_message.emit(
+                "Cannot refresh discovery while combined-feature extraction is active."
+            )
+            return
+        if self.controller.state.session_root is None:
+            QMessageBox.information(
+                self, "Session required", "Open a project/session first."
+            )
             return
         try:
-            self.controller.refresh_discovery()
+            identity = self.controller.begin_discovery()
         except CombinedFeaturesUiError as exc:
             QMessageBox.warning(self, "Discovery failed", str(exc))
             self.status_message.emit(str(exc))
             return
         self.refresh_from_state()
-        self.status_message.emit("S6 discovery refreshed.")
+        self.status_message.emit("S6 discovery started in background…")
+        self._start_discovery_task(identity)
+
+    def _start_discovery_task(self, identity: DiscoveryRequestIdentity) -> None:
+        """Start discovery, or defer until the in-flight discovery worker exits."""
+
+        self._active_discovery_identity = identity
+        self.progress.setRange(0, 0)
+        self.progress.setVisible(True)
+        self.stage_label.setText("Discovering S4/S5/S6 artifacts…")
+        self._update_enabled()
+        self._emit_running_changed()
+
+        if self.discovery_runner.is_running:
+            return
+
+        context = GuiTaskContext(
+            task_id=uuid4().hex,
+            task_kind=GuiTaskKind.COMBINED_FEATURES_DISCOVERY,
+            project_dir=identity.session_root,
+            raw_video_path=None,
+            generation=identity.generation,
+        )
+
+        def _operation() -> DiscoverySnapshot:
+            return self.controller.collect_discovery_snapshot(identity)
+
+        try:
+            self.discovery_runner.start(
+                _operation,
+                task_name="S6 discovery",
+                context=context,
+                on_success=lambda result: self._on_discovery_success(result, identity),
+                on_error=lambda exc: self._on_discovery_error(exc, identity),
+                on_finished=lambda: self._on_discovery_finished(identity),
+            )
+        except TaskAlreadyRunningError:
+            return
+
+    def _on_discovery_success(
+        self, result: object, identity: DiscoveryRequestIdentity
+    ) -> None:
+        if not isinstance(result, DiscoverySnapshot):
+            self.unexpected_error.emit(
+                f"Unexpected S6 discovery result type: {type(result)!r}"
+            )
+            return
+        accepted = self.controller.apply_discovery_snapshot(result)
+        if not accepted:
+            self.status_message.emit(
+                "Ignored stale S6 discovery result after session change."
+            )
+            return
+        self.refresh_from_state()
+        self.status_message.emit(
+            f"S6 discovery complete for {identity.session_root.name}."
+        )
+
+    def _on_discovery_error(
+        self, exc: BaseException, identity: DiscoveryRequestIdentity
+    ) -> None:
+        message = str(exc)
+        accepted = self.controller.record_discovery_failure(
+            message, expected_identity=identity
+        )
+        if not accepted:
+            return
+        self.refresh_from_state()
+        if isinstance(exc, CombinedFeaturesUiError):
+            QMessageBox.warning(self, "Discovery failed", message)
+            self.status_message.emit(f"S6 discovery failed: {message}")
+        else:
+            self.unexpected_error.emit(message)
+
+    def _on_discovery_finished(self, identity: DiscoveryRequestIdentity) -> None:
+        latest = self.controller.state.active_discovery_identity
+        if (
+            self.controller.state.discovery_running
+            and latest is not None
+            and latest.request_id != identity.request_id
+        ):
+            self._start_discovery_task(latest)
+            return
+        if (
+            self._active_discovery_identity is not None
+            and identity.request_id == self._active_discovery_identity.request_id
+        ):
+            self._active_discovery_identity = None
+        if not self.controller.state.task_running and not self.discovery_runner.is_running:
+            self.progress.setVisible(False)
+            if self.controller.state.run_stage == "Not started":
+                self.stage_label.setText(self.controller.state.run_stage)
+        self._update_enabled()
+        self._emit_running_changed()
+        self.task_finished.emit()
 
     def _apply_settings(self) -> None:
         if not self._guard_idle("apply settings"):
@@ -705,8 +833,12 @@ class CombinedFeaturesPage(QWidget):
 
     def _update_enabled(self) -> None:
         busy = self.has_running_task
-        self.session_browse_button.setEnabled(not busy)
-        self.open_session_button.setEnabled(not busy)
+        # Session changes may supersede in-flight discovery; block only extraction.
+        extraction_busy = (
+            self.controller.state.task_running or self.task_runner.is_running
+        )
+        self.session_browse_button.setEnabled(not extraction_busy)
+        self.open_session_button.setEnabled(not extraction_busy)
         self.refresh_button.setEnabled(not busy)
         self.s4_combo.setEnabled(not busy)
         self.s5_combo.setEnabled(not busy)

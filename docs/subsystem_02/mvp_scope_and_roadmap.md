@@ -3,6 +3,11 @@
 **Status:** MVP finalized and closed to scope expansion. Future changes require
 a separately scoped post-MVP task.
 
+**Product-quality note (Sprint 1):** S2 session/run discovery now runs on a
+background `GuiTaskRunner` (`POSE_INFERENCE_DISCOVERY`) using the S7 request-
+identity pattern. See
+[`../roadmap/product_quality_sprint_1_async_discovery.md`](../roadmap/product_quality_sprint_1_async_discovery.md).
+
 ## MVP Definition
 
 Subsystem 02 is the pose-inference and technical-QC subsystem. It integrates

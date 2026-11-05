@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
@@ -40,13 +41,21 @@ from pose_inference.run_discovery import (
 from pose_inference.runner import PoseInferencePreflightResult, PoseInferenceResult
 from tracking_correction.contracts import TrackingCorrectionError, TrackingCorrectionResult
 from ui.controllers.pose_inference_controller import (
+    DiscoveryRequestIdentity,
+    DiscoverySnapshot,
     InferenceMode,
     PoseInferenceController,
     PoseInferenceUiError,
     S1UiStatus,
     S3PoseInput,
 )
-from ui.tasks import GuiTaskRunner, TaskAlreadyRunningError, format_task_duration
+from ui.tasks import (
+    GuiTaskContext,
+    GuiTaskKind,
+    GuiTaskRunner,
+    TaskAlreadyRunningError,
+    format_task_duration,
+)
 from ui.workspace.page_binding import request_shared_session
 
 
@@ -65,8 +74,10 @@ class PoseInferencePage(QWidget):
         super().__init__()
         self.controller = controller
         self.task_runner = GuiTaskRunner(self)
+        self.discovery_runner = GuiTaskRunner(self)
         self._started_at: float | None = None
         self._active_token: int | None = None
+        self._active_discovery_identity: DiscoveryRequestIdentity | None = None
         self._last_running_state: bool | None = None
         self._pending_s3_handoff: S3PoseInput | None = None
         self.backend_progress.connect(self._backend_progress_changed)
@@ -348,12 +359,33 @@ class PoseInferencePage(QWidget):
         return label
 
     def set_session(self, session_root: Path | str) -> None:
-        """Open S2 for a known S1 or main-application session context."""
+        """Open S2 for a known S1 or main-application session context.
 
-        if not self._guard_idle("change the selected session"):
+        S1/S2 discovery runs on a background worker; this method returns immediately.
+        """
+
+        if not self._guard_no_task("change the selected session"):
             return
-        self.controller.set_session(session_root)
+        raw = str(session_root).strip()
+        if not raw:
+            try:
+                self.controller.set_session(raw)
+            except PoseInferenceUiError as exc:
+                self.error_label.setText(str(exc))
+            self.refresh_from_state()
+            return
+        try:
+            identity = self.controller.prepare_session(raw)
+        except PoseInferenceUiError as exc:
+            self.error_label.setText(str(exc))
+            self.status_message.emit(str(exc))
+            self.refresh_from_state()
+            return
         self.refresh_from_state()
+        self.status_message.emit(
+            f"Opened session for S2: {raw} (discovering in background…)"
+        )
+        self._start_discovery_task(identity)
 
     def refresh_from_state(self) -> None:
         """Render state without loading pose.slp, parquet, or video frames."""
@@ -393,33 +425,54 @@ class PoseInferencePage(QWidget):
         self._render_profile_summary()
         self._populate_runs()
         self._render_selected_run()
-        running = state.task_running
-        self.progress.setVisible(running)
-        self.s3_progress.setVisible(running)
-        self.s3_stage_label.setVisible(running)
-        self.s3_stage_label.setText(state.run_stage if running else "")
-        self.run_button.setEnabled(self.controller.can_submit)
-        self.validate_button.setEnabled(self.controller.can_submit)
-        self.back_to_s1_button.setEnabled(not running)
-        self.runs_table.setEnabled(not running)
-        self.refresh_runs_button.setEnabled(not running)
-        self.session_path.setEnabled(not running)
-        self.session_browse_button.setEnabled(not running)
-        self.open_session_button.setEnabled(not running)
-        self.stage_label.setText(state.run_stage)
+        self._update_enabled()
         self.active_run_dir_label.setText(
             str(state.active_run_dir) if state.active_run_dir is not None else "—"
         )
         self.error_label.setText(state.run_error or "")
         self.configuration_summary.setText(self.controller.configuration_summary())
-        self._set_configuration_enabled(not running)
+        self._emit_running_changed()
+
+    def _update_enabled(self) -> None:
+        """Render busy-dependent widgets (inference task and/or background discovery)."""
+
+        state = self.controller.state
+        running = state.task_running
+        discovering = state.discovery_running
+        busy = running or discovering
+        self.progress.setVisible(busy)
+        self.s3_progress.setVisible(running)
+        self.s3_stage_label.setVisible(running)
+        self.s3_stage_label.setText(state.run_stage if running else "")
+        self.run_button.setEnabled(self.controller.can_submit)
+        self.validate_button.setEnabled(self.controller.can_submit)
+        self.back_to_s1_button.setEnabled(not busy)
+        self.runs_table.setEnabled(not busy)
+        self.refresh_runs_button.setEnabled(not busy)
+        # Session changes may supersede an in-flight discovery; block only real tasks.
+        self.session_path.setEnabled(not running)
+        self.session_browse_button.setEnabled(not running)
+        self.open_session_button.setEnabled(not running)
+        if discovering and not running:
+            self.stage_label.setText("Discovering S1/S2 artifacts…")
+        else:
+            self.stage_label.setText(state.run_stage)
+        self._set_configuration_enabled(not busy)
+
+    def _emit_running_changed(self) -> None:
+        running = self.has_running_task
         if self._last_running_state is not running:
             self._last_running_state = running
             self.task_running_changed.emit(running)
 
     def _populate_runs(self) -> None:
         selected_id = self.controller.state.selected_run_id
-        if selected_id is None and self.controller.runs and not self.controller.state.task_running:
+        if (
+            selected_id is None
+            and self.controller.runs
+            and not self.controller.state.task_running
+            and not self.controller.state.discovery_running
+        ):
             selected_id = self.controller.runs[0].run_id
             self.controller.select_run(selected_id)
         self.runs_table.blockSignals(True)
@@ -525,26 +578,23 @@ class PoseInferencePage(QWidget):
             + f"\n{s3_note}"
         )
         self.technical_details.setPlainText(self.controller.technical_details(run))
+        busy = self.controller.state.task_running or self.controller.state.discovery_running
         self.open_overlay_button.setEnabled(
-            bool(run.artifact_presence.get("overlay_mp4"))
-            and not self.controller.state.task_running
+            bool(run.artifact_presence.get("overlay_mp4")) and not busy
         )
         self.overlay_qc_button.setEnabled(
-            self.controller.selected_run_can_feed_s3()
-            and not self.controller.state.task_running
+            self.controller.selected_run_can_feed_s3() and not busy
         )
         s2_qc_reason = self.controller.selected_run_s3_unavailable_reason()
         self.overlay_qc_button.setToolTip(
             s2_qc_reason
             or "Export a short prepared-rate S2 inferred-pose QC overlay video."
         )
-        self.open_run_folder_button.setEnabled(
-            run.run_dir.is_dir() and not self.controller.state.task_running
-        )
+        self.open_run_folder_button.setEnabled(run.run_dir.is_dir() and not busy)
         rerun_reason = self.controller.rerun_unavailable_reason(run)
         self.copy_settings_button.setEnabled(rerun_reason is None)
         self.copy_settings_button.setToolTip(rerun_reason or "")
-        can_s3 = s3_reason is None and not self.controller.state.task_running
+        can_s3 = s3_reason is None and not busy
         self.continue_s3_button.setEnabled(can_s3)
         self.continue_s3_button.setText(self.controller.selected_s3_action_label())
         self.continue_s3_button.setToolTip(s3_reason or "")
@@ -619,14 +669,14 @@ class PoseInferencePage(QWidget):
         self._configuration_changed()
 
     def _browse_session(self) -> None:
-        if not self._guard_idle("browse for a session"):
+        if not self._guard_no_task("browse for a session"):
             return
         directory = QFileDialog.getExistingDirectory(self, "Choose project/session")
         if directory:
             self.session_path.setText(directory)
 
     def _open_typed_session(self) -> None:
-        if not self._guard_idle("open a session"):
+        if not self._guard_no_task("open a session"):
             return
         text = self.session_path.text()
         if request_shared_session(self, text):
@@ -674,11 +724,114 @@ class PoseInferencePage(QWidget):
     def _refresh_discovery(self) -> None:
         if not self._guard_idle("refresh run discovery"):
             return
+        if self.controller.state.session_root is None:
+            # No session bound: the synchronous refresh only resets the empty state.
+            try:
+                self.controller.refresh_discovery()
+            except PoseInferenceUiError as exc:
+                self.error_label.setText(str(exc))
+            self.refresh_from_state()
+            return
         try:
-            self.controller.refresh_discovery()
+            identity = self.controller.begin_discovery()
         except PoseInferenceUiError as exc:
             self.error_label.setText(str(exc))
+            self.status_message.emit(str(exc))
+            self.refresh_from_state()
+            return
         self.refresh_from_state()
+        self.status_message.emit("S2 discovery started in background…")
+        self._start_discovery_task(identity)
+
+    def _start_discovery_task(self, identity: DiscoveryRequestIdentity) -> None:
+        """Start discovery, or defer until the in-flight discovery worker exits."""
+
+        self._active_discovery_identity = identity
+        self.progress.setRange(0, 0)
+        self._update_enabled()
+        self._emit_running_changed()
+
+        if self.discovery_runner.is_running:
+            # Generation already advanced; finished handler restarts for the latest id.
+            return
+
+        context = GuiTaskContext(
+            task_id=uuid4().hex,
+            task_kind=GuiTaskKind.POSE_INFERENCE_DISCOVERY,
+            project_dir=identity.session_root,
+            raw_video_path=None,
+            generation=identity.generation,
+        )
+
+        def _operation() -> DiscoverySnapshot:
+            return self.controller.collect_discovery_snapshot(identity)
+
+        try:
+            self.discovery_runner.start(
+                _operation,
+                task_name="S2 discovery",
+                context=context,
+                on_success=lambda result: self._on_discovery_success(result, identity),
+                on_error=lambda exc: self._on_discovery_error(exc, identity),
+                on_finished=lambda: self._on_discovery_finished(identity),
+            )
+        except TaskAlreadyRunningError:
+            # Another discovery is finishing; keep the latest identity pending.
+            return
+
+    def _on_discovery_success(
+        self, result: object, identity: DiscoveryRequestIdentity
+    ) -> None:
+        if not isinstance(result, DiscoverySnapshot):
+            self.unexpected_error.emit(
+                f"Unexpected S2 discovery result type: {type(result)!r}"
+            )
+            return
+        accepted = self.controller.apply_discovery_snapshot(result)
+        if not accepted:
+            self.status_message.emit(
+                "Ignored stale S2 discovery result after session change."
+            )
+            return
+        self.refresh_from_state()
+        self.status_message.emit(
+            f"S2 discovery complete for {identity.session_root.name}."
+        )
+
+    def _on_discovery_error(
+        self, exc: BaseException, identity: DiscoveryRequestIdentity
+    ) -> None:
+        message = str(exc)
+        accepted = self.controller.record_discovery_failure(
+            message, expected_identity=identity
+        )
+        if not accepted:
+            return
+        self.refresh_from_state()
+        if isinstance(exc, PoseInferenceUiError):
+            self.error_label.setText(message)
+            self.status_message.emit(f"S2 discovery failed: {message}")
+        else:
+            self.unexpected_error.emit(message)
+
+    def _on_discovery_finished(self, identity: DiscoveryRequestIdentity) -> None:
+        latest = self.controller.state.active_discovery_identity
+        if (
+            self.controller.state.discovery_running
+            and latest is not None
+            and latest.request_id != identity.request_id
+        ):
+            # Session changed while this worker ran; start discovery for the latest id.
+            self._start_discovery_task(latest)
+            return
+        if (
+            self._active_discovery_identity is not None
+            and identity.request_id == self._active_discovery_identity.request_id
+        ):
+            self._active_discovery_identity = None
+        self._update_enabled()
+        self._emit_running_changed()
+        self.task_finished.emit()
 
     def _run_selection_changed(self) -> None:
         if not self._guard_idle("change the selected run"):
@@ -1000,8 +1153,21 @@ class PoseInferencePage(QWidget):
         self.error_label.setText(f"Cannot {action} while a Subsystem 2 task is active.")
         return False
 
+    def _guard_no_task(self, action: str) -> bool:
+        """Block only inference/preflight/S3 work; discovery may be superseded."""
+
+        if not (self.task_runner.is_running or self.controller.state.task_running):
+            return True
+        self.error_label.setText(f"Cannot {action} while a Subsystem 2 task is active.")
+        return False
+
     @property
     def has_running_task(self) -> bool:
         """Return whether navigation/close must wait for the backend call."""
 
-        return self.task_runner.is_running or self.controller.state.task_running
+        return (
+            self.task_runner.is_running
+            or self.discovery_runner.is_running
+            or self.controller.state.task_running
+            or self.controller.state.discovery_running
+        )

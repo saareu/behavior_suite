@@ -123,6 +123,29 @@ class ExtractionRequestIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class DiscoveryRequestIdentity:
+    """Identity used to reject stale asynchronous discovery results."""
+
+    request_id: str
+    generation: int
+    session_root: Path
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoverySnapshot:
+    """Payload collected off the GUI thread for one discovery generation."""
+
+    identity: DiscoveryRequestIdentity
+    s4_options: tuple[SourceRunOption, ...]
+    s5_options: tuple[SourceRunOption, ...]
+    joint_pair_reports: tuple[
+        tuple[PoseFinalizationRunSummary, BlobFeaturesRunSummary, JointAlignmentReport],
+        ...,
+    ]
+    summary: CombinedFeaturesProjectSummary
+
+
+@dataclass(frozen=True, slots=True)
 class SourceRunOption:
     """One selectable upstream run for the S4 or S5 combo."""
 
@@ -157,6 +180,9 @@ class CombinedFeaturesUiState:
     )
     last_extraction_settings: CombinedFeaturesUiSettings | None = None
     task_running: bool = False
+    discovery_running: bool = False
+    discovery_generation: int = 0
+    active_discovery_identity: DiscoveryRequestIdentity | None = None
     active_extraction_identity: ExtractionRequestIdentity | None = None
     run_stage: str = "Not started"
     run_error: str | None = None
@@ -191,7 +217,13 @@ class CombinedFeaturesController:
         return settings
 
     def set_session(self, session_root: Path | str) -> CombinedFeaturesProjectSummary:
-        """Open a project/session and refresh upstream + S6 discovery."""
+        """Open a project/session and refresh upstream + S6 discovery (synchronous)."""
+
+        self.prepare_session(session_root)
+        return self.refresh_discovery()
+
+    def prepare_session(self, session_root: Path | str) -> DiscoveryRequestIdentity:
+        """Bind a session and bump discovery generation without scanning yet."""
 
         root = Path(session_root).expanduser().resolve(strict=False)
         if not root.is_dir():
@@ -206,7 +238,7 @@ class CombinedFeaturesController:
                 "Cannot change S6 session while a combined-feature extraction is active."
             )
         self.state.session_root = root
-        self.state.readiness_error = None
+        self.state.readiness_error = "Discovering eligible S4/S5 pairs and S6 outputs…"
         self.state.run_error = None
         self.state.run_stage = "Not started"
         if previous is None or previous.resolve(strict=False) != root:
@@ -218,21 +250,45 @@ class CombinedFeaturesController:
             self.state.s4_selection_manual = False
             self.state.s5_selection_manual = False
             self.state.alignment = None
-        return self.refresh_discovery()
+            self.state.s4_options = ()
+            self.state.s5_options = ()
+            self.state.joint_pair_reports = ()
+            self.state.summary = None
+            self.state.model_compat_preview = None
+        return self.begin_discovery()
 
     def clear_session(self) -> None:
-        if self.state.task_running:
+        if self.state.task_running or self.state.discovery_running:
             raise CombinedFeaturesUiError(
                 "Cannot clear the S6 session while a task is active."
             )
         self.state = CombinedFeaturesUiState(working_settings=self.state.working_settings)
 
-    def refresh_discovery(self) -> CombinedFeaturesProjectSummary:
-        """Re-scan eligible S4/S5 inputs and completed S6 outputs."""
+    def begin_discovery(self) -> DiscoveryRequestIdentity:
+        """Mark discovery in progress and return an identity for async apply."""
 
         root = self.state.session_root
         if root is None:
             raise CombinedFeaturesUiError("Select a project/session first.")
+        self.state.discovery_generation += 1
+        identity = DiscoveryRequestIdentity(
+            request_id=str(uuid4()),
+            generation=self.state.discovery_generation,
+            session_root=root.resolve(strict=False),
+        )
+        self.state.active_discovery_identity = identity
+        self.state.discovery_running = True
+        self.state.readiness_error = (
+            "Discovering eligible S4/S5 pairs and validating source digests…"
+        )
+        return identity
+
+    def collect_discovery_snapshot(
+        self, identity: DiscoveryRequestIdentity
+    ) -> DiscoverySnapshot:
+        """Heavy filesystem / hashing work safe to run off the GUI thread."""
+
+        root = identity.session_root
         try:
             s4_summary = summarize_pose_finalization_project(root)
             s5_summary = summarize_blob_features_project(root)
@@ -245,27 +301,88 @@ class CombinedFeaturesController:
             OSError,
         ) as exc:
             raise CombinedFeaturesUiError(str(exc)) from exc
+        return DiscoverySnapshot(
+            identity=identity,
+            s4_options=tuple(
+                _source_option_from_s4(run) for run in s4_summary.eligible_runs
+            ),
+            s5_options=tuple(
+                _source_option_from_s5(run) for run in s5_summary.eligible_runs
+            ),
+            joint_pair_reports=pairs,
+            summary=s6_summary,
+        )
 
-        self.state.s4_options = tuple(
-            _source_option_from_s4(run) for run in s4_summary.eligible_runs
-        )
-        self.state.s5_options = tuple(
-            _source_option_from_s5(run) for run in s5_summary.eligible_runs
-        )
-        self.state.joint_pair_reports = pairs
-        self.state.summary = s6_summary
+    def apply_discovery_snapshot(self, snapshot: DiscoverySnapshot) -> bool:
+        """Apply a discovery result only when its generation is still current."""
+
+        if not self._is_current_discovery_result(snapshot.identity):
+            return False
+        self.state.discovery_running = False
+        self.state.active_discovery_identity = None
+        # Drop the transient discovering message before reconcile/alignment so
+        # invalidated or empty selections get a real readiness reason.
+        self.state.readiness_error = None
+        self.state.s4_options = snapshot.s4_options
+        self.state.s5_options = snapshot.s5_options
+        self.state.joint_pair_reports = snapshot.joint_pair_reports
+        self.state.summary = snapshot.summary
         self._reconcile_source_selection()
         self._revalidate_alignment()
         self._reconcile_s6_selection()
         self._refresh_model_compat_preview()
-        return s6_summary
+        return True
+
+    def record_discovery_failure(
+        self, message: str, *, expected_identity: DiscoveryRequestIdentity | None
+    ) -> bool:
+        """Record a discovery failure when the request is still current."""
+
+        if not self._is_current_discovery_result(expected_identity):
+            return False
+        self.state.discovery_running = False
+        self.state.active_discovery_identity = None
+        self.state.readiness_error = message
+        return True
+
+    def refresh_discovery(self) -> CombinedFeaturesProjectSummary:
+        """Re-scan eligible S4/S5 inputs and completed S6 outputs (synchronous)."""
+
+        identity = self.begin_discovery()
+        snapshot = self.collect_discovery_snapshot(identity)
+        applied = self.apply_discovery_snapshot(snapshot)
+        if not applied or self.state.summary is None:
+            raise CombinedFeaturesUiError(
+                "Discovery result was superseded by a newer session selection."
+            )
+        return self.state.summary
+
+    def _is_current_discovery_result(
+        self, expected: DiscoveryRequestIdentity | None
+    ) -> bool:
+        if expected is None:
+            return False
+        active = self.state.active_discovery_identity
+        if active is None:
+            return False
+        if expected.request_id != active.request_id:
+            return False
+        if expected.generation != self.state.discovery_generation:
+            return False
+        current_root = self.state.session_root
+        if current_root is None:
+            return False
+        return (
+            current_root.resolve(strict=False)
+            == expected.session_root.resolve(strict=False)
+        )
 
     def select_s4_source(self, run_id: str | None, *, manual: bool = True) -> SourceRunOption | None:
         """Select an eligible S4 input run (manual selections are preserved)."""
 
-        if self.state.task_running:
+        if self.state.task_running or self.state.discovery_running:
             raise CombinedFeaturesUiError(
-                "Cannot change S4 source while extraction is running."
+                "Cannot change S4 source while an S6 task is active."
             )
         if run_id is None or not str(run_id).strip():
             self.state.selected_s4_run_id = None
@@ -287,9 +404,9 @@ class CombinedFeaturesController:
     def select_s5_source(self, run_id: str | None, *, manual: bool = True) -> SourceRunOption | None:
         """Select an eligible S5 input run (manual selections are preserved)."""
 
-        if self.state.task_running:
+        if self.state.task_running or self.state.discovery_running:
             raise CombinedFeaturesUiError(
-                "Cannot change S5 source while extraction is running."
+                "Cannot change S5 source while an S6 task is active."
             )
         if run_id is None or not str(run_id).strip():
             self.state.selected_s5_run_id = None
@@ -382,6 +499,7 @@ class CombinedFeaturesController:
     def can_run_extraction(self) -> bool:
         return (
             not self.state.task_running
+            and not self.state.discovery_running
             and self.state.session_root is not None
             and self.selected_s4_source() is not None
             and self.selected_s5_source() is not None
@@ -392,6 +510,8 @@ class CombinedFeaturesController:
     def cannot_run_reason(self) -> str | None:
         if self.state.task_running:
             return "A Subsystem 6 extraction is already running."
+        if self.state.discovery_running:
+            return "S6 discovery is still running."
         if self.state.session_root is None:
             return "Select a project/session first."
         if not self.state.s4_options:
@@ -422,6 +542,11 @@ class CombinedFeaturesController:
 
         if self.state.session_root is None:
             return "Select a project/session with eligible S4 and S5 runs."
+        if self.state.discovery_running:
+            return (
+                self.state.readiness_error
+                or "Discovering eligible S4/S5 pairs and validating source digests…"
+            )
         if not self.state.s4_options and not self.state.s5_options:
             return (
                 "Missing eligible upstream results: no eligible S4 and no eligible S5 "

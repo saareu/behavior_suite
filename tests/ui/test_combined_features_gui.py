@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 from tests.combined_features.helpers import write_joint_session
 
 from combined_features import CombinedFeaturesConfig, ModelRegistrySettings
@@ -24,6 +24,14 @@ from ui.pages.combined_features_page import CombinedFeaturesPage
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 _APPLICATION = QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def _no_blocking_qt_dialogs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Async page open/discovery may report ineligible fixtures via modal boxes."""
+
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: 0))
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: 0))
 
 
 def _wait_until(predicate, timeout_sec: float = 30.0) -> None:
@@ -124,6 +132,7 @@ def test_main_window_exposes_s6_navigation(monkeypatch: pytest.MonkeyPatch, tmp_
     window = MainWindow(PreprocessSetupController())
     assert window.s6_button.isEnabled() is True
     window.open_combined_features(paths["session_root"])
+    _wait_until(lambda: not window.combined_features_page.has_running_task)
     assert window.pages.currentWidget() is window.combined_features_page
     assert window.combined_features_page.controller.state.session_root is not None
 
@@ -145,6 +154,7 @@ def test_group_navigation_preserves_session_and_enables_s6(
 
     # Open S6 directly — avoid auto-opening S5 against a fixture without video.
     window.open_combined_features(session)
+    _wait_until(lambda: not window.combined_features_page.has_running_task)
     assert window._active_group == GROUP_FEATURE_PROCESSING
     assert window.s5_button.isHidden() is False
     assert window.s6_button.isEnabled() is True
@@ -283,6 +293,7 @@ def test_full_extraction_launch_and_qc(
     paths = _joint_session(tmp_path, n_samples=4)
     page = CombinedFeaturesPage(CombinedFeaturesController())
     page.set_session(paths["session_root"])
+    _wait_until(lambda: not page.has_running_task)
     assert page.run_button.isEnabled() is True
     page.run_button.click()
     _wait_until(lambda: page.controller.state.last_result is not None, timeout_sec=90.0)
@@ -339,6 +350,7 @@ def test_group_navigation_allowed_during_s6_extraction(
     paths = _joint_session(tmp_path)
     window = MainWindow(PreprocessSetupController())
     window.open_combined_features(paths["session_root"])
+    _wait_until(lambda: not window.combined_features_page.has_running_task)
     page = window.combined_features_page
     request, identity = page.controller.build_request(timestamp="20260101T150000")
     assert page.has_running_task is True
@@ -472,6 +484,7 @@ def test_s1_s5_gui_regression_s6_does_not_break_s5_nav(
     window._update_navigation()
     assert window.pages.currentWidget() is window.blob_features_page
     window.open_combined_features(paths["session_root"])
+    _wait_until(lambda: not window.combined_features_page.has_running_task)
     assert window.pages.currentWidget() is window.combined_features_page
     # Returning to S5 must remain possible; do not auto-load the S6-only fixture.
     window.pages.setCurrentWidget(window.blob_features_page)
@@ -501,6 +514,7 @@ def test_page_progress_and_error_reporting(
     seen: list[str] = []
     page.unexpected_error.connect(seen.append)
     page.set_session(paths["session_root"])
+    _wait_until(lambda: not page.has_running_task)
     page.run_button.click()
     _wait_until(lambda: page.controller.state.run_error is not None, timeout_sec=30.0)
     assert page.controller.state.last_result is None

@@ -4,6 +4,12 @@
 **Date:** 2026-10-21
 **Authority:** Repository implementation + Sprint 0–3 docs + Sprint 4 delivery + lab remediation + laboratory GUI acceptance.
 
+**Product-quality note (Sprint 1):** S1 source opening (digests, background,
+frame 0) and completed-run discovery now run off the GUI thread via
+`BLOB_FEATURES_OPEN` / `BLOB_FEATURES_DISCOVERY`. Previous-session frames are
+cleared immediately on session change. See
+[`../roadmap/product_quality_sprint_1_async_discovery.md`](../roadmap/product_quality_sprint_1_async_discovery.md).
+
 ---
 
 ## Final subsystem architecture
@@ -14,7 +20,7 @@ MainWindow
   └─ Group 2 — Feature Processing → S5 (S6 button visible, disabled)
        └─ BlobFeaturesPage
             ├─ BlobFeaturesController (+ bounded preview cache)
-            ├─ GuiTaskRunner (preview + progressive extraction)
+            ├─ GuiTaskRunner (open + discovery + preview + progressive extraction)
             └─ blob_features.* (headless scientific core)
 ```
 

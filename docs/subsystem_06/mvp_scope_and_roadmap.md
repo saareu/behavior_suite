@@ -4,6 +4,12 @@
 **Date:** 2026-10-25
 **Authority:** S6-A audit + S6-B contract + Sprints 1-4 implementation + operator laboratory checklist on `E_full_session_integration`.
 
+**Product-quality note (Sprint 1):** The S4+S5+S6 discovery / joint-pair bundle
+(~1.9 s on the E-session) now runs on a background `GuiTaskRunner`
+(`COMBINED_FEATURES_DISCOVERY`). Pairing and selection rules are unchanged;
+results apply atomically. See
+[`../roadmap/product_quality_sprint_1_async_discovery.md`](../roadmap/product_quality_sprint_1_async_discovery.md).
+
 ---
 
 ## Final subsystem architecture
@@ -14,7 +20,7 @@ MainWindow
   Group 2 - Feature Processing -> S5 + S6
        CombinedFeaturesPage
             CombinedFeaturesController
-            GuiTaskRunner (progressive extraction; non-cancellable)
+            GuiTaskRunner (async discovery + progressive extraction; non-cancellable science)
             combined_features.* (headless scientific core)
 ```
 
@@ -106,7 +112,7 @@ Full checklist: [`laboratory_acceptance_checklist.md`](laboratory_acceptance_che
 ## Known limitations (non-MVP follow-ups)
 
 1. No model inference or training UI (intentional MVP boundary).
-2. No cooperative cancellation for extraction.
+2. No cooperative cancellation for extraction (discovery uses generation supersede + stale discard).
 3. Optional external model registry; detector bundles and SLEAP assets ship under tracked `models/` (SLEAP media via Git LFS).
 4. Working settings not yet persisted under `combined_features/_gui/`.
 5. No numerical regression against historical Pipeline 50 training caches.

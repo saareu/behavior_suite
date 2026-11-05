@@ -139,7 +139,7 @@ def _run(
     )
 
 
-def _wait_until(predicate, timeout_sec: float = 3.0) -> None:
+def _wait_until(predicate, timeout_sec: float = 30.0) -> None:
     deadline = time.monotonic() + timeout_sec
     while not predicate():
         _APPLICATION.processEvents()
@@ -205,6 +205,7 @@ def test_invalid_handoff_disables_run_and_malformed_run_does_not_crash(
     page = PoseInferencePage(controller)
 
     page.set_session(tmp_path)
+    _wait_until(lambda: not page.has_running_task)
 
     assert page.run_button.isEnabled() is False
     assert "metadata" in page.s1_status_label.text().lower()
@@ -315,6 +316,8 @@ def test_s1_completion_and_main_navigation_preserve_same_session(
 
     assert window.pages.currentWidget() is window.pose_page
     assert pose_controller.state.session_root == tmp_path.resolve()
+    # S2 opens asynchronously; wait for discovery before navigating away.
+    _wait_until(lambda: not window.pose_page.has_running_task)
 
     window.show_subsystem_1()
     window.wizard.session_changed.emit(tmp_path)
@@ -323,6 +326,7 @@ def test_s1_completion_and_main_navigation_preserve_same_session(
 
     assert window.pages.currentWidget() is window.pose_page
     assert pose_controller.state.session_root == tmp_path.resolve()
+    _wait_until(lambda: not window.pose_page.has_running_task)
 
     window.pose_page.back_to_s1_requested.emit()
     _APPLICATION.processEvents()

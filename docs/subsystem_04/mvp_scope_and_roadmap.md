@@ -4,6 +4,11 @@
 Settings, completed-run discovery, automated tests, and a real laboratory
 session GUI run are done.
 
+**Product-quality note (Sprint 1):** Accepted-S3 / completed-S4 discovery now
+runs on a background `GuiTaskRunner` (`POSE_FINALIZATION_DISCOVERY`) using the
+S7 request-identity pattern. Digest checks are unchanged. See
+[`../roadmap/product_quality_sprint_1_async_discovery.md`](../roadmap/product_quality_sprint_1_async_discovery.md).
+
 ## Agreed S4 boundary
 
 Subsystem 04 consumes an **explicitly accepted** Subsystem 03 result and

@@ -227,6 +227,7 @@ def test_page_run_finalization_background_and_qc(tmp_path: Path) -> None:
     controller = PoseFinalizationController()
     page = PoseFinalizationPage(controller)
     page.set_session(session)
+    _wait_until(lambda: not page.has_running_task)
     assert page.run_button.isEnabled() is True
 
     page._run_finalization()
@@ -257,6 +258,7 @@ def test_page_duplicate_launch_blocked(tmp_path: Path) -> None:
     controller = PoseFinalizationController(runner=slow_runner)
     page = PoseFinalizationPage(controller)
     page.set_session(session)
+    _wait_until(lambda: not page.has_running_task)
     page._run_finalization()
     assert page.has_running_task is True
     page._run_finalization()  # second click while busy
@@ -296,6 +298,7 @@ def test_main_window_exposes_s4_navigation(tmp_path: Path) -> None:
     _write_accepted_session(session, n_frames=16)
     window = MainWindow(PreprocessSetupController())
     window.open_pose_finalization(session)
+    _wait_until(lambda: not window.finalization_page.has_running_task)
     assert window.pages.currentWidget() is window.s4_shell
     assert window.finalization_page.controller.selected_accepted_s3() is not None
     assert window.s4_button.isEnabled() is True
@@ -312,6 +315,7 @@ def test_failed_run_not_marked_completed(tmp_path: Path) -> None:
     controller = PoseFinalizationController(runner=boom)
     page = PoseFinalizationPage(controller)
     page.set_session(session)
+    _wait_until(lambda: not page.has_running_task)
     page._run_finalization()
     _wait_until(lambda: not page.has_running_task)
     assert controller.state.last_result is None

@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import time
 from pathlib import Path
+from uuid import uuid4
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
@@ -36,11 +37,19 @@ from pose_finalization.run_discovery import (
     STALE_SOURCE,
 )
 from ui.controllers.pose_finalization_controller import (
+    DiscoveryRequestIdentity,
+    DiscoverySnapshot,
     PoseFinalizationController,
     PoseFinalizationUiError,
     PoseFinalizationUiSettings,
 )
-from ui.tasks import GuiTaskRunner, TaskAlreadyRunningError, format_task_duration
+from ui.tasks import (
+    GuiTaskContext,
+    GuiTaskKind,
+    GuiTaskRunner,
+    TaskAlreadyRunningError,
+    format_task_duration,
+)
 from ui.workspace.page_binding import request_shared_session
 
 
@@ -60,8 +69,10 @@ class PoseFinalizationPage(QWidget):
         super().__init__(parent)
         self.controller = controller or PoseFinalizationController()
         self.task_runner = GuiTaskRunner(self)
+        self.discovery_runner = GuiTaskRunner(self)
         self._started_at: float | None = None
         self._last_running_state: bool | None = None
+        self._active_discovery_identity: DiscoveryRequestIdentity | None = None
         self._build_ui()
         self.elapsed_timer = QTimer(self)
         self.elapsed_timer.setInterval(500)
@@ -70,19 +81,35 @@ class PoseFinalizationPage(QWidget):
 
     @property
     def has_running_task(self) -> bool:
-        return self.task_runner.is_running or self.controller.state.task_running
+        return (
+            self.task_runner.is_running
+            or self.discovery_runner.is_running
+            or self.controller.state.task_running
+            or self.controller.state.discovery_running
+        )
 
     def set_session(self, session_root: Path | str) -> None:
-        """Open a project/session directory and refresh discovery."""
+        """Open a project/session directory and refresh discovery in the background."""
 
+        if self.controller.state.task_running or self.task_runner.is_running:
+            QMessageBox.warning(
+                self,
+                "Cannot open session",
+                "Cannot change S4 session while pose finalization is active.",
+            )
+            return
         try:
-            self.controller.set_session(session_root)
+            identity = self.controller.prepare_session(session_root)
         except PoseFinalizationUiError as exc:
             QMessageBox.warning(self, "Cannot open session", str(exc))
             self.status_message.emit(str(exc))
+            self.refresh_from_state()
             return
         self.refresh_from_state()
-        self.status_message.emit(f"Opened session for S4: {session_root}")
+        self.status_message.emit(
+            f"Opened session for S4: {session_root} (discovering in background…)"
+        )
+        self._start_discovery_task(identity)
 
     def refresh_from_state(self) -> None:
         """Push controller state into widgets without discarding defaults."""
@@ -253,13 +280,120 @@ class PoseFinalizationPage(QWidget):
             self.status_message.emit("Cannot refresh while finalization is running.")
             return
         try:
-            self.controller.refresh_discovery()
+            identity = self.controller.begin_discovery()
         except PoseFinalizationUiError as exc:
             QMessageBox.warning(self, "Discovery failed", str(exc))
             self.status_message.emit(str(exc))
             return
         self.refresh_from_state()
-        self.status_message.emit("S4 discovery refreshed.")
+        self.status_message.emit("S4 discovery started in background…")
+        self._start_discovery_task(identity)
+
+    def _start_discovery_task(self, identity: DiscoveryRequestIdentity) -> None:
+        """Start discovery, or defer until the in-flight discovery worker exits."""
+
+        self._active_discovery_identity = identity
+        self.progress.setRange(0, 0)
+        self.progress.setVisible(True)
+        self.stage_label.setText("Discovering S3/S4 artifacts…")
+        self._update_enabled()
+        self._emit_running_changed()
+
+        if self.discovery_runner.is_running:
+            # Generation already advanced; finished handler restarts for the latest id.
+            return
+
+        context = GuiTaskContext(
+            task_id=uuid4().hex,
+            task_kind=GuiTaskKind.POSE_FINALIZATION_DISCOVERY,
+            project_dir=identity.session_root,
+            raw_video_path=None,
+            generation=identity.generation,
+        )
+
+        def _operation() -> DiscoverySnapshot:
+            return self.controller.collect_discovery_snapshot(identity)
+
+        try:
+            self.discovery_runner.start(
+                _operation,
+                task_name="S4 discovery",
+                context=context,
+                on_success=lambda result: self._on_discovery_success(result, identity),
+                on_error=lambda exc: self._on_discovery_error(exc, identity),
+                on_finished=lambda: self._on_discovery_finished(identity),
+            )
+        except TaskAlreadyRunningError:
+            # Another discovery is finishing; keep the latest identity pending.
+            return
+
+    def _on_discovery_success(
+        self, result: object, identity: DiscoveryRequestIdentity
+    ) -> None:
+        if not isinstance(result, DiscoverySnapshot):
+            self.unexpected_error.emit(
+                f"Unexpected S4 discovery result type: {type(result)!r}"
+            )
+            return
+        accepted = self.controller.apply_discovery_snapshot(result)
+        if not accepted:
+            self.status_message.emit(
+                "Ignored stale S4 discovery result after session change."
+            )
+            return
+        self.refresh_from_state()
+        self.status_message.emit(
+            f"S4 discovery complete for {identity.session_root.name}."
+        )
+
+    def _on_discovery_error(
+        self, exc: BaseException, identity: DiscoveryRequestIdentity
+    ) -> None:
+        message = str(exc)
+        accepted = self.controller.record_discovery_failure(
+            message, expected_identity=identity
+        )
+        if not accepted:
+            return
+        self.refresh_from_state()
+        if isinstance(exc, PoseFinalizationUiError):
+            QMessageBox.warning(self, "Discovery failed", message)
+            self.status_message.emit(f"S4 discovery failed: {message}")
+        else:
+            self.unexpected_error.emit(message)
+
+    def _on_discovery_finished(self, identity: DiscoveryRequestIdentity) -> None:
+        latest = self.controller.state.active_discovery_identity
+        if (
+            self.controller.state.discovery_running
+            and latest is not None
+            and latest.request_id != identity.request_id
+        ):
+            # Session changed while this worker ran; start discovery for the latest id.
+            self._start_discovery_task(latest)
+            return
+        if (
+            self._active_discovery_identity is not None
+            and identity.request_id == self._active_discovery_identity.request_id
+        ):
+            self._active_discovery_identity = None
+        if not self.controller.state.task_running and not self.discovery_runner.is_running:
+            self.progress.setVisible(False)
+            self._restore_stage_label()
+        self._update_enabled()
+        self._emit_running_changed()
+        self.task_finished.emit()
+
+    def _restore_stage_label(self) -> None:
+        """Replace the transient "Discovering…" text with the last run status."""
+
+        state = self.controller.state
+        if state.run_error:
+            self.stage_label.setText(f"Failed: {state.run_error}")
+        elif state.last_result is not None:
+            self.stage_label.setText(f"Finished: {state.last_result.status}")
+        else:
+            self.stage_label.setText(state.run_stage)
 
     def _populate_s3_combo(self) -> None:
         self.s3_combo.blockSignals(True)
@@ -496,7 +630,9 @@ class PoseFinalizationPage(QWidget):
             self.qc_table.setItem(index, 1, QTableWidgetItem(value))
         if not rows:
             state = self.controller.state
-            if state.run_error:
+            if state.discovery_running and not state.task_running:
+                self.stage_label.setText("Discovering S3/S4 artifacts…")
+            elif state.run_error:
                 self.stage_label.setText(f"Failed: {state.run_error}")
             else:
                 self.stage_label.setText(state.run_stage)
@@ -510,8 +646,12 @@ class PoseFinalizationPage(QWidget):
 
     def _update_enabled(self) -> None:
         busy = self.has_running_task
-        self.session_browse_button.setEnabled(not busy)
-        self.open_session_button.setEnabled(not busy)
+        finalization_busy = (
+            self.controller.state.task_running or self.task_runner.is_running
+        )
+        # Session changes may supersede in-flight discovery; block only finalization.
+        self.session_browse_button.setEnabled(not finalization_busy)
+        self.open_session_button.setEnabled(not finalization_busy)
         self.refresh_button.setEnabled(not busy)
         self.s3_combo.setEnabled(not busy)
         self.linear_max_spin.setEnabled(not busy)

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
+from uuid import uuid4
 
 from pose_inference.run_discovery import (
     PoseInferenceProjectSummary,
@@ -78,6 +79,33 @@ class S3PoseInput:
 
 
 @dataclass(frozen=True, slots=True)
+class DiscoveryRequestIdentity:
+    """Identity used to reject stale asynchronous discovery results."""
+
+    request_id: str
+    generation: int
+    session_root: Path
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoverySnapshot:
+    """Payload collected off the GUI thread for one discovery generation.
+
+    ``summary`` is ``None`` when the session could not be inspected; in that case
+    ``s1_status`` / ``s1_message`` carry the same error text the synchronous
+    refresh historically wrote into the UI state.
+    """
+
+    identity: DiscoveryRequestIdentity
+    summary: PoseInferenceProjectSummary | None
+    s1_status: S1UiStatus
+    s1_message: str
+    prepared_video_path: Path | None
+    prepared_frame_count: int | None
+    timing_status: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ProfileSummary:
     """Small profile-derived summary; the profile remains authoritative."""
 
@@ -111,6 +139,9 @@ class PoseInferenceUiState:
     run_purpose: str = "development"
     selected_run_id: str | None = None
     task_running: bool = False
+    discovery_running: bool = False
+    discovery_generation: int = 0
+    active_discovery_identity: DiscoveryRequestIdentity | None = None
     task_generation: int = 0
     active_task_token: int | None = None
     run_stage: str = "Not started"
@@ -217,8 +248,14 @@ class PoseInferenceController:
         self.load_persisted_paths()
         self.refresh_profile_summary()
 
-    def _ensure_idle(self, action: str) -> None:
+    def _ensure_no_task(self, action: str) -> None:
+        """Block only on an active run/preflight/S3 task (discovery may be superseded)."""
+
         if self.state.task_running:
+            raise PoseInferenceUiError(f"Cannot {action} while a background task is active.")
+
+    def _ensure_idle(self, action: str) -> None:
+        if self.state.task_running or self.state.discovery_running:
             raise PoseInferenceUiError(f"Cannot {action} while a background task is active.")
 
     def _clear_s3_eligibility_cache(self) -> None:
@@ -253,7 +290,11 @@ class PoseInferenceController:
     def can_submit(self) -> bool:
         """Return whether basic UI state permits authoritative backend preflight."""
 
-        if self.state.s1_status is not S1UiStatus.READY or self.state.task_running:
+        if (
+            self.state.s1_status is not S1UiStatus.READY
+            or self.state.task_running
+            or self.state.discovery_running
+        ):
             return False
         try:
             self.build_request()
@@ -262,59 +303,194 @@ class PoseInferenceController:
         return True
 
     def set_session(self, session_root: Path | str) -> PoseInferenceProjectSummary | None:
-        """Select and discover one session, preserving it across subsystem navigation."""
+        """Select and discover one session synchronously (unit tests / headless use).
 
-        self._ensure_idle("change the selected session")
+        Pages use :meth:`prepare_session` plus an asynchronous worker instead.
+        """
+
         raw = str(session_root).strip()
         if not raw:
+            self._ensure_no_task("change the selected session")
             self._clear_session("Select a project/session.")
             return None
-        root = Path(raw).expanduser().resolve(strict=False)
-        self.state.session_root = root
-        self.state.selected_run_id = None
-        self.state.s3_handoff = None
-        self.state.last_s3_result = None
-        self._clear_s3_eligibility_cache()
+        self.prepare_session(raw)
         return self.refresh_discovery()
 
-    def refresh_discovery(self) -> PoseInferenceProjectSummary | None:
-        """Refresh only compact S1/S2 metadata and retain a valid run selection."""
+    def prepare_session(self, session_root: Path | str) -> DiscoveryRequestIdentity:
+        """Bind a session and bump discovery generation without scanning yet."""
 
-        self._ensure_idle("refresh run discovery")
+        raw = str(session_root).strip()
+        if not raw:
+            raise PoseInferenceUiError("Select a project/session.")
+        self._ensure_no_task("change the selected session")
+        root = Path(raw).expanduser().resolve(strict=False)
+        previous = self.state.session_root
+        self.state.session_root = root
+        if previous is None or not _same_path(previous, root):
+            self.state.selected_run_id = None
+            self.state.s3_handoff = None
+            self.state.last_s3_result = None
+            self.state.summary = None
+            self.state.s1_status = S1UiStatus.NOT_SELECTED
+            self.state.s1_message = "Discovering S1 handoff and existing S2 runs…"
+            self.state.prepared_video_path = None
+            self.state.prepared_frame_count = None
+            self.state.timing_status = None
         self._clear_s3_eligibility_cache()
+        return self.begin_discovery()
+
+    def begin_discovery(self) -> DiscoveryRequestIdentity:
+        """Mark discovery in progress and return an identity for async apply."""
+
+        self._ensure_no_task("refresh run discovery")
         root = self.state.session_root
         if root is None:
-            self._clear_session("Select a project/session.")
-            return None
+            raise PoseInferenceUiError("Select a project/session first.")
+        self.state.discovery_generation += 1
+        identity = DiscoveryRequestIdentity(
+            request_id=str(uuid4()),
+            generation=self.state.discovery_generation,
+            session_root=root.resolve(strict=False),
+        )
+        self.state.active_discovery_identity = identity
+        self.state.discovery_running = True
+        self._clear_s3_eligibility_cache()
+        return identity
+
+    def collect_discovery_snapshot(
+        self, identity: DiscoveryRequestIdentity
+    ) -> DiscoverySnapshot:
+        """Heavy filesystem / metadata work safe to run off the GUI thread.
+
+        Reads no mutable controller state and touches no Qt objects.
+        """
+
+        root = identity.session_root
         if not root.is_dir():
-            self.state.summary = None
-            self.state.s1_status = S1UiStatus.INVALID
-            self.state.s1_message = f"Session directory does not exist or is unavailable: {root}"
-            self.state.prepared_video_path = root / "preprocess" / "prepared_video.mp4"
-            return None
-        previous_selection = self.state.selected_run_id
+            return DiscoverySnapshot(
+                identity=identity,
+                summary=None,
+                s1_status=S1UiStatus.INVALID,
+                s1_message=f"Session directory does not exist or is unavailable: {root}",
+                prepared_video_path=root / "preprocess" / "prepared_video.mp4",
+                prepared_frame_count=None,
+                timing_status=None,
+            )
         try:
             summary = self._discovery(root)
         except (OSError, ValueError) as exc:
-            self.state.summary = None
-            self.state.s1_status = S1UiStatus.INVALID
-            self.state.s1_message = f"Could not inspect the session: {exc}"
-            return None
-        self.state.summary = summary
-        self.state.prepared_video_path = summary.s1_handoff.prepared_video
+            return DiscoverySnapshot(
+                identity=identity,
+                summary=None,
+                s1_status=S1UiStatus.INVALID,
+                s1_message=f"Could not inspect the session: {exc}",
+                prepared_video_path=None,
+                prepared_frame_count=None,
+                timing_status=None,
+            )
+        prepared_video_path = summary.s1_handoff.prepared_video
         if not summary.s1_handoff.is_complete:
             missing = ", ".join(summary.s1_handoff.missing_files)
-            self.state.s1_status = S1UiStatus.INCOMPLETE
-            self.state.s1_message = f"S1 handoff is incomplete. Missing: {missing}."
-            self.state.prepared_frame_count = None
-            self.state.timing_status = None
-        else:
-            self._inspect_s1_metadata(root)
-        run_ids = {run.run_id for run in summary.runs}
-        self.state.selected_run_id = previous_selection if previous_selection in run_ids else None
-        return summary
+            return DiscoverySnapshot(
+                identity=identity,
+                summary=summary,
+                s1_status=S1UiStatus.INCOMPLETE,
+                s1_message=f"S1 handoff is incomplete. Missing: {missing}.",
+                prepared_video_path=prepared_video_path,
+                prepared_frame_count=None,
+                timing_status=None,
+            )
+        s1_status, s1_message, frame_count, timing_status = self._inspect_s1_metadata_values(
+            root
+        )
+        return DiscoverySnapshot(
+            identity=identity,
+            summary=summary,
+            s1_status=s1_status,
+            s1_message=s1_message,
+            prepared_video_path=prepared_video_path,
+            prepared_frame_count=frame_count,
+            timing_status=timing_status,
+        )
 
-    def _inspect_s1_metadata(self, root: Path) -> None:
+    def apply_discovery_snapshot(self, snapshot: DiscoverySnapshot) -> bool:
+        """Apply a discovery result only when its generation is still current."""
+
+        if not self._is_current_discovery_result(snapshot.identity):
+            return False
+        previous_selection = self.state.selected_run_id
+        self.state.discovery_running = False
+        self.state.active_discovery_identity = None
+        self._clear_s3_eligibility_cache()
+        self.state.summary = snapshot.summary
+        self.state.s1_status = snapshot.s1_status
+        self.state.s1_message = snapshot.s1_message
+        self.state.prepared_video_path = snapshot.prepared_video_path
+        self.state.prepared_frame_count = snapshot.prepared_frame_count
+        self.state.timing_status = snapshot.timing_status
+        if snapshot.summary is not None:
+            run_ids = {run.run_id for run in snapshot.summary.runs}
+            self.state.selected_run_id = (
+                previous_selection if previous_selection in run_ids else None
+            )
+        return True
+
+    def record_discovery_failure(
+        self, message: str, *, expected_identity: DiscoveryRequestIdentity | None
+    ) -> bool:
+        """Record a discovery failure when the request is still current."""
+
+        if not self._is_current_discovery_result(expected_identity):
+            return False
+        self.state.discovery_running = False
+        self.state.active_discovery_identity = None
+        self.state.summary = None
+        self.state.s1_status = S1UiStatus.INVALID
+        self.state.s1_message = f"Could not inspect the session: {message}"
+        self.state.prepared_frame_count = None
+        self.state.timing_status = None
+        return True
+
+    def refresh_discovery(self) -> PoseInferenceProjectSummary | None:
+        """Refresh only compact S1/S2 metadata and retain a valid run selection (sync)."""
+
+        self._ensure_no_task("refresh run discovery")
+        self._clear_s3_eligibility_cache()
+        if self.state.session_root is None:
+            self._clear_session("Select a project/session.")
+            return None
+        identity = self.begin_discovery()
+        snapshot = self.collect_discovery_snapshot(identity)
+        self.apply_discovery_snapshot(snapshot)
+        return snapshot.summary
+
+    def _is_current_discovery_result(
+        self, expected: DiscoveryRequestIdentity | None
+    ) -> bool:
+        if expected is None:
+            return False
+        active = self.state.active_discovery_identity
+        if active is None:
+            return False
+        if expected.request_id != active.request_id:
+            return False
+        if expected.generation != self.state.discovery_generation:
+            return False
+        current_root = self.state.session_root
+        if current_root is None:
+            return False
+        return current_root.resolve(strict=False) == expected.session_root.resolve(
+            strict=False
+        )
+
+    def _inspect_s1_metadata_values(
+        self, root: Path
+    ) -> tuple[S1UiStatus, str, int | None, str | None]:
+        """Validate S1 metadata and return (status, message, frame_count, timing).
+
+        Pure with respect to controller state so it is safe on a worker thread.
+        """
+
         try:
             handoff = validate_s1_handoff(root)
             metadata = handoff.prepare_meta_payload
@@ -329,28 +505,44 @@ class PoseInferenceController:
             if external.get("provided") is True:
                 timing = str(external.get("validation_status") or "provided")
                 source = external.get("source_path")
-                self.state.timing_status = f"external timing: {timing}" + (
+                timing_status = f"external timing: {timing}" + (
                     f" ({source})" if source else ""
                 )
             else:
                 encoding = _mapping(metadata.get("encoding"))
                 source = encoding.get("fps_header_source")
-                self.state.timing_status = (
+                timing_status = (
                     f"video/FPS timing ({source})" if source else "video/FPS timing"
                 )
-            self.state.prepared_frame_count = frame_count
-            self.state.s1_status = S1UiStatus.READY
-            self.state.s1_message = (
-                "S1 handoff metadata is readable. Full sync/video/runtime checks run "
-                "during backend preflight."
-            )
         except PoseInferenceError as exc:
-            self.state.prepared_frame_count = None
-            self.state.timing_status = None
-            self.state.s1_status = S1UiStatus.METADATA_UNREADABLE
-            self.state.s1_message = f"S1 metadata is unreadable or invalid: {exc}"
+            return (
+                S1UiStatus.METADATA_UNREADABLE,
+                f"S1 metadata is unreadable or invalid: {exc}",
+                None,
+                None,
+            )
+        return (
+            S1UiStatus.READY,
+            "S1 handoff metadata is readable. Full sync/video/runtime checks run "
+            "during backend preflight.",
+            frame_count,
+            timing_status,
+        )
+
+    def _inspect_s1_metadata(self, root: Path) -> None:
+        """Synchronously inspect S1 metadata and write the result into state."""
+
+        status, message, frame_count, timing_status = self._inspect_s1_metadata_values(root)
+        self.state.prepared_frame_count = frame_count
+        self.state.timing_status = timing_status
+        self.state.s1_status = status
+        self.state.s1_message = message
 
     def _clear_session(self, message: str) -> None:
+        # Invalidate any in-flight discovery so its result cannot repopulate state.
+        self.state.discovery_generation += 1
+        self.state.discovery_running = False
+        self.state.active_discovery_identity = None
         self.state.session_root = None
         self.state.summary = None
         self.state.s1_status = S1UiStatus.NOT_SELECTED
@@ -677,6 +869,10 @@ class PoseInferenceController:
         run = self.selected_run
         if run is None:
             return ("Select an S2 run.", None)
+        if self.state.discovery_running:
+            # Authoritative S3 handoff validation reads artifacts; never run it on the
+            # GUI thread while a background discovery is refreshing the run list.
+            return ("S2 discovery is still running.", None)
         run_key = str(run.run_dir.resolve(strict=False))
         cache = self._s3_eligibility_cache
         if cache is not None and cache[0] == run.run_id and cache[1] == run_key:
@@ -874,6 +1070,8 @@ class PoseInferenceController:
 
         if self.state.task_running:
             return "Rerun settings are unavailable while a Subsystem 2 task is active."
+        if self.state.discovery_running:
+            return "Rerun settings are unavailable while S2 discovery is running."
         selected = run or self.selected_run
         if selected is None:
             return "Select a run to copy its settings."

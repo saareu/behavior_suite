@@ -36,11 +36,16 @@ from PySide6.QtWidgets import (
 
 from blob_features import BlobFeaturesResult, BlobSegmentationSettings
 from ui.controllers.blob_features_controller import (
+    OPENING_SOURCE_MESSAGE,
     BlobFeaturesController,
     BlobFeaturesUiError,
     BlobFeaturesUiSettings,
+    DiscoveryRequestIdentity,
+    DiscoverySnapshot,
     ExtractionRequestIdentity,
     MultiFramePreviewResult,
+    OpenRequestIdentity,
+    OpenSnapshot,
     SingleFramePreviewResult,
     ensure_bgr,
 )
@@ -81,11 +86,15 @@ class BlobFeaturesPage(QWidget):
         super().__init__(parent)
         self.controller = controller or BlobFeaturesController()
         self.task_runner = GuiTaskRunner(self)
+        self.open_runner = GuiTaskRunner(self)
+        self.discovery_runner = GuiTaskRunner(self)
         self._syncing_widgets = False
         self._last_running_state: bool | None = None
         self._multi_preview_index = 0
         self._started_at: float | None = None
         self._active_extraction_identity: ExtractionRequestIdentity | None = None
+        self._active_open_identity: OpenRequestIdentity | None = None
+        self._active_discovery_identity: DiscoveryRequestIdentity | None = None
         self._build_ui()
         self.elapsed_timer = QTimer(self)
         self.elapsed_timer.setInterval(500)
@@ -94,20 +103,152 @@ class BlobFeaturesPage(QWidget):
 
     @property
     def has_running_task(self) -> bool:
-        return self.task_runner.is_running or self.controller.state.task_running
+        return (
+            self.task_runner.is_running
+            or self.open_runner.is_running
+            or self.discovery_runner.is_running
+            or self.controller.state.task_running
+            or self.controller.state.open_running
+            or self.controller.state.discovery_running
+        )
+
+    @property
+    def _open_in_progress(self) -> bool:
+        return self.open_runner.is_running or self.controller.state.open_running
 
     def set_session(self, session_root: Path | str) -> None:
-        """Open a project/session with eligible S1 artifacts."""
+        """Open a project/session with eligible S1 artifacts (asynchronously).
 
+        Previous-session frames are cleared immediately; S1 validation, hashing,
+        frame decoding, bookmark/settings loading, and run discovery happen in a
+        worker. Results are applied on the GUI thread only if still current.
+        """
+
+        if self.controller.state.task_running or self.task_runner.is_running:
+            message = (
+                "Cannot change S5 session while a preview or extraction task is active."
+            )
+            QMessageBox.warning(self, "Cannot open S5 session", message)
+            self.status_message.emit(message)
+            return
         try:
-            self.controller.set_session(session_root)
+            identity = self.controller.prepare_session(session_root)
         except BlobFeaturesUiError as exc:
             QMessageBox.warning(self, "Cannot open S5 session", str(exc))
             self.status_message.emit(str(exc))
             self.refresh_from_state()
             return
+        self._multi_preview_index = 0
+        self.error_label.setText("")
         self.refresh_from_state()
-        self.status_message.emit(f"Opened session for S5: {session_root}")
+        self.status_message.emit(
+            f"Opening S5 session: {identity.session_root} (validating S1 in background…)"
+        )
+        self._start_open_task(identity)
+
+    def _start_open_task(self, identity: OpenRequestIdentity) -> None:
+        """Start the S1 open worker, or defer until the in-flight one exits."""
+
+        self._active_open_identity = identity
+        self.stage_label.setText(OPENING_SOURCE_MESSAGE)
+        self.progress.setRange(0, 0)
+        self.progress.setVisible(True)
+        self._update_enabled()
+        self._emit_running_changed()
+        if self.open_runner.is_running:
+            return
+
+        context = GuiTaskContext(
+            task_id=uuid4().hex,
+            task_kind=GuiTaskKind.BLOB_FEATURES_OPEN,
+            project_dir=identity.session_root,
+            raw_video_path=None,
+            generation=identity.generation,
+        )
+
+        def _operation() -> OpenSnapshot:
+            return self.controller.collect_open_snapshot(identity)
+
+        try:
+            self.open_runner.start(
+                _operation,
+                task_name="S5 open source",
+                context=context,
+                on_success=lambda result: self._on_open_success(result, identity),
+                on_error=lambda exc: self._on_open_error(exc, identity),
+                on_finished=lambda: self._on_open_finished(identity),
+            )
+        except TaskAlreadyRunningError:
+            return
+
+    def _on_open_success(self, result: object, identity: OpenRequestIdentity) -> None:
+        if not isinstance(result, OpenSnapshot):
+            self.unexpected_error.emit(
+                f"Unexpected S5 open result type: {type(result)!r}"
+            )
+            return
+        if not self.controller.apply_open_snapshot(result):
+            self.status_message.emit(
+                "Ignored stale S5 open result after session/source change."
+            )
+            return
+        self._multi_preview_index = 0
+        self.error_label.setText("")
+        self.refresh_from_state()
+        state = self.controller.state
+        if state.eligible is None:
+            message = state.eligibility_error or "No eligible S1 result is available."
+            QMessageBox.warning(self, "Cannot open S5 session", message)
+            self.status_message.emit(message)
+            return
+        problem = state.frame_load_error or state.discovery_error
+        if problem:
+            self.error_label.setText(problem)
+            self.status_message.emit(problem)
+            return
+        self.status_message.emit(f"Opened session for S5: {identity.session_root}")
+
+    def _on_open_error(self, exc: BaseException, identity: OpenRequestIdentity) -> None:
+        _LOGGER.error("S5 open failed: %s", exc)
+        message = str(exc)
+        if not self.controller.record_open_failure(
+            message, expected_identity=identity
+        ):
+            return
+        self.refresh_from_state()
+        if isinstance(exc, BlobFeaturesUiError):
+            QMessageBox.warning(self, "Cannot open S5 session", message)
+            self.status_message.emit(message)
+        else:
+            self.unexpected_error.emit(message)
+            self.status_message.emit(f"S5 open failed: {message}")
+
+    def _on_open_finished(self, identity: OpenRequestIdentity) -> None:
+        latest = self.controller.state.active_open_identity
+        if (
+            self.controller.state.open_running
+            and latest is not None
+            and latest.request_id != identity.request_id
+        ):
+            self._start_open_task(latest)
+            return
+        if (
+            self._active_open_identity is not None
+            and identity.request_id == self._active_open_identity.request_id
+        ):
+            self._active_open_identity = None
+        self._finish_loading_ui()
+        self.task_finished.emit()
+
+    def _finish_loading_ui(self) -> None:
+        """Restore idle chrome once no open/discovery/extraction work remains."""
+
+        if not self.has_running_task:
+            self.progress.setVisible(False)
+            self._refresh_qc_panel()
+        self._refresh_eligibility_labels()
+        self._update_enabled()
+        self._emit_running_changed()
 
     def refresh_from_state(self) -> None:
         state = self.controller.state
@@ -219,6 +360,7 @@ class BlobFeaturesPage(QWidget):
         diag_form.addRow("Preview state", self.preview_status_label)
 
         settings_group = self._build_settings_group()
+        self.settings_group = settings_group
         bookmarks_group = self._build_bookmarks_group()
 
         actions = QHBoxLayout()
@@ -549,7 +691,7 @@ class BlobFeaturesPage(QWidget):
             widget.blockSignals(False)
 
     def _settings_widgets_changed(self, *_args: object) -> None:
-        if self._syncing_widgets:
+        if self._syncing_widgets or self._open_in_progress:
             return
         try:
             settings = self._settings_from_widgets().validated()
@@ -831,14 +973,106 @@ class BlobFeaturesPage(QWidget):
     def _refresh_discovery(self) -> None:
         if not self._guard_idle("refresh discovery"):
             return
+        if self.controller.state.session_root is None:
+            QMessageBox.information(
+                self, "Session required", "Open a project/session first."
+            )
+            return
         try:
-            self.controller.refresh_discovery()
+            identity = self.controller.begin_discovery()
         except BlobFeaturesUiError as exc:
             QMessageBox.warning(self, "Discovery failed", str(exc))
             self.status_message.emit(str(exc))
             return
-        self.refresh_from_state()
-        self.status_message.emit("S5 run discovery refreshed.")
+        self._refresh_eligibility_labels()
+        self.status_message.emit("S5 run discovery started in background…")
+        self._start_discovery_task(identity)
+
+    def _start_discovery_task(self, identity: DiscoveryRequestIdentity) -> None:
+        """Start discovery only (S1 already open), or defer until the worker exits."""
+
+        self._active_discovery_identity = identity
+        self.stage_label.setText("Discovering S5 runs…")
+        self.progress.setRange(0, 0)
+        self.progress.setVisible(True)
+        self._update_enabled()
+        self._emit_running_changed()
+        if self.discovery_runner.is_running:
+            return
+
+        context = GuiTaskContext(
+            task_id=uuid4().hex,
+            task_kind=GuiTaskKind.BLOB_FEATURES_DISCOVERY,
+            project_dir=identity.session_root,
+            raw_video_path=None,
+            generation=identity.generation,
+        )
+
+        def _operation() -> DiscoverySnapshot:
+            return self.controller.collect_discovery_snapshot(identity)
+
+        try:
+            self.discovery_runner.start(
+                _operation,
+                task_name="S5 discovery",
+                context=context,
+                on_success=lambda result: self._on_discovery_success(result, identity),
+                on_error=lambda exc: self._on_discovery_error(exc, identity),
+                on_finished=lambda: self._on_discovery_finished(identity),
+            )
+        except TaskAlreadyRunningError:
+            return
+
+    def _on_discovery_success(
+        self, result: object, identity: DiscoveryRequestIdentity
+    ) -> None:
+        if not isinstance(result, DiscoverySnapshot):
+            self.unexpected_error.emit(
+                f"Unexpected S5 discovery result type: {type(result)!r}"
+            )
+            return
+        if not self.controller.apply_discovery_snapshot(result):
+            self.status_message.emit(
+                "Ignored stale S5 discovery result after session change."
+            )
+            return
+        self._populate_runs_table()
+        self._refresh_qc_panel()
+        self._update_enabled()
+        self.status_message.emit(
+            f"S5 run discovery refreshed for {identity.session_root.name}."
+        )
+
+    def _on_discovery_error(
+        self, exc: BaseException, identity: DiscoveryRequestIdentity
+    ) -> None:
+        message = str(exc)
+        if not self.controller.record_discovery_failure(
+            message, expected_identity=identity
+        ):
+            return
+        if isinstance(exc, BlobFeaturesUiError):
+            QMessageBox.warning(self, "Discovery failed", message)
+            self.status_message.emit(f"S5 discovery failed: {message}")
+        else:
+            self.unexpected_error.emit(message)
+
+    def _on_discovery_finished(self, identity: DiscoveryRequestIdentity) -> None:
+        latest = self.controller.state.active_discovery_identity
+        if (
+            self.controller.state.discovery_running
+            and latest is not None
+            and latest.request_id != identity.request_id
+        ):
+            self._start_discovery_task(latest)
+            return
+        if (
+            self._active_discovery_identity is not None
+            and identity.request_id == self._active_discovery_identity.request_id
+        ):
+            self._active_discovery_identity = None
+        self._finish_loading_ui()
+        self.task_finished.emit()
 
     def _run_extraction(self) -> None:
         if not self._guard_idle("start full extraction"):
@@ -1158,13 +1392,21 @@ class BlobFeaturesPage(QWidget):
 
     def _refresh_eligibility_labels(self) -> None:
         state = self.controller.state
+        if state.open_running:
+            self.eligibility_label.setText(OPENING_SOURCE_MESSAGE)
+            return
         if state.eligible is not None:
             eligible = state.eligible
-            self.eligibility_label.setText(
+            text = (
                 f"Eligible S1 · {eligible.frame_count} prepared frames · "
                 f"{eligible.frame_width}×{eligible.frame_height} · "
                 f"video={eligible.prepared_video.name}"
             )
+            if state.discovery_running:
+                text = f"{text} · Discovering S5 runs…"
+            elif state.discovery_error:
+                text = f"{text} · Discovery failed: {state.discovery_error}"
+            self.eligibility_label.setText(text)
             return
         if state.eligibility_error:
             self.eligibility_label.setText(state.eligibility_error)
@@ -1183,7 +1425,11 @@ class BlobFeaturesPage(QWidget):
                 self.frame_slider.setMaximum(0)
                 self.frame_spin.setValue(0)
                 self.frame_slider.setValue(0)
-                self.frame_meta_label.setText("No eligible S1 session loaded.")
+                self.frame_meta_label.setText(
+                    OPENING_SOURCE_MESSAGE
+                    if state.open_running
+                    else "No eligible S1 session loaded."
+                )
             else:
                 max_idx = max(0, state.eligible.frame_count - 1)
                 self.frame_spin.setMaximum(max_idx)
@@ -1285,10 +1531,15 @@ class BlobFeaturesPage(QWidget):
         ready = self.controller.state.eligible is not None
         busy = self.has_running_task
         preview_busy = self.controller.state.active_preview_request_id is not None
+        # Preview/extraction own the task runner; open/discovery may be superseded.
+        task_busy = (
+            self.controller.state.task_running or self.task_runner.is_running
+        )
         # During full extraction, keep frame navigation available so users can
         # inspect the source while work continues. Session mutation and new tasks
         # remain locked.
-        frame_locked = preview_busy
+        frame_locked = preview_busy or self._open_in_progress
+        self.settings_group.setEnabled(not self._open_in_progress)
         self.preview_button.setEnabled(ready and not busy)
         self.preview_bookmarks_button.setEnabled(ready and not busy)
         self.prev_button.setEnabled(ready and not frame_locked)
@@ -1298,8 +1549,9 @@ class BlobFeaturesPage(QWidget):
         self.add_bookmark_button.setEnabled(ready and not busy)
         self.remove_bookmark_button.setEnabled(ready and not busy)
         self.goto_bookmark_button.setEnabled(ready and not frame_locked)
-        self.open_session_button.setEnabled(not busy)
-        self.session_browse_button.setEnabled(not busy)
+        # Session browse stays available so a newer session can supersede open/discovery.
+        self.open_session_button.setEnabled(not task_busy)
+        self.session_browse_button.setEnabled(not task_busy)
         self.refresh_button.setEnabled(not busy)
         self.reset_defaults_button.setEnabled(not busy)
         can_run = self.controller.can_run_extraction() and not busy

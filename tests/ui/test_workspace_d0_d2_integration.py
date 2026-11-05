@@ -128,6 +128,8 @@ def test_browse_s9_then_open_s2_s5_shares_session(tmp_path: Path) -> None:
 
     window.open_pose_inference()
     assert window.pose_controller.state.session_root == session
+    # S2 discovery runs asynchronously and hard-locks navigation until it finishes.
+    _wait_soft_idle(window)
     window.open_blob_features()
     assert window.blob_features_controller.state.session_root == session
     _wait_soft_idle(window)

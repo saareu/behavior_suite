@@ -124,7 +124,7 @@ def _soft_settings() -> BlobFeaturesUiSettings:
     ).validated()
 
 
-def _wait_until(predicate, timeout_sec: float = 15.0) -> None:
+def _wait_until(predicate, timeout_sec: float = 30.0) -> None:
     deadline = time.monotonic() + timeout_sec
     while not predicate():
         _APPLICATION.processEvents()
@@ -277,6 +277,7 @@ def test_page_readiness_and_preview_action(tmp_path: Path) -> None:
     page = BlobFeaturesPage(BlobFeaturesController())
     page.controller.set_working_settings(_soft_settings())
     page.set_session(session)
+    _wait_until(lambda: not page.has_running_task)
     assert page.controller.state.eligible is not None
     assert "Eligible S1" in page.eligibility_label.text()
     page.preview_button.click()
@@ -290,6 +291,7 @@ def test_main_window_exposes_s5_navigation(tmp_path: Path) -> None:
     window = MainWindow(PreprocessSetupController())
     assert window.s5_button.isEnabled() is True
     window.open_blob_features(session)
+    _wait_until(lambda: not window.blob_features_page.has_running_task)
     assert window.pages.currentWidget() is window.blob_features_page
     assert window.blob_features_page.controller.state.eligible is not None
 
@@ -302,6 +304,8 @@ def test_group_navigation_preserves_s1_s4_and_shares_session(tmp_path: Path) -> 
     window.show()
     _APPLICATION.processEvents()
     window.open_pose_inference(session)
+    # S2 opens asynchronously; hard navigation stays locked until discovery ends.
+    _wait_until(lambda: not window.pose_page.has_running_task)
     assert window._active_group == GROUP_DATA_PREPARATION
     assert window.s1_button.isHidden() is False
     assert window.s5_button.isHidden() is True
@@ -313,6 +317,7 @@ def test_group_navigation_preserves_s1_s4_and_shares_session(tmp_path: Path) -> 
     assert window.s1_button.isHidden() is True
     assert window.s6_button.isHidden() is False
     assert window.s6_button.isEnabled() is True
+    _wait_until(lambda: not window.blob_features_page.has_running_task)
     assert window.pages.currentWidget() is window.blob_features_page
     assert window._session_root == session.resolve()
     assert window.blob_features_page.controller.state.eligible is not None
@@ -330,6 +335,7 @@ def test_s5_independent_of_s2_s4_completion(tmp_path: Path) -> None:
     window = MainWindow(PreprocessSetupController())
     window.set_application_group("feature_processing")
     window.open_blob_features(session)
+    _wait_until(lambda: not window.blob_features_page.has_running_task)
     assert window.blob_features_page.controller.state.eligible is not None
 
 
@@ -356,6 +362,7 @@ def test_extraction_gui_launch_and_settings_snapshot(tmp_path: Path) -> None:
     page = BlobFeaturesPage(BlobFeaturesController())
     page.controller.set_working_settings(_soft_settings())
     page.set_session(session)
+    _wait_until(lambda: not page.has_running_task)
     assert page.run_button.isEnabled() is True
     page.run_button.click()
     _wait_until(lambda: page.controller.state.last_result is not None, timeout_sec=60.0)
@@ -501,6 +508,7 @@ def test_processed_views_require_preview_without_original_fallback(
     session = _write_eligible_s1(tmp_path)
     page.controller.set_working_settings(_soft_settings())
     page.set_session(session)
+    _wait_until(lambda: not page.has_running_task)
     page.view_mode.setCurrentIndex(
         page.view_mode.findData("binary_mask")
     )
@@ -580,6 +588,7 @@ def test_min_area_parameters_remain_distinct(tmp_path: Path) -> None:
     page = BlobFeaturesPage(BlobFeaturesController())
     page.controller.set_working_settings(distinct)
     page.set_session(session)
+    _wait_until(lambda: not page.has_running_task)
     assert page.blob_min_area.value() == 111
     assert page.post_min_area.value() == 222
     # Changing one control must not silently rewrite the other.
@@ -596,6 +605,7 @@ def test_group_navigation_allowed_during_s5_extraction(tmp_path: Path) -> None:
     window = MainWindow(PreprocessSetupController())
     window.open_blob_features(session)
     page = window.blob_features_page
+    _wait_until(lambda: not page.has_running_task)
     page.controller.set_working_settings(_soft_settings())
     request, identity = page.controller.build_request(timestamp="20260101T150000")
     assert page.controller.state.active_extraction_identity is not None
@@ -638,6 +648,7 @@ def test_area_filtering_labels_grouped(tmp_path: Path) -> None:
     page = BlobFeaturesPage(BlobFeaturesController())
     session = _write_eligible_s1(tmp_path)
     page.set_session(session)
+    _wait_until(lambda: not page.has_running_task)
     groups = [
         box for box in page.findChildren(QGroupBox) if box.title() == "Blob Area Filtering"
     ]
