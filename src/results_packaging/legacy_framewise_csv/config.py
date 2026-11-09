@@ -75,7 +75,11 @@ class LegacyFramewiseExportSettings:
                     if cfg.format_profile == LEGACY_FRAMEWISE_V2_PROFILE_ID
                     else "sync_index.raw_decode_frame_idx"
                 ),
-                "pose_authority": "s4_final_pose",
+                "pose_authority": (
+                    "accepted_s3_tracked_pose"
+                    if cfg.format_profile == LEGACY_FRAMEWISE_V2_PROFILE_ID
+                    else "s4_final_pose"
+                ),
                 "coordinate_space": "prepared_video_pixels",
                 "coordinate_format": "round_to_integer_one_decimal",
                 "row_grain": row_grain,

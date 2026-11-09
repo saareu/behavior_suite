@@ -365,11 +365,18 @@ def build_legacy_pose_ui_state(
     format_profile: str,
     selected_pose_run_dir: str | None,
 ) -> LegacyPoseUiState:
-    """Compute whether the S4 picker must be shown (never auto-select newest)."""
+    """Compute whether an explicit pose picker must be shown.
+
+    V1 uses completed S4 runs. V2 uses accepted S3 tracked-pose runs.
+    Never auto-selects the newest candidate when lineage is missing.
+    """
 
     from results_packaging.legacy_framewise_csv import (
+        LEGACY_FRAMEWISE_V2_PROFILE_ID,
         inspect_package_pose_lineage,
+        inspect_package_s3_lineage,
         is_legacy_framewise_profile,
+        list_accepted_s3_run_candidates,
         list_pose_run_candidates,
     )
 
@@ -382,7 +389,7 @@ def build_legacy_pose_ui_state(
             lineage_run_id=None,
             lineage_run_dir=None,
             requires_explicit_pose=False,
-            reason="Historical bout CSV does not use S4 pose selection.",
+            reason="Historical bout CSV does not use pose selection.",
             candidates=(),
             selected_pose_run_dir=None,
         )
@@ -397,15 +404,23 @@ def build_legacy_pose_ui_state(
             candidates=(),
             selected_pose_run_dir=None,
         )
-    lineage = inspect_package_pose_lineage(package_dir)
-    candidates = (
-        list_pose_run_candidates(session_root) if session_root is not None else ()
-    )
     selected = (
         str(Path(str(selected_pose_run_dir).strip()).expanduser().resolve())
         if selected_pose_run_dir and str(selected_pose_run_dir).strip()
         else None
     )
+    if profile == LEGACY_FRAMEWISE_V2_PROFILE_ID:
+        lineage = inspect_package_s3_lineage(package_dir)
+        candidates = (
+            list_accepted_s3_run_candidates(session_root)
+            if session_root is not None
+            else ()
+        )
+    else:
+        lineage = inspect_package_pose_lineage(package_dir)
+        candidates = (
+            list_pose_run_candidates(session_root) if session_root is not None else ()
+        )
     if lineage.available:
         return LegacyPoseUiState(
             format_is_legacy=True,

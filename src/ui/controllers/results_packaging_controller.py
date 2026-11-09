@@ -539,19 +539,35 @@ class ResultsPackagingController:
             return str(exc)
         pose_state = self.legacy_pose_ui_state(settings=settings)
         if pose_state.requires_explicit_pose:
-            if not pose_state.candidates:
-                return (
-                    "S6→S4 lineage is unavailable and no completed S4 pose runs "
-                    "were found in this session. Run Subsystem 4 first, or open "
-                    "the session that contains the compatible S4 run."
-                )
-            if not pose_state.selected_pose_run_dir:
-                return (
-                    "S6→S4 lineage is unavailable for this package. Select a "
-                    "completed S4 pose run explicitly before exporting "
-                    "legacy_framewise_v1 CSV (automatic newest-S4 selection is "
-                    "disabled)."
-                )
+            if settings.format_profile == "legacy_framewise_v2":
+                if not pose_state.candidates:
+                    return (
+                        "S6→S4→source_s3 lineage is unavailable and no accepted "
+                        "S3 tracked-pose runs were found in this session. Accept "
+                        "an S3 tracking-correction run first, or open the session "
+                        "that contains the compatible accepted S3 run."
+                    )
+                if not pose_state.selected_pose_run_dir:
+                    return (
+                        "S6→S4→source_s3 lineage is unavailable for this package. "
+                        "Select an accepted S3 tracked-pose run explicitly before "
+                        "exporting legacy_framewise_v2 CSV (automatic newest-S3 "
+                        "selection is disabled)."
+                    )
+            else:
+                if not pose_state.candidates:
+                    return (
+                        "S6→S4 lineage is unavailable and no completed S4 pose runs "
+                        "were found in this session. Run Subsystem 4 first, or open "
+                        "the session that contains the compatible S4 run."
+                    )
+                if not pose_state.selected_pose_run_dir:
+                    return (
+                        "S6→S4 lineage is unavailable for this package. Select a "
+                        "completed S4 pose run explicitly before exporting "
+                        "legacy_framewise_v1 CSV (automatic newest-S4 selection is "
+                        "disabled)."
+                    )
         return None
 
     def legacy_pose_ui_state(

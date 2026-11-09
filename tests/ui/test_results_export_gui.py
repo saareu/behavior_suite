@@ -232,27 +232,41 @@ def test_legacy_pose_picker_required_when_lineage_missing(
     controller, export_info, stack = _controller_with_package(tmp_path)
     with stack:
         session = export_info["session_root"]
-        pose_dir = session / "pose_finalization" / "pose_finalization__manual"
-        pose_dir.mkdir(parents=True)
-        (pose_dir / "run_meta.json").write_text(
-            '{"run_id":"pose_finalization__manual","status":"completed"}\n',
+        s3_dir = session / "tracking_correction" / "tracking_correction__manual"
+        s3_dir.mkdir(parents=True)
+        (s3_dir / "run_meta.json").write_text(
+            '{"run_id":"tracking_correction__manual","acceptance_state":"accepted"}\n',
             encoding="utf-8",
         )
-        (pose_dir / "final_pose.parquet").write_bytes(b"parquet-placeholder")
+        (s3_dir / "tracked_pose.parquet").write_bytes(b"parquet-placeholder")
 
         class _Cand:
-            run_id = pose_dir.name
-            run_dir = pose_dir
-            status = "completed"
-            classification = "eligible"
-            label = f"{pose_dir.name} · eligible"
+            run_id = s3_dir.name
+            run_dir = s3_dir
+            acceptance_state = "accepted"
+            label = f"{s3_dir.name} · accepted"
+
+        from results_packaging.legacy_framewise_csv.source import S3LineageInfo
 
         monkeypatch.setattr(
-            "results_packaging.legacy_framewise_csv.list_pose_run_candidates",
+            "results_packaging.legacy_framewise_csv.inspect_package_s3_lineage",
+            lambda _pkg: S3LineageInfo(
+                available=False,
+                run_id=None,
+                run_dir=None,
+                tracked_pose_sha256=None,
+                reason=(
+                    "S6→S4→source_s3 lineage pin for accepted S3 tracked_pose is "
+                    "unavailable. Select an accepted S3 run explicitly."
+                ),
+            ),
+        )
+        monkeypatch.setattr(
+            "results_packaging.legacy_framewise_csv.list_accepted_s3_run_candidates",
             lambda _root: (_Cand(),),
         )
 
-        # Default legacy profile without lineage → export blocked until explicit S4.
+        # Default V2 profile without S3 lineage → blocked until explicit accepted S3.
         reason = controller.cannot_export_reason()
         assert reason is not None
         assert "explicit" in reason.lower() or "lineage" in reason.lower()
@@ -269,7 +283,7 @@ def test_legacy_pose_picker_required_when_lineage_missing(
         controller.update_export_settings(
             ExportUiSettings(
                 format_profile="legacy_framewise_v2",
-                pose_run_dir=str(pose_dir),
+                pose_run_dir=str(s3_dir),
             )
         )
         page.refresh_from_state()

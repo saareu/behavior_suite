@@ -19,8 +19,12 @@ from behavioral_review.contracts import (
 )
 from behavioral_review.discovery import reopen_reviewed_run
 from behavioral_review.sync import SyncMap
-from overlay.contracts import PlateauPolicy
+from pose_finalization.accepted_s3 import (
+    list_accepted_s3_runs,
+    validate_accepted_s3_run,
+)
 from pose_finalization.contracts import FINAL_POSE_FILENAME, RUN_META_FILENAME
+from pose_finalization.dense_pose import load_tracked_pose_table
 from pose_finalization.runner import (
     PoseFinalizationError,
     validate_s4_run_for_downstream,
@@ -28,11 +32,14 @@ from pose_finalization.runner import (
 from preprocess.sync_writer import load_prepared_sync_npz
 from project.file_digest import sha256_file
 from results_packaging.legacy_framewise_csv.contracts import (
+    BEHAVIOR_MAPPING_PREPARED_NEAREST_DENSE,
     BEHAVIOR_SOURCE_AUTOMATED,
     BEHAVIOR_SOURCE_REVIEWED,
+    BEHAVIOR_TIE_BREAK_EARLIER,
     INDEXING_NOTES_V2,
     LEGACY_FRAMEWISE_PROFILE_ID,
     LEGACY_FRAMEWISE_V2_PROFILE_ID,
+    LEGACY_FRAMEWISE_V2_SEMANTICS_REVISION,
     LEGACY_POSE_NODE_TRACKS,
     PLATEAU_POLICY_LAST_IN_PLATEAU,
     LegacyFramewiseEligibilityError,
@@ -49,6 +56,7 @@ from results_packaging.sync_index import (
 )
 
 PoseSelectionMode = Literal["lineage_s6", "explicit"]
+S3SelectionMode = Literal["lineage_s4_source_s3", "explicit"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,11 +92,19 @@ class LegacyFramewiseSource:
     prepared_sync_sha256: str | None = None
     prepared_frame_idx: np.ndarray | None = None
     raw_decode_frame_idx: np.ndarray | None = None
+    prepared_time_sec: np.ndarray | None = None
     n_prepared_frames: int | None = None
     behavior_sync: SyncMap | None = None
     pose_sync: SyncMap | None = None
     pose_sync_build_audit: dict[str, Any] | None = None
     timing_contract: dict[str, Any] | None = None
+    # Accepted S3 tracked pose (required for v2; unused for v1).
+    tracked_pose: pd.DataFrame | None = None
+    tracked_pose_path: Path | None = None
+    tracked_pose_sha256: str | None = None
+    s3_run_id: str | None = None
+    s3_run_dir: Path | None = None
+    s3_selection_mode: S3SelectionMode | None = None
 
 
 def resolve_automated_legacy_framewise_source(
@@ -99,8 +115,12 @@ def resolve_automated_legacy_framewise_source(
     pose_run_dir: Path | str | None = None,
     format_profile: str = LEGACY_FRAMEWISE_PROFILE_ID,
 ) -> LegacyFramewiseSource:
-    """Resolve S9 package + S8 states + lineage-pinned or explicit S4 pose."""
+    """Resolve S9 package + S8 states + pose authority for the format profile.
 
+    For ``legacy_framewise_v1``, ``pose_run_dir`` is an explicit S4 run.
+    For ``legacy_framewise_v2``, ``pose_run_dir`` is an explicit accepted S3 run
+    (used only when S6→S4→source_s3 lineage is unavailable or must match).
+    """
     root = Path(session_root).expanduser().resolve()
     package = validate_package_for_export(
         package_dir,
@@ -128,9 +148,10 @@ def resolve_reviewed_legacy_framewise_source(
     pose_run_dir: Path | str | None = None,
     format_profile: str = LEGACY_FRAMEWISE_PROFILE_ID,
 ) -> LegacyFramewiseSource:
-    """Resolve published S10 reviewed states + parent S9 package + S4 pose.
+    """Resolve published S10 reviewed states + parent S9 package + pose authority.
 
-    Draft / unpublished reviews are refused.
+    Draft / unpublished reviews are refused. Pose selection follows the same
+    v1=S4 / v2=accepted-S3 rules as the automated path.
     """
 
     root = Path(session_root).expanduser().resolve()
@@ -220,17 +241,7 @@ def _assemble_from_package(
         )
     states = pd.read_parquet(behavior_states_path)
 
-    require_independent_pose_timing = profile == LEGACY_FRAMEWISE_V2_PROFILE_ID
-    pose_resolved = _resolve_final_pose(
-        root=root,
-        package=package,
-        pose_run_dir=pose_run_dir,
-        sync_index=sync,
-        require_independent_pose_timing=require_independent_pose_timing,
-    )
-    pose = pose_resolved.table
-
-    warnings = list(pose_resolved.warnings)
+    warnings: list[str] = []
     if package.stale_warning:
         warnings.append(package.stale_warning)
 
@@ -238,16 +249,35 @@ def _assemble_from_package(
     prepared_sync_sha: str | None = None
     prepared_frame_idx: np.ndarray | None = None
     raw_decode_frame_idx: np.ndarray | None = None
+    prepared_time_sec: np.ndarray | None = None
     n_prepared_frames: int | None = None
     behavior_sync: SyncMap | None = None
     pose_sync: SyncMap | None = None
     pose_sync_audit: dict[str, Any] | None = None
     timing_contract: dict[str, Any] | None = None
+    tracked_pose: pd.DataFrame | None = None
+    tracked_pose_path: Path | None = None
+    tracked_pose_sha256: str | None = None
+    s3_run_id: str | None = None
+    s3_run_dir: Path | None = None
+    s3_selection_mode: S3SelectionMode | None = None
 
     if profile == LEGACY_FRAMEWISE_V2_PROFILE_ID:
+        s3_resolved = _resolve_accepted_s3_pose(
+            root=root,
+            package=package,
+            s3_run_dir=pose_run_dir,
+        )
+        warnings.extend(s3_resolved.warnings)
+        tracked_pose = s3_resolved.table
+        tracked_pose_path = s3_resolved.tracked_pose_path
+        tracked_pose_sha256 = s3_resolved.tracked_pose_sha256
+        s3_run_id = s3_resolved.s3_run_id
+        s3_run_dir = s3_resolved.s3_run_dir
+        s3_selection_mode = s3_resolved.selection_mode
         prepared_sync_path = _resolve_prepared_sync_path(
             root=root,
-            pose_run_dir=pose_resolved.pose_run_dir,
+            s3_prepared_sync_path=s3_resolved.prepared_sync_path,
         )
         try:
             prepared = load_prepared_sync_npz(prepared_sync_path)
@@ -258,58 +288,80 @@ def _assemble_from_package(
             ) from exc
         prepared_frame_idx = np.asarray(prepared.prepared_frame_idx, dtype=np.int64)
         raw_decode_frame_idx = np.asarray(prepared.raw_decode_frame_idx, dtype=np.int64)
+        prepared_time_sec = np.asarray(prepared.prepared_time_sec, dtype=np.float64)
         n_prepared_frames = int(prepared_frame_idx.shape[0])
         prepared_sync_sha = sha256_file(prepared_sync_path)
+        if s3_resolved.prepared_sync_path.resolve() != prepared_sync_path.resolve():
+            raise LegacyFramewiseSourceError(
+                "Accepted S3 prepared_sync path disagrees with the session "
+                f"authoritative S1 prepared_sync: {s3_resolved.prepared_sync_path} "
+                f"vs {prepared_sync_path}."
+            )
         try:
             behavior_sync = SyncMap.from_sync_index(sync)
         except Exception as exc:  # noqa: BLE001
             raise LegacyFramewiseEligibilityError(
                 "Behavioral SyncMap could not be built from package sync_index "
-                f"for independent prepared-frame timing: {exc}"
-            ) from exc
-        try:
-            pose_sync, pose_sync_audit = _build_independent_pose_sync(
-                prepared_sync_path=prepared_sync_path,
-                final_pose=pose,
-                package_run_id=package.package_run_id,
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise LegacyFramewiseEligibilityError(
-                "Authoritative independent S4 SyncMap could not be established "
-                f"from S1 prepared_sync + S4 dense timeline (fail-closed): {exc}"
+                f"for prepared→nearest-dense timing: {exc}"
             ) from exc
         timing_contract = {
             "row_domain": "s1_prepared_video_frames",
-            "behavior_timing_authority": "results_package_sync_index",
-            "pose_timing_authority": (
-                "s1_prepared_sync_nn_map_validated_against_s4_dense"
-            ),
-            "behavior_plateau_policy": PLATEAU_POLICY_LAST_IN_PLATEAU,
-            "pose_plateau_policy": PLATEAU_POLICY_LAST_IN_PLATEAU,
-            "plateau_policy_enum": PlateauPolicy.LAST_IN_PLATEAU.value,
-            "overlay_timing_semantics_reused": True,
+            "semantics_revision": LEGACY_FRAMEWISE_V2_SEMANTICS_REVISION,
+            "behavior_timing_authority": "results_package_sync_index_time_sec",
+            "pose_timing_authority": "accepted_s3_tracked_pose_prepared_frame_idx",
+            "behavior_mapping_policy": BEHAVIOR_MAPPING_PREPARED_NEAREST_DENSE,
+            "behavior_tie_break": BEHAVIOR_TIE_BREAK_EARLIER,
+            "behavior_extrapolation": False,
+            "pose_authority": "accepted_s3_tracked_pose",
+            "pose_resampling": False,
             "dense_indices_assumed_equal": False,
             "n_prepared_frames": n_prepared_frames,
             "behavior_n_dense": int(behavior_sync.n_dense),
-            "pose_n_dense": int(pose_sync.n_dense),
             "prepared_sync_path": str(prepared_sync_path),
             "prepared_sync_sha256": prepared_sync_sha,
             "notes": INDEXING_NOTES_V2,
         }
-
-    if profile == LEGACY_FRAMEWISE_V2_PROFILE_ID:
+        # V1-only S4 fields remain populated with placeholders so callers that
+        # read pose_run_* for display do not crash; V2 publication uses s3_*.
+        pose_resolved = _ResolvedPose(
+            table=pd.DataFrame(),
+            final_pose_path=tracked_pose_path,
+            final_pose_sha256=tracked_pose_sha256,
+            pose_run_id=s3_run_id,
+            pose_run_dir=s3_run_dir,
+            selection_mode="explicit",
+            alignment=dict(s3_resolved.alignment),
+            warnings=[],
+        )
         mapping_prov = {
             "authority": "s1_prepared_sync.raw_decode_frame_idx",
             "upstream": "s1_prepared_sync.npz",
             "indexing": "0_based_raw_decode_order",
             "prepared_indexing": "0_based_prepared_video",
-            "dense_indexing": "nullable_behavioral_last_in_plateau",
+            "dense_indexing": "nullable_behavioral_prepared_nearest_dense",
             "coordinate_domain": "prepared_video_pixels",
+            "coordinate_authority": "accepted_s3_tracked_pose",
             "frame_domain": "original_video_raw_decode_idx",
             "row_domain": "s1_prepared_video_frames",
+            "semantics_revision": LEGACY_FRAMEWISE_V2_SEMANTICS_REVISION,
             "notes": INDEXING_NOTES_V2,
         }
+        digests: dict[str, str | None] = {
+            "sync_index_sha256": sha256_file(sync_path),
+            "behavior_states_sha256": sha256_file(behavior_states_path),
+            "tracked_pose_sha256": tracked_pose_sha256,
+            "package_manifest_sha256": package.package_manifest_sha256,
+            "prepared_sync_sha256": prepared_sync_sha,
+        }
     else:
+        pose_resolved = _resolve_final_pose(
+            root=root,
+            package=package,
+            pose_run_dir=pose_run_dir,
+            sync_index=sync,
+            require_independent_pose_timing=False,
+        )
+        warnings.extend(pose_resolved.warnings)
         mapping_prov = {
             "authority": "results_package_sync_index.raw_decode_frame_idx",
             "upstream": "s1_prepared_sync.raw_decode_frame_idx[prepared_frame_idx]",
@@ -323,14 +375,13 @@ def _assemble_from_package(
                 "prepared-video pixel space (different domain from frame)."
             ),
         }
-
-    digests: dict[str, str | None] = {
-        "sync_index_sha256": sha256_file(sync_path),
-        "behavior_states_sha256": sha256_file(behavior_states_path),
-        "final_pose_sha256": pose_resolved.final_pose_sha256,
-        "package_manifest_sha256": package.package_manifest_sha256,
-        "prepared_sync_sha256": prepared_sync_sha,
-    }
+        digests = {
+            "sync_index_sha256": sha256_file(sync_path),
+            "behavior_states_sha256": sha256_file(behavior_states_path),
+            "final_pose_sha256": pose_resolved.final_pose_sha256,
+            "package_manifest_sha256": package.package_manifest_sha256,
+            "prepared_sync_sha256": None,
+        }
 
     return LegacyFramewiseSource(
         behavior_source_kind=behavior_source_kind,
@@ -345,7 +396,7 @@ def _assemble_from_package(
         behavior_states=states,
         behavior_states_path=behavior_states_path,
         behavior_states_sha256=str(digests["behavior_states_sha256"]),
-        final_pose=pose,
+        final_pose=pose_resolved.table,
         final_pose_path=pose_resolved.final_pose_path,
         final_pose_sha256=pose_resolved.final_pose_sha256,
         pose_run_id=pose_resolved.pose_run_id,
@@ -361,11 +412,18 @@ def _assemble_from_package(
         prepared_sync_sha256=prepared_sync_sha,
         prepared_frame_idx=prepared_frame_idx,
         raw_decode_frame_idx=raw_decode_frame_idx,
+        prepared_time_sec=prepared_time_sec,
         n_prepared_frames=n_prepared_frames,
         behavior_sync=behavior_sync,
         pose_sync=pose_sync,
         pose_sync_build_audit=pose_sync_audit,
         timing_contract=timing_contract,
+        tracked_pose=tracked_pose,
+        tracked_pose_path=tracked_pose_path,
+        tracked_pose_sha256=tracked_pose_sha256,
+        s3_run_id=s3_run_id,
+        s3_run_dir=s3_run_dir,
+        s3_selection_mode=s3_selection_mode,
     )
 
 
@@ -561,7 +619,7 @@ def inspect_package_pose_lineage(
 def list_pose_run_candidates(
     session_root: Path | str,
 ) -> tuple[PoseRunCandidate, ...]:
-    """List completed S4 run identities for explicit selection.
+    """List completed S4 run identities for explicit V1 selection.
 
     Candidates are ordered newest-first for display only. Callers must never
     auto-select the newest run when lineage is missing.
@@ -588,6 +646,113 @@ def list_pose_run_candidates(
     return tuple(out)
 
 
+@dataclass(frozen=True, slots=True)
+class S3LineageInfo:
+    """Whether S6→S4→accepted-S3 lineage is available for a package."""
+
+    available: bool
+    run_id: str | None
+    run_dir: Path | None
+    tracked_pose_sha256: str | None
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class S3RunCandidate:
+    """One accepted S3 run identity offered for explicit GUI selection."""
+
+    run_id: str
+    run_dir: Path
+    acceptance_state: str
+    label: str
+
+
+def inspect_package_s3_lineage(
+    package_dir: Path | str | ExportSourcePackage,
+) -> S3LineageInfo:
+    """Return accepted-S3 lineage availability for V2 (never auto-selects newest)."""
+
+    if isinstance(package_dir, ExportSourcePackage):
+        package = package_dir
+    else:
+        pkg_path = Path(package_dir).expanduser().resolve()
+        package = ExportSourcePackage(
+            package_dir=pkg_path,
+            package_run_id=pkg_path.name,
+            package_status="unknown",
+            session_root=None,
+            run_meta=_read_json_object(pkg_path / "run_meta.json"),
+            package_manifest=_read_json_object(pkg_path / "package_manifest.json"),
+            behavior_bouts=pd.DataFrame(),
+            behavior_bouts_sha256="",
+            sync_index_sha256="",
+            package_manifest_sha256="",
+            source_s8_run_id=None,
+            source_s8_run_dir=None,
+            source_s7_run_id=None,
+            source_s6_run_id=None,
+            source_video_path=None,
+            source_video_kind="",
+            source_video_fingerprint=None,
+            source_video_sha256=None,
+            source_video_verification_strength=None,
+            currently_eligible=False,
+            stale_warning=None,
+            video_probe=None,
+        )
+
+    lineage = _lineage_s3_from_package(package)
+    if lineage is None:
+        return S3LineageInfo(
+            available=False,
+            run_id=None,
+            run_dir=None,
+            tracked_pose_sha256=None,
+            reason=(
+                "S6→S4→source_s3 lineage pin for accepted S3 tracked_pose is "
+                "unavailable. Select an accepted S3 run explicitly; automatic "
+                "latest-S3 fallback is disabled."
+            ),
+        )
+    return S3LineageInfo(
+        available=True,
+        run_id=str(lineage["run_id"]),
+        run_dir=Path(lineage["run_dir"]),
+        tracked_pose_sha256=(
+            str(lineage["tracked_pose_sha256"])
+            if lineage.get("tracked_pose_sha256")
+            else None
+        ),
+        reason=f"Using S6→S4 lineage-pinned accepted S3 run {lineage['run_id']}.",
+    )
+
+
+def list_accepted_s3_run_candidates(
+    session_root: Path | str,
+) -> tuple[S3RunCandidate, ...]:
+    """List validated accepted S3 runs for explicit V2 selection.
+
+    Newest-first for display only. Callers must never auto-select the newest
+    run when lineage is missing.
+    """
+
+    try:
+        accepted = list_accepted_s3_runs(session_root)
+    except PoseFinalizationError:
+        return ()
+    out: list[S3RunCandidate] = []
+    for run in accepted:
+        out.append(
+            S3RunCandidate(
+                run_id=run.run_id,
+                run_dir=run.run_dir,
+                acceptance_state=run.acceptance_state,
+                label=f"{run.run_id} · accepted",
+            )
+        )
+    return tuple(out)
+
+
 def _read_json_object(path: Path) -> dict[str, Any]:
     if not path.is_file():
         return {}
@@ -596,6 +761,51 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _lineage_s3_from_package(package: ExportSourcePackage) -> dict[str, Any] | None:
+    """Resolve S6→S4→source_s3 pin for accepted tracked pose."""
+
+    s4 = _lineage_s4_from_package(package)
+    if s4 is None:
+        return None
+    s4_dir = Path(s4["run_dir"]).expanduser().resolve()
+    meta_path = s4_dir / RUN_META_FILENAME
+    if not meta_path.is_file():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    source_s3 = meta.get("source_s3") or {}
+    if not isinstance(source_s3, dict) or not source_s3.get("run_dir"):
+        return None
+    run_dir = Path(str(source_s3["run_dir"])).expanduser().resolve()
+    tracked = source_s3.get("tracked_pose_parquet") or source_s3.get("tracked_pose")
+    return {
+        "run_dir": run_dir,
+        "run_id": str(source_s3.get("run_id") or run_dir.name),
+        "tracked_pose": (
+            Path(str(tracked)).expanduser().resolve() if tracked else None
+        ),
+        "tracked_pose_sha256": (
+            str(source_s3["tracked_pose_sha256"])
+            if source_s3.get("tracked_pose_sha256")
+            else None
+        ),
+        "prepared_sync": (
+            Path(str(source_s3["prepared_sync"])).expanduser().resolve()
+            if source_s3.get("prepared_sync")
+            else None
+        ),
+        "session_root": (
+            Path(str(source_s3["session_root"])).expanduser().resolve()
+            if source_s3.get("session_root")
+            else None
+        ),
+        "s4_run_dir": s4_dir,
+        "s4_run_id": str(s4.get("run_id") or s4_dir.name),
+    }
 
 
 def _lineage_s4_from_package(package: ExportSourcePackage) -> dict[str, Any] | None:
@@ -727,27 +937,232 @@ def _load_and_validate_pose_run(
     )
 
 
-def _resolve_prepared_sync_path(*, root: Path, pose_run_dir: Path | None) -> Path:
+@dataclass(frozen=True, slots=True)
+class _ResolvedS3Pose:
+    table: pd.DataFrame
+    tracked_pose_path: Path
+    tracked_pose_sha256: str
+    s3_run_id: str
+    s3_run_dir: Path
+    prepared_sync_path: Path
+    selection_mode: S3SelectionMode
+    alignment: dict[str, Any]
+    warnings: list[str]
+
+
+def _resolve_accepted_s3_pose(
+    *,
+    root: Path,
+    package: ExportSourcePackage,
+    s3_run_dir: Path | str | None,
+) -> _ResolvedS3Pose:
+    """Resolve accepted S3 tracked_pose from exact lineage, else explicit pin.
+
+    Never silently substitutes the newest accepted S3 run.
+    """
+
+    lineage = _lineage_s3_from_package(package)
+    explicit_dir = (
+        Path(s3_run_dir).expanduser().resolve() if s3_run_dir is not None else None
+    )
+
+    if lineage is not None and explicit_dir is not None:
+        lineage_dir = Path(lineage["run_dir"]).expanduser().resolve()
+        if explicit_dir != lineage_dir:
+            raise LegacyFramewiseSourceError(
+                "Explicit s3/pose_run_dir disagrees with S6→S4 lineage-pinned "
+                f"accepted S3: {explicit_dir} vs {lineage_dir}. Refusing "
+                "ambiguous pose source."
+            )
+
+    if lineage is not None:
+        return _load_and_validate_accepted_s3(
+            root=root,
+            run_dir=Path(lineage["run_dir"]),
+            expected_path=lineage.get("tracked_pose"),
+            expected_sha256=lineage.get("tracked_pose_sha256"),
+            expected_run_id=lineage.get("run_id"),
+            selection_mode="lineage_s4_source_s3",
+        )
+
+    if explicit_dir is None:
+        raise LegacyFramewiseEligibilityError(
+            "S6→S4→source_s3 lineage pin for accepted S3 tracked_pose is "
+            "unavailable. Provide an explicit accepted S3 run directory after "
+            "validating session identity, acceptance state, tracked-pose digest, "
+            "prepared-video compatibility, and required track/node schema. "
+            "Automatic latest-S3 fallback is disabled."
+        )
+
+    return _load_and_validate_accepted_s3(
+        root=root,
+        run_dir=explicit_dir,
+        expected_path=None,
+        expected_sha256=None,
+        expected_run_id=None,
+        selection_mode="explicit",
+    )
+
+
+def _load_and_validate_accepted_s3(
+    *,
+    root: Path,
+    run_dir: Path,
+    expected_path: Path | None,
+    expected_sha256: str | None,
+    expected_run_id: str | None,
+    selection_mode: S3SelectionMode,
+) -> _ResolvedS3Pose:
+    warnings: list[str] = []
+    try:
+        accepted = validate_accepted_s3_run(run_dir)
+    except PoseFinalizationError as exc:
+        raise LegacyFramewiseSourceError(
+            f"Selected S3 run is not eligible accepted tracked pose for export: {exc}"
+        ) from exc
+
+    if accepted.session_root != root:
+        raise LegacyFramewiseSourceError(
+            "Selected accepted S3 session_root does not match the export session: "
+            f"{accepted.session_root} vs {root}"
+        )
+
+    pose_path = accepted.tracked_pose_path
+    if expected_path is not None:
+        expected_resolved = Path(expected_path).expanduser().resolve()
+        if not expected_resolved.is_file():
+            raise LegacyFramewiseEligibilityError(
+                f"Lineage-pinned tracked_pose missing on disk: {expected_resolved}"
+            )
+        if expected_resolved != pose_path:
+            raise LegacyFramewiseSourceError(
+                "Lineage tracked_pose path does not match the accepted S3 artifact: "
+                f"{expected_resolved} vs {pose_path}"
+            )
+
+    digest = accepted.tracked_pose_sha256
+    if expected_sha256 is not None and digest.lower() != str(expected_sha256).lower():
+        raise LegacyFramewiseSourceError(
+            "Selected tracked_pose SHA256 does not match the lineage pin: "
+            f"{digest} vs {expected_sha256}"
+        )
+
+    run_id = str(expected_run_id or accepted.run_id or run_dir.name)
+    try:
+        table = load_tracked_pose_table(pose_path)
+    except PoseFinalizationError as exc:
+        raise LegacyFramewiseSourceError(str(exc)) from exc
+
+    alignment = _validate_tracked_pose_schema(table)
+    alignment["acceptance_state"] = accepted.acceptance_state
+    alignment["selection_mode"] = selection_mode
+    alignment["prepared_sync_path"] = str(accepted.prepared_sync_path)
+    return _ResolvedS3Pose(
+        table=table,
+        tracked_pose_path=pose_path,
+        tracked_pose_sha256=digest,
+        s3_run_id=run_id,
+        s3_run_dir=accepted.run_dir,
+        prepared_sync_path=accepted.prepared_sync_path,
+        selection_mode=selection_mode,
+        alignment=alignment,
+        warnings=warnings,
+    )
+
+
+def _validate_tracked_pose_schema(tracked_pose: pd.DataFrame) -> dict[str, Any]:
+    """Validate accepted S3 schema/tracks/nodes for legacy CSV export."""
+
+    required = {"track", "node", "x", "y"}
+    missing = sorted(required - set(tracked_pose.columns))
+    if missing:
+        raise LegacyFramewiseSourceError(
+            f"tracked_pose missing required columns: {missing}"
+        )
+    frame_col = None
+    for name in ("prepared_frame_idx", "frame_idx", "frame"):
+        if name in tracked_pose.columns:
+            frame_col = name
+            break
+    if frame_col is None:
+        raise LegacyFramewiseSourceError(
+            "tracked_pose is missing prepared_frame_idx/frame_idx/frame."
+        )
+
+    frames = pd.to_numeric(tracked_pose[frame_col], errors="coerce")
+    if frames.isna().any():
+        raise LegacyFramewiseSourceError(
+            "tracked_pose has non-numeric prepared-frame identities."
+        )
+    frame_vals = frames.astype(np.int64)
+    frame_set = {int(v) for v in frame_vals.unique().tolist()}
+    if not frame_set:
+        raise LegacyFramewiseSourceError("tracked_pose has no prepared-frame identities.")
+
+    nodes = set(str(v) for v in tracked_pose["node"].astype(str).unique().tolist())
+    tracks = set()
+    for value in tracked_pose["track"].tolist():
+        parsed = _parse_track_label(value)
+        if parsed is not None:
+            tracks.add(parsed)
+    required_nodes = {node for node, _track in LEGACY_POSE_NODE_TRACKS}
+    missing_nodes = sorted(required_nodes - nodes)
+    if missing_nodes:
+        raise LegacyFramewiseSourceError(
+            f"tracked_pose lacks required pose nodes for legacy export: {missing_nodes}"
+        )
+    if not {0, 1}.issubset(tracks):
+        raise LegacyFramewiseSourceError(
+            f"tracked_pose must include tracks 0 and 1; found {sorted(tracks)}"
+        )
+    return {
+        "n_pose_prepared_frames": len(frame_set),
+        "prepared_frame_min": int(min(frame_set)),
+        "prepared_frame_max": int(max(frame_set)),
+        "frame_column": frame_col,
+        "nodes": sorted(nodes),
+        "tracks": sorted(tracks),
+        "schema_ok": True,
+        "timing_mode": "prepared_frame_native_s3",
+    }
+
+
+def _parse_track_label(value: object) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not np.isfinite(value) or not float(value).is_integer():
+            return None
+        return int(value)
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return None
+    if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
+        return int(text)
+    lowered = text.lower()
+    if lowered.startswith("track_"):
+        suffix = text.split("_", maxsplit=1)[1]
+        if suffix.isdigit():
+            return int(suffix)
+    return None
+
+
+def _resolve_prepared_sync_path(
+    *,
+    root: Path,
+    s3_prepared_sync_path: Path | None = None,
+) -> Path:
     """Resolve authoritative S1 prepared_sync for v2 (fail closed)."""
 
     candidate = (root / "preprocess" / "prepared_sync.npz").resolve()
     if candidate.is_file():
         return candidate
-    if pose_run_dir is not None:
-        meta_path = pose_run_dir / RUN_META_FILENAME
-        if meta_path.is_file():
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            source_s3 = meta.get("source_s3") or {}
-            recorded = source_s3.get("prepared_sync")
-            if isinstance(recorded, str) and recorded.strip():
-                path = Path(recorded).expanduser().resolve()
-                if path.is_file():
-                    return path
-            session = source_s3.get("session_root")
-            if isinstance(session, str) and session.strip():
-                alt = Path(session).expanduser() / "preprocess" / "prepared_sync.npz"
-                if alt.is_file():
-                    return alt.resolve()
+    if s3_prepared_sync_path is not None:
+        path = Path(s3_prepared_sync_path).expanduser().resolve()
+        if path.is_file():
+            return path
     raise LegacyFramewiseEligibilityError(
         "Authoritative S1 prepared_sync.npz missing; legacy_framewise_v2 cannot "
         f"establish the prepared-video frame universe (looked for {candidate})."

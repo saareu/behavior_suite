@@ -372,7 +372,7 @@ class ResultsPackagingPage(QWidget):
         self.export_post_context_spin.valueChanged.connect(self._export_settings_changed)
         self.export_format_combo = QComboBox()
         self.export_format_combo.addItem(
-            "legacy_framewise_v2 (default; prepared-frame + independent pose timing)",
+            "legacy_framewise_v2 (default; prepared-frame + accepted S3 pose)",
             "legacy_framewise_v2",
         )
         self.export_format_combo.addItem(
@@ -398,7 +398,7 @@ class ResultsPackagingPage(QWidget):
         self.export_pose_combo.currentIndexChanged.connect(
             self._export_settings_changed
         )
-        self.export_pose_row_label = QLabel("Explicit S4 pose run")
+        self.export_pose_row_label = QLabel("Explicit pose run")
         self.export_pose_row_label.setVisible(False)
         export_form.addRow("CSV format profile", self.export_format_combo)
         export_form.addRow("Pose source", self.export_pose_status_label)
@@ -1186,12 +1186,21 @@ class ResultsPackagingPage(QWidget):
         show_picker = bool(
             pose_state.format_is_legacy and pose_state.requires_explicit_pose
         )
+        profile = str(settings.format_profile or "legacy_framewise_v2")
+        if profile == "legacy_framewise_v2":
+            self.export_pose_row_label.setText("Explicit accepted S3 pose run")
+            placeholder = "(select accepted S3 run…)"
+            empty_suffix = " No accepted S3 runs are available in this session."
+        else:
+            self.export_pose_row_label.setText("Explicit S4 pose run")
+            placeholder = "(select completed S4 run…)"
+            empty_suffix = " No completed S4 runs are available in this session."
         self.export_pose_combo.setVisible(show_picker)
         self.export_pose_row_label.setVisible(show_picker)
         self.export_pose_combo.blockSignals(True)
         self.export_pose_combo.clear()
         if show_picker:
-            self.export_pose_combo.addItem("(select completed S4 run…)", None)
+            self.export_pose_combo.addItem(placeholder, None)
             selected_index = 0
             selected = pose_state.selected_pose_run_dir
             for i, candidate in enumerate(pose_state.candidates, start=1):
@@ -1203,8 +1212,7 @@ class ResultsPackagingPage(QWidget):
             self.export_pose_combo.setCurrentIndex(selected_index)
             if not pose_state.candidates:
                 self.export_pose_status_label.setText(
-                    pose_state.reason
-                    + " No completed S4 runs are available in this session."
+                    pose_state.reason + empty_suffix
                 )
         self.export_pose_combo.blockSignals(False)
 

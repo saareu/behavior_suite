@@ -26,7 +26,10 @@ from results_packaging.legacy_framewise_csv.builder_v2 import (
     build_legacy_framewise_v2_table,
 )
 from results_packaging.legacy_framewise_csv.contracts import (
+    BEHAVIOR_MAPPING_PREPARED_NEAREST_DENSE,
+    BEHAVIOR_TIE_BREAK_EARLIER,
     COORDINATE_FORMAT_POLICY,
+    COORDINATE_FORMAT_POLICY_V2,
     COORDINATE_SPACE,
     DENSE_FRAME_INDEXING,
     EXPORT_MANIFEST_SCHEMA_VERSION,
@@ -41,8 +44,8 @@ from results_packaging.legacy_framewise_csv.contracts import (
     LEGACY_FRAMEWISE_V2_CSV_FILENAME,
     LEGACY_FRAMEWISE_V2_PROFILE_ID,
     LEGACY_FRAMEWISE_V2_PROFILE_VERSION,
+    LEGACY_FRAMEWISE_V2_SEMANTICS_REVISION,
     ORIGINAL_FRAME_INDEXING,
-    PLATEAU_POLICY_LAST_IN_PLATEAU,
     PREPARED_FRAME_INDEXING,
     LegacyFramewiseError,
     is_legacy_framewise_profile,
@@ -406,14 +409,19 @@ def _publish_v2(
     if (
         source.prepared_frame_idx is None
         or source.raw_decode_frame_idx is None
+        or source.prepared_time_sec is None
         or source.behavior_sync is None
-        or source.pose_sync is None
+        or source.tracked_pose is None
+        or source.tracked_pose_path is None
+        or source.tracked_pose_sha256 is None
+        or source.s3_run_id is None
+        or source.s3_run_dir is None
         or source.prepared_sync_path is None
         or source.n_prepared_frames is None
     ):
         raise LegacyFramewiseError(
-            "legacy_framewise_v2 source is missing prepared-frame timing authorities "
-            "(prepared_sync / behavior SyncMap / independent S4 SyncMap)."
+            "legacy_framewise_v2 source is missing prepared-frame authorities "
+            "(prepared_sync / behavior SyncMap / accepted S3 tracked_pose)."
         )
 
     root = source.session_root
@@ -441,6 +449,7 @@ def _publish_v2(
         **settings_snapshot,
         "format_profile": LEGACY_FRAMEWISE_V2_PROFILE_ID,
         "format_profile_version": LEGACY_FRAMEWISE_V2_PROFILE_VERSION,
+        "semantics_revision": LEGACY_FRAMEWISE_V2_SEMANTICS_REVISION,
         "timing_contract": dict(source.timing_contract or {}),
         "behavior_source_kind": source.behavior_source_kind,
         "source_package_run_id": source.package_run_id,
@@ -451,9 +460,11 @@ def _publish_v2(
         ),
         "export_job_id": job_id,
         "pinned_digests": dict(source.digests),
-        "pose_run_id": source.pose_run_id,
-        "pose_path": str(source.final_pose_path),
-        "pose_selection_mode": source.pose_selection_mode,
+        "s3_run_id": source.s3_run_id,
+        "s3_run_dir": str(source.s3_run_dir),
+        "tracked_pose_path": str(source.tracked_pose_path),
+        "tracked_pose_sha256": source.tracked_pose_sha256,
+        "s3_selection_mode": source.s3_selection_mode,
         "pose_alignment": dict(source.pose_alignment),
         "original_frame_mapping_provenance": dict(
             source.original_frame_mapping_provenance
@@ -498,10 +509,11 @@ def _publish_v2(
         built = build_legacy_framewise_v2_table(
             prepared_frame_idx=source.prepared_frame_idx,
             raw_decode_frame_idx=source.raw_decode_frame_idx,
+            prepared_time_sec=source.prepared_time_sec,
             behavior_sync=source.behavior_sync,
-            pose_sync=source.pose_sync,
             behavior_states=source.behavior_states,
-            final_pose=source.final_pose,
+            tracked_pose=source.tracked_pose,
+            s3_run_id=source.s3_run_id,
         )
         warnings.extend(built.warnings)
         build_diag = {
@@ -585,30 +597,44 @@ def _publish_v2(
         "sha256": alignment_sha,
         "n_rows": n_rows if alignment_written else 0,
         "columns": list(FRAME_ALIGNMENT_COLUMNS),
+        "schema_migration": {
+            "from_historical_v2_columns": [
+                "pose_dense_frame_idx",
+                "pose_coverage",
+            ],
+            "to_columns": list(FRAME_ALIGNMENT_COLUMNS),
+            "note": (
+                "Historical V2 sidecars remain immutable. New jobs use "
+                "s3_pose_available instead of S4 SyncMap pose fields."
+            ),
+        },
         "mapping_authorities": {
             "prepared_frames": "s1_prepared_sync",
             "raw_decode_frame_idx": "s1_prepared_sync.raw_decode_frame_idx",
             "behavior_dense_frame_idx": (
-                "results_package_sync_index + LAST_IN_PLATEAU"
+                "results_package_sync_index time_sec + prepared→nearest-dense"
             ),
-            "pose_dense_frame_idx": (
-                "s1_prepared_sync_nn_map_validated_against_s4_dense + LAST_IN_PLATEAU"
+            "s3_pose_available": (
+                "accepted_s3_tracked_pose prepared_frame_idx presence"
             ),
         },
         "timing_policies": {
-            "behavior_plateau_policy": PLATEAU_POLICY_LAST_IN_PLATEAU,
-            "pose_plateau_policy": PLATEAU_POLICY_LAST_IN_PLATEAU,
-            "overlay_timing_semantics_reused": True,
+            "behavior_mapping_policy": BEHAVIOR_MAPPING_PREPARED_NEAREST_DENSE,
+            "behavior_tie_break": BEHAVIOR_TIE_BREAK_EARLIER,
+            "behavior_extrapolation": False,
+            "pose_authority": "accepted_s3_tracked_pose",
+            "pose_resampling": False,
         },
         "source_provenance": {
             "prepared_sync_path": str(source.prepared_sync_path),
             "prepared_sync_sha256": source.prepared_sync_sha256,
             "behavior_sync_index_path": str(source.sync_index_path),
             "behavior_sync_index_sha256": source.sync_index_sha256,
-            "pose_run_id": source.pose_run_id,
-            "pose_path": str(source.final_pose_path),
-            "pose_sha256": source.final_pose_sha256,
-            "pose_sync_build_audit": dict(source.pose_sync_build_audit or {}),
+            "s3_run_id": source.s3_run_id,
+            "s3_run_dir": str(source.s3_run_dir),
+            "tracked_pose_path": str(source.tracked_pose_path),
+            "tracked_pose_sha256": source.tracked_pose_sha256,
+            "s3_selection_mode": source.s3_selection_mode,
             "timing_contract": dict(source.timing_contract or {}),
         },
     }
@@ -632,6 +658,7 @@ def _publish_v2(
         "export_job_id": job_id,
         "format_profile": LEGACY_FRAMEWISE_V2_PROFILE_ID,
         "format_profile_version": LEGACY_FRAMEWISE_V2_PROFILE_VERSION,
+        "semantics_revision": LEGACY_FRAMEWISE_V2_SEMANTICS_REVISION,
         "created_at": created_at,
         "completed_at": completed_at,
         "status": status,
@@ -644,26 +671,34 @@ def _publish_v2(
         ),
         "timing_contract": dict(source.timing_contract or {}),
         "pose_source": {
-            "run_id": source.pose_run_id,
-            "run_dir": str(source.pose_run_dir) if source.pose_run_dir else None,
-            "path": str(source.final_pose_path),
-            "sha256": source.final_pose_sha256,
-            "selection_mode": source.pose_selection_mode,
+            "authority": "accepted_s3_tracked_pose",
+            "run_id": source.s3_run_id,
+            "run_dir": str(source.s3_run_dir),
+            "path": str(source.tracked_pose_path),
+            "sha256": source.tracked_pose_sha256,
+            "selection_mode": source.s3_selection_mode,
             "alignment": dict(source.pose_alignment),
             "coordinate_space": COORDINATE_SPACE,
-            "coordinate_format_policy": COORDINATE_FORMAT_POLICY,
+            "coordinate_format_policy": COORDINATE_FORMAT_POLICY_V2,
             "rounding_scope": "legacy_framewise_csv_export_serialization_only",
             "scientific_pose_unchanged": True,
-            "independent_timing_authority": (
-                "s1_prepared_sync_nn_map_validated_against_s4_dense"
-            ),
+            "not_s4_final_pose": True,
+            "prepared_frame_join": "prepared_frame_idx",
+            "resampling": False,
+        },
+        "behavior_mapping": {
+            "policy": BEHAVIOR_MAPPING_PREPARED_NEAREST_DENSE,
+            "tie_break": BEHAVIOR_TIE_BREAK_EARLIER,
+            "extrapolation": False,
+            "repeated_dense_selections_allowed": True,
+            "source_temporal_coverage": "inclusive_dense_time_bounds",
         },
         "original_frame_mapping": {
             **source.original_frame_mapping_provenance,
             "indexing": ORIGINAL_FRAME_INDEXING,
             "prepared_indexing": PREPARED_FRAME_INDEXING,
             "dense_indexing": (
-                "nullable_behavioral_last_in_plateau_dense_sample_idx"
+                "nullable_behavioral_prepared_nearest_dense_sample_idx"
             ),
             "notes": INDEXING_NOTES_V2,
             "prepared_sync_path": str(source.prepared_sync_path),
@@ -726,7 +761,9 @@ def _publish_v2(
                 f"n_prepared_frames: {source.n_prepared_frames}",
                 f"source_package_run_id: {source.package_run_id}",
                 f"source_review_run_id: {source.review_run_id}",
-                f"pose_run_id: {source.pose_run_id}",
+                f"semantics_revision: {LEGACY_FRAMEWISE_V2_SEMANTICS_REVISION}",
+                f"s3_run_id: {source.s3_run_id}",
+                f"tracked_pose_sha256: {source.tracked_pose_sha256}",
                 f"frame_alignment: {LEGACY_FRAMEWISE_V2_ALIGNMENT_FILENAME}",
                 f"error: {error_message}",
             ]
@@ -751,6 +788,7 @@ def _publish_v2(
         error_message=error_message,
         diagnostics={
             "format_profile": LEGACY_FRAMEWISE_V2_PROFILE_ID,
+            "semantics_revision": LEGACY_FRAMEWISE_V2_SEMANTICS_REVISION,
             "behavior_source_kind": source.behavior_source_kind,
             "csv_written": csv_written,
             "alignment_written": alignment_written,

@@ -1762,7 +1762,10 @@ class BehavioralReviewController:
         )
 
     def legacy_csv_pose_ui_state(self, *, pose_run_dir: str | None = None):
-        """Lineage vs explicit S4 picker state for published-S10 CSV export."""
+        """Lineage vs explicit pose picker state for published-S10 CSV export.
+
+        Default V2 profile resolves accepted S3 lineage; V1 uses S4.
+        """
 
         from results_packaging.media_csv_export.contracts import (
             DEFAULT_CSV_FORMAT_PROFILE,
@@ -1806,7 +1809,10 @@ class BehavioralReviewController:
     def resolve_pose_run_dir_for_legacy_csv(
         self, *, pose_run_dir: Path | str | None
     ) -> Path | None:
-        """Validate explicit S4 selection for S10 CSV, or None when lineage pins."""
+        """Validate explicit pose selection for S10 CSV, or None when lineage pins.
+
+        Default V2 expects an accepted S3 run; V1 expects a completed S4 run.
+        """
 
         pose_state = self.legacy_csv_pose_ui_state(
             pose_run_dir=str(pose_run_dir) if pose_run_dir is not None else None
@@ -1821,8 +1827,8 @@ class BehavioralReviewController:
                 )
                 if lineage_dir is not None and selected != lineage_dir:
                     raise BehavioralReviewUiError(
-                        "Explicit S4 selection disagrees with the S6 lineage-pinned "
-                        f"S4 run ({pose_state.lineage_run_id}). Clear the manual "
+                        "Explicit pose selection disagrees with the lineage-pinned "
+                        f"run ({pose_state.lineage_run_id}). Clear the manual "
                         "selection or choose the lineage-pinned run."
                     )
             return None
@@ -1830,14 +1836,14 @@ class BehavioralReviewController:
             return None
         if not pose_state.candidates:
             raise BehavioralReviewUiError(
-                "S6→S4 lineage is unavailable and no completed S4 pose runs were "
-                "found in this session. Run Subsystem 4 first."
+                "Pose lineage is unavailable and no eligible accepted S3 "
+                "(V2) / completed S4 (V1) pose runs were found in this session."
             )
         if pose_run_dir is None or not str(pose_run_dir).strip():
             raise BehavioralReviewUiError(
-                "S6→S4 lineage is unavailable. Select a completed S4 pose run "
-                "explicitly before exporting legacy framewise CSV "
-                "(automatic newest-S4 selection is disabled)."
+                "Pose lineage is unavailable. Select an accepted S3 tracked-pose "
+                "run explicitly before exporting legacy_framewise_v2 CSV "
+                "(automatic newest-S3 selection is disabled)."
             )
         return Path(str(pose_run_dir)).expanduser().resolve()
 

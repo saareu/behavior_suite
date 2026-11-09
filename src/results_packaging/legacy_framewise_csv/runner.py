@@ -39,7 +39,9 @@ class LegacyFramewiseExportRequest:
     export_job_id: str | None = None
     output_root: Path | None = None
     allow_stale_source: bool = False
-    # Required only when S6→S4 lineage is unavailable; ignored when it matches lineage.
+    # V1: explicit S4 run when S6→S4 lineage unavailable.
+    # V2: explicit accepted S3 run when S6→S4→source_s3 lineage unavailable.
+    # Ignored when it matches the lineage pin; never auto-selects newest.
     pose_run_dir: Path | None = None
 
 

@@ -2,8 +2,13 @@
 
 Profiles ``legacy_framewise_v1`` (dense-row domain) and ``legacy_framewise_v2``
 (prepared-frame domain) share the laboratory 23-column header and formatting.
-Scientific values come from pinned S8/S10 states, S9/S4 SyncMaps, and S4
-``final_pose`` — this module never mutates upstream artifacts.
+
+V1 scientific values come from pinned S8/S10 states, S9 SyncMap, and S4
+``final_pose``.
+
+V2 scientific values come from S1 prepared-video frames, accepted S3
+``tracked_pose`` (prepared-frame coordinates), and S8/S10 behavioral evidence
+mapped prepared→nearest-dense. This module never mutates upstream artifacts.
 """
 
 from __future__ import annotations
@@ -21,6 +26,9 @@ from results_packaging.media_csv_export.contracts import (  # noqa: F401
 
 LEGACY_FRAMEWISE_PROFILE_VERSION = "1"
 LEGACY_FRAMEWISE_V2_PROFILE_VERSION = "2"
+# Distinguishes historical S4-based V2 jobs from prepared-frame S3 pose exports.
+# Historical jobs remain immutable; new jobs record this revision in metadata.
+LEGACY_FRAMEWISE_V2_SEMANTICS_REVISION = "prepared_s3_pose_nearest_behavior_v1"
 LEGACY_FRAMEWISE_CSV_FILENAME = "legacy_framewise_v1.csv"
 LEGACY_FRAMEWISE_V2_CSV_FILENAME = "legacy_framewise_v2.csv"
 LEGACY_FRAMEWISE_V2_ALIGNMENT_FILENAME = (
@@ -57,13 +65,16 @@ LEGACY_FRAMEWISE_COLUMNS: tuple[str, ...] = (
 )
 
 # Sidecar columns (not part of the laboratory CSV).
+# Schema migration from historical V2 (S4 SyncMap) sidecars:
+#   removed: pose_dense_frame_idx, pose_coverage
+#   added:   s3_pose_available
+# Historical export jobs are never rewritten; only new jobs use this schema.
 FRAME_ALIGNMENT_COLUMNS: tuple[str, ...] = (
     "prepared_frame_idx",
     "raw_decode_frame_idx",
     "behavior_dense_frame_idx",
-    "pose_dense_frame_idx",
     "behavior_coverage",
-    "pose_coverage",
+    "s3_pose_available",
 )
 
 # Pose nodes/tracks emitted by the reference schema (no headstage_1 columns).
@@ -92,10 +103,21 @@ COORDINATE_FORMAT_POLICY = (
     "rounding_exclusive_to_legacy_framewise_csv_serialization; "
     "does_not_mutate_s4_final_pose"
 )
+COORDINATE_FORMAT_POLICY_V2 = (
+    "round_half_even_to_integer_then_one_decimal; "
+    "empty_field_for_missing; "
+    "reference_.0_is_formatting_convention_not_source_dtype; "
+    "rounding_exclusive_to_legacy_framewise_csv_serialization; "
+    "coordinates_from_accepted_s3_tracked_pose_prepared_video_pixels; "
+    "does_not_mutate_accepted_s3_tracked_pose; "
+    "does_not_use_s4_final_pose"
+)
 ORIGINAL_FRAME_INDEXING = "0_based_raw_decode_frame_idx"
 DENSE_FRAME_INDEXING = "0_based_contiguous_dense_sample_idx"
 PREPARED_FRAME_INDEXING = "0_based_s1_prepared_video_frame_idx"
 PLATEAU_POLICY_LAST_IN_PLATEAU = "last_in_plateau"
+BEHAVIOR_MAPPING_PREPARED_NEAREST_DENSE = "prepared_to_nearest_dense"
+BEHAVIOR_TIE_BREAK_EARLIER = "earlier_dense_sample_on_tie"
 
 # Indexing notes recorded in manifests (not CSV columns).
 INDEXING_NOTES = (
@@ -108,11 +130,13 @@ INDEXING_NOTES_V2 = (
     "Row domain = S1 prepared-video frames (prepared_frame_idx 0..n-1). "
     "frame = S1 prepared_sync.raw_decode_frame_idx for that prepared frame "
     "(0-based original-video decode index). dense_frame_idx = behavioral dense "
-    "sample selected via package SyncMap + LAST_IN_PLATEAU (nullable / "
-    "noncontiguous / repeated allowed). Pose coordinates come from an "
-    "independently resolved S4 SyncMap + LAST_IN_PLATEAU sample. Missing "
-    "coverage retains the prepared-frame row with empty fields from that "
-    "source; never interpolate or invent labels/coordinates."
+    "sample selected by prepared→nearest-dense on authoritative timestamps "
+    "(earlier sample wins exact ties; nullable; noncontiguous; repeated dense "
+    "selections allowed when prepared FPS exceeds dense FPS). Pose coordinates "
+    "come from accepted S3 tracked_pose at the same prepared_frame_idx "
+    "(prepared-video pixels; not S4 finalized pose). Missing coverage retains "
+    "the prepared-frame row with empty fields from that source; never "
+    "interpolate, forward-fill, or invent labels/coordinates."
 )
 
 
