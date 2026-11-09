@@ -7,8 +7,8 @@ from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
-import cv2
 import numpy as np
 
 from preprocess.exceptions import VideoProbeError
@@ -65,6 +65,38 @@ class PlaybackTimingState:
         return int(self.anchor_frame + elapsed * self.source_fps * self.playback_speed)
 
 
+@dataclass(frozen=True, slots=True)
+class FrameRequestIdentity:
+    """Identity used to reject stale composed-frame results."""
+
+    request_id: str
+    frame_generation: int
+    session_generation: int
+    run_id: str
+    frame_idx: int
+    pose_source: str
+    edit_revision: int
+
+
+@dataclass(frozen=True, slots=True)
+class FrameRenderRequest:
+    """Immutable decode + overlay payload for the decoder worker."""
+
+    identity: FrameRequestIdentity
+    video_path: Path
+    pose_points: tuple[PoseNodePoint, ...]
+    skeleton_edges: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FrameRenderSnapshot:
+    """Worker result for one frame-render request."""
+
+    identity: FrameRequestIdentity
+    image_bgr: np.ndarray | None
+    error: str | None = None
+
+
 class TrackingReviewController:
     """Load an S3 run, navigate prepared frames, and accept tracking."""
 
@@ -74,22 +106,79 @@ class TrackingReviewController:
         frame_reader: FrameReader | None = None,
     ) -> None:
         self._frame_reader = frame_reader or read_prepared_frame
+        # Sequential capture belongs on the decoder worker thread. Injected
+        # readers (tests) skip it so fixtures stay deterministic.
         self._use_sequential_capture = frame_reader is None
         self.session: TrackingReviewSession | None = None
         self.project: TrackingCorrectionProjectSummary | None = None
         self._last_error: str | None = None
         self._playback: PlaybackTimingState | None = None
-        self._capture: cv2.VideoCapture | None = None
-        self._capture_path: Path | None = None
-        self._capture_next_idx: int | None = None
+        self._session_generation = 0
+        self._frame_generation = 0
+        self._edit_revision = 0
+        self._active_frame_identity: FrameRequestIdentity | None = None
+        self._frame_pending = False
+        self._displayed_frame_idx: int | None = None
+        self._last_frame_error: str | None = None
+
+    @property
+    def frame_reader(self) -> FrameReader:
+        return self._frame_reader
+
+    @property
+    def use_sequential_capture(self) -> bool:
+        return self._use_sequential_capture
 
     @property
     def last_error(self) -> str | None:
         return self._last_error
 
     @property
+    def last_frame_error(self) -> str | None:
+        return self._last_frame_error
+
+    @property
     def playback_active(self) -> bool:
         return self._playback is not None and self._playback.active
+
+    @property
+    def session_generation(self) -> int:
+        return self._session_generation
+
+    @property
+    def frame_generation(self) -> int:
+        return self._frame_generation
+
+    @property
+    def edit_revision(self) -> int:
+        return self._edit_revision
+
+    @property
+    def active_frame_identity(self) -> FrameRequestIdentity | None:
+        return self._active_frame_identity
+
+    @property
+    def frame_pending(self) -> bool:
+        return self._frame_pending
+
+    @property
+    def displayed_frame_idx(self) -> int | None:
+        return self._displayed_frame_idx
+
+    @property
+    def display_matches_playhead(self) -> bool:
+        """True when the last applied pixels match the scientific playhead."""
+
+        session = self.session
+        if session is None or self._frame_pending:
+            return False
+        return self._displayed_frame_idx == session.current_frame
+
+    def abandon_pending_frame(self) -> None:
+        """Drop in-flight display intent without changing scientific session state."""
+
+        self._frame_pending = False
+        self._active_frame_identity = None
 
     def open_project(self, session_root: Path) -> TrackingCorrectionProjectSummary:
         """Discover S3 runs under a project/session directory."""
@@ -126,13 +215,15 @@ class TrackingReviewController:
         """Load a completed automatic S3 run into the review session."""
 
         self.stop_playback()
-        self._close_capture()
+        self._bump_session_generation()
         try:
             self.session = load_review_session(s3_run_dir)
         except TrackingCorrectionError as exc:
             self._last_error = str(exc)
             raise
         self._last_error = None
+        self._last_frame_error = None
+        self._displayed_frame_idx = None
         # Prefer the project that actually contains this S3 run. Provenance
         # session_root may still point at a historical drive/NAS path.
         project_root: Path | None = None
@@ -179,7 +270,9 @@ class TrackingReviewController:
         return self.require_session().previous_correction_episode()
 
     def set_pose_source(self, source: PoseDisplaySource | str) -> PoseDisplaySource:
-        return self.require_session().set_pose_source(source)
+        result = self.require_session().set_pose_source(source)
+        self.invalidate_composed_frames()
+        return result
 
     def set_playback_speed(self, speed: float) -> float:
         return self.require_session().set_playback_speed(speed)
@@ -239,7 +332,9 @@ class TrackingReviewController:
         return self.require_session().accept_tracking()
 
     def swap_identities(self, start_frame: int, end_frame: int) -> ManualEditResult:
-        return self.require_session().swap_identities(start_frame, end_frame)
+        result = self.require_session().swap_identities(start_frame, end_frame)
+        self.invalidate_composed_frames()
+        return result
 
     def swap_node(
         self,
@@ -248,12 +343,14 @@ class TrackingReviewController:
         end_frame: int | None = None,
         frame_idx: int | None = None,
     ) -> ManualEditResult:
-        return self.require_session().swap_node(
+        result = self.require_session().swap_node(
             node,
             start_frame=start_frame,
             end_frame=end_frame,
             frame_idx=frame_idx,
         )
+        self.invalidate_composed_frames()
+        return result
 
     def blank_node(
         self,
@@ -261,20 +358,122 @@ class TrackingReviewController:
         track: int,
         frame_idx: int | None = None,
     ) -> ManualEditResult:
-        return self.require_session().blank_node(node, track, frame_idx=frame_idx)
+        result = self.require_session().blank_node(node, track, frame_idx=frame_idx)
+        self.invalidate_composed_frames()
+        return result
 
     def undo_last_manual_edit(self) -> ManualEditResult:
-        return self.require_session().undo_last_manual_edit()
+        result = self.require_session().undo_last_manual_edit()
+        self.invalidate_composed_frames()
+        return result
 
     def reset_manual_edits(self) -> ManualEditResult:
-        return self.require_session().reset_manual_edits()
+        result = self.require_session().reset_manual_edits()
+        self.invalidate_composed_frames()
+        return result
+
+    def invalidate_composed_frames(self) -> None:
+        """Bump edit revision so in-flight composed overlays cannot apply."""
+
+        self._edit_revision += 1
+        self._frame_pending = False
+        self._active_frame_identity = None
+        # Pixels on screen are no longer authoritative for the current composition.
+        self._displayed_frame_idx = None
+
+    def begin_frame_request(self) -> FrameRenderRequest | None:
+        """Snapshot pose points and mint a latest-wins frame-render identity."""
+
+        session = self.session
+        if session is None:
+            return None
+        self._frame_generation += 1
+        points = session.pose_points_for_frame()
+        identity = FrameRequestIdentity(
+            request_id=uuid4().hex,
+            frame_generation=self._frame_generation,
+            session_generation=self._session_generation,
+            run_id=session.run_id,
+            frame_idx=session.current_frame,
+            pose_source=session.pose_source.value,
+            edit_revision=self._edit_revision,
+        )
+        self._active_frame_identity = identity
+        self._frame_pending = True
+        self._last_frame_error = None
+        return FrameRenderRequest(
+            identity=identity,
+            video_path=Path(session.prepared_video_path),
+            pose_points=points,
+            skeleton_edges=session.skeleton_edges,
+        )
+
+    def apply_frame_snapshot(self, snapshot: FrameRenderSnapshot) -> bool:
+        """Apply a worker snapshot only when it still matches current intent."""
+
+        active = self._active_frame_identity
+        session = self.session
+        if (
+            active is None
+            or session is None
+            or snapshot.identity.request_id != active.request_id
+            or snapshot.identity.frame_generation != active.frame_generation
+            or snapshot.identity.session_generation != self._session_generation
+            or snapshot.identity.run_id != session.run_id
+            or snapshot.identity.frame_idx != session.current_frame
+            or snapshot.identity.pose_source != session.pose_source.value
+            or snapshot.identity.edit_revision != self._edit_revision
+        ):
+            return False
+        if snapshot.error is not None or snapshot.image_bgr is None:
+            self._last_frame_error = snapshot.error or "Prepared frame decode failed."
+            self._frame_pending = False
+            if active.frame_generation == self._frame_generation:
+                self._active_frame_identity = None
+            return False
+        self._displayed_frame_idx = snapshot.identity.frame_idx
+        self._last_frame_error = None
+        self._frame_pending = False
+        if active.frame_generation == self._frame_generation:
+            self._active_frame_identity = None
+        return True
+
+    def note_frame_failure(
+        self,
+        identity: FrameRequestIdentity,
+        message: str,
+    ) -> bool:
+        """Record a decoder failure when the identity is still current."""
+
+        active = self._active_frame_identity
+        if (
+            active is None
+            or active.request_id != identity.request_id
+            or active.frame_generation != identity.frame_generation
+            or identity.session_generation != self._session_generation
+            or identity.edit_revision != self._edit_revision
+        ):
+            return False
+        self._last_frame_error = message
+        self._frame_pending = False
+        if active.frame_generation == self._frame_generation:
+            self._active_frame_identity = None
+        return True
 
     def current_view(self) -> ReviewFrameView:
-        """Decode the current prepared frame and compose the pose overlay."""
+        """Decode the current prepared frame synchronously (tests / headless).
+
+        The GUI page uses :meth:`begin_frame_request` / async decode instead.
+        This helper composes on the calling thread via the injected reader and
+        never touches the worker-owned sequential capture.
+        """
 
         session = self.require_session()
         try:
-            raw = self._read_frame(session.prepared_video_path, session.current_frame)
+            raw = self._frame_reader(
+                Path(session.prepared_video_path).resolve(),
+                session.current_frame,
+            )
         except VideoProbeError as exc:
             raise TrackingCorrectionError(str(exc)) from exc
         points = session.pose_points_for_frame()
@@ -293,67 +492,14 @@ class TrackingReviewController:
             available_nodes=session.available_node_names,
         )
 
-    def _read_frame(self, video_path: Path, frame_idx: int) -> np.ndarray:
-        path = Path(video_path).resolve()
-        if not self._use_sequential_capture:
-            return self._frame_reader(path, frame_idx)
-
-        if (
-            self._capture is not None
-            and self._capture_path == path
-            and self._capture_next_idx is not None
-            and frame_idx >= self._capture_next_idx
-        ):
-            while self._capture_next_idx < frame_idx:
-                success, _discarded = self._capture.read()
-                if not success:
-                    self._close_capture()
-                    break
-                self._capture_next_idx += 1
-            if self._capture is not None and self._capture_next_idx == frame_idx:
-                success, frame = self._capture.read()
-                if success and frame is not None:
-                    self._capture_next_idx = frame_idx + 1
-                    return frame.copy()
-                self._close_capture()
-
-        if frame_idx == 0:
-            self._open_capture(path)
-            assert self._capture is not None
-            success, frame = self._capture.read()
-            if not success or frame is None:
-                self._close_capture()
-                raise VideoProbeError("Prepared decode frame 0 is unreadable.")
-            self._capture_next_idx = 1
-            return frame.copy()
-
-        # Non-sequential jump: verified random-access helper, then reopen for
-        # subsequent sequential playback frames.
-        frame = self._frame_reader(path, frame_idx)
-        self._open_capture(path)
-        assert self._capture is not None
-        if self._capture.set(cv2.CAP_PROP_POS_FRAMES, frame_idx + 1):
-            self._capture_next_idx = frame_idx + 1
-        else:
-            self._close_capture()
-        return frame
-
-    def _open_capture(self, path: Path) -> None:
-        self._close_capture()
-        capture = cv2.VideoCapture(str(path))
-        if not capture.isOpened():
-            capture.release()
-            raise VideoProbeError(f"Could not open prepared video: {path}")
-        self._capture = capture
-        self._capture_path = path
-        self._capture_next_idx = 0
-
-    def _close_capture(self) -> None:
-        if self._capture is not None:
-            self._capture.release()
-        self._capture = None
-        self._capture_path = None
-        self._capture_next_idx = None
+    def _bump_session_generation(self) -> None:
+        self._session_generation += 1
+        self._frame_generation += 1
+        self._edit_revision += 1
+        self._active_frame_identity = None
+        self._frame_pending = False
+        self._displayed_frame_idx = None
+        self._last_frame_error = None
 
 
 def read_prepared_frame(video_path: Path, frame_idx: int) -> np.ndarray:

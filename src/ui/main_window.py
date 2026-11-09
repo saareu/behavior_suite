@@ -130,6 +130,7 @@ class MainWindow(QMainWindow):
         self._close_after_s8_task = False
         self._close_after_s9_task = False
         self._close_after_s10_task = False
+        self._close_after_s3_task = False
         self._active_group = GROUP_DATA_PREPARATION
         self._last_feature_page: str = "s5"
         self._last_behavior_page: str = "s7"
@@ -297,6 +298,8 @@ class MainWindow(QMainWindow):
         self.review_page.unexpected_error.connect(self._show_unexpected_error)
         self.review_page.status_message.connect(self.statusBar().showMessage)
         self.review_page.accepted.connect(self._s3_accepted)
+        self.review_page.task_running_changed.connect(self._s3_task_running_changed)
+        self.review_page.task_finished.connect(self._s3_task_finished)
         self.finalization_page.unexpected_error.connect(self._show_unexpected_error)
         self.finalization_page.status_message.connect(self.statusBar().showMessage)
         self.finalization_page.task_running_changed.connect(
@@ -817,6 +820,7 @@ class MainWindow(QMainWindow):
         )
         soft_running = any(
             (
+                self.review_page.has_running_task,
                 self.blob_features_page.has_running_task,
                 self.combined_features_page.has_running_task,
                 self.behavioral_inference_page.has_running_task,
@@ -1149,6 +1153,15 @@ class MainWindow(QMainWindow):
             self._close_after_pose_task = False
             self.close()
 
+    def _s3_task_running_changed(self, _running: bool) -> None:
+        self._update_navigation()
+
+    def _s3_task_finished(self) -> None:
+        self._update_navigation()
+        if self._close_after_s3_task:
+            self._close_after_s3_task = False
+            self.close()
+
     def _s4_task_running_changed(self, _running: bool) -> None:
         self._update_navigation()
 
@@ -1221,7 +1234,7 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """Wait for non-cancellable S2/S4/S5/S6/S7/S8/S9/S10 work or cancel S1."""
+        """Wait for non-cancellable S2/S3/S4/S5/S6/S7/S8/S9/S10 work or cancel S1."""
 
         # Abandon in-flight workspace discovery; never write a partial catalog.
         self.workspace_controller.cancel_background_scan(reason="window closing")
@@ -1234,6 +1247,15 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 "A Subsystem 2 task is active and has no safe cancellation hook. "
                 "The window remains responsive and will close when the task finishes."
+            )
+            return
+        if self.review_page.has_running_task:
+            event.ignore()
+            self._close_after_s3_task = True
+            self.statusBar().showMessage(
+                "S3 frame decode is active and has no safe cancellation hook. "
+                "The window remains responsive and will close when the decoder "
+                "finishes. A stalled NAS seek may delay shutdown until OpenCV returns."
             )
             return
         if self.finalization_page.has_running_task:
@@ -1307,5 +1329,17 @@ class MainWindow(QMainWindow):
                 )
             event.ignore()
             QTimer.singleShot(100, self.close)
+            return
+        # Persistent S3 decoder thread is not stopped by QWidget parenting alone.
+        # A soft 5 s wait must not be mistaken for completion: keep ownership and
+        # defer close until the worker thread actually stops.
+        if not self.review_page.shutdown_frame_decoder():
+            event.ignore()
+            self._close_after_s3_task = True
+            self.statusBar().showMessage(
+                "S3 decoder shutdown is waiting for an in-flight OpenCV seek. "
+                "The window remains open until the worker releases VideoCapture "
+                "on its owning thread."
+            )
             return
         super().closeEvent(event)

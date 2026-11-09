@@ -1,8 +1,8 @@
 # Product Quality Sprint 2 — Responsive S3 Video Review
 
-**Status:** Proposed — awaiting architectural review (not implemented).  
-**Date:** 2026-11-05  
-**Baseline:** `7e43216b358272235bcb0485125379d293ea04eb`  
+**Status:** Architecturally accepted and integrated on `main`.  
+**Date:** 2026-11-09  
+**Baseline:** `5fb37a1a5a213158115431771a54f659f704956b`  
 **Scope:** S3 Tracking Review decode + pose-overlay composition responsiveness only.
 
 ---
@@ -16,281 +16,251 @@ sources.
 
 ---
 
-## Audit findings (current GUI-thread path)
-
-### Call chain
-
-```text
-TrackingReviewPage._refresh_view()          # GUI thread
-  → TrackingReviewController.current_view() # GUI thread
-      → _read_frame() / VideoCapture        # decode / seek
-      → session.pose_points_for_frame()     # O(1) overlay-index lookup
-      → draw_pose_overlay()                 # OpenCV compose
-  → PoseVideoView.set_frame() + labels      # paint
-```
-
-Every scrubber tick, frame step, playback advance, pose-source change, and
-manual edit ends in synchronous `_refresh_view()`.
-
-### What runs on the GUI thread today
-
-| Operation | Thread | Cost class |
-| --- | --- | --- |
-| `set_frame` / playback wall-clock math | GUI | cheap |
-| `pose_points_for_frame` | GUI | ~0 ms (dict lookup) |
-| Sequential `VideoCapture.read` | GUI | ~66 ms/frame (E-session NAS) |
-| Random seek via `read_raw_frame_at_index` | GUI | ~0.2–18 s (E-session NAS) |
-| `draw_pose_overlay` | GUI | ~0.4–0.7 ms |
-| `PoseVideoView` paint | GUI | small vs decode |
-| Manual edit mutate + overlay-index patch | GUI | existing path; keep |
-| Working-pose parquet persist | background thread already | keep |
-
-### Mutable state dependencies
-
-- Playhead: `TrackingReviewSession.current_frame`
-- Display source: `pose_source` (corrected vs provisional)
-- Corrected overlay index: `_corrected_by_frame` (patched on manual edits)
-- Acceptance / episode list / manual-edit stack
-- Controller-owned `cv2.VideoCapture` (`_capture`, `_capture_path`, `_capture_next_idx`)
-
-OpenCV capture handles are not thread-safe and must not be shared across threads.
-
-### Existing patterns to reuse (do not invent a third video stack)
-
-| Pattern | Location | Reuse for S3 |
-| --- | --- | --- |
-| Latest-wins decode runner | S10 `decode_runner` + `DecodeRequestIdentity` | Yes — same coalesce model |
-| `GuiTaskRunner` one-in-flight | `ui.tasks` | Yes — dedicated page runner |
-| `PreparedFrameAccessor` | S10 raw LRU + `read_raw_frame_at_index` | Optional for raw LRU only; insufficient alone for sequential playback |
-| S3 sequential capture | `TrackingReviewController._read_frame` | Yes — move ownership into the frame worker |
-| Pose overlay | `tracking_correction.overlay_draw.draw_pose_overlay` | Unchanged API |
-
-Sprint 1 discovery async is orthogonal; S3 review has no discovery runner today.
-
-### Baseline measurements (E-session, 2026-11-05)
-
-Session: `test_cases/E_full_session_integration`  
-Run: `current_lab_two_mouse_headstage_v1__20260919T181948`  
-Video: NAS UNC prepared MP4 (`36239` frames @ ~119 Hz)
-
-| Path | Result |
-| --- | --- |
-| Cold `current_view()` frame 0 | **517.5 ms** |
-| Sequential frames 1–30 via `current_view()` | **avg 91.0 ms** (37–179) |
-| Random 15 seeks via `current_view()` | **avg 4849.6 ms** (346–18085) |
-| Mid-frame breakdown (frame 5000) | decode **196.2 ms**, pose points **~0 ms**, overlay **0.4 ms** |
-| Warm sequential capture only | **avg 66.3 ms** |
-| Overlay ×20 warm | **avg 0.7 ms** |
-
-**Conclusion:** blocking cost is almost entirely decode/seek. Overlay is cheap but
-should still run off-GUI with decode so one worker returns a ready BGR image.
-Random scrub on the NAS path currently freezes the GUI for seconds per tick.
-
----
-
-## Proposed worker architecture
+## Implemented worker architecture
 
 ### Layers
 
 | Layer | Mechanism |
 | --- | --- |
 | Identity | Frozen `FrameRequestIdentity` (`request_id`, `frame_generation`, `session_generation`, `run_id`, `frame_idx`, `pose_source`, `edit_revision`) |
-| Snapshot in | Frozen request payload: video path, frame index, immutable `pose_points`, `skeleton_edges` |
-| Snapshot out | Frozen `FrameRenderSnapshot`: identity + `image_bgr` (or failure) |
+| Snapshot in | Frozen `FrameRenderRequest`: video path + immutable `pose_points` + `skeleton_edges` |
+| Snapshot out | Frozen `FrameRenderSnapshot`: identity + `image_bgr` or `error` |
 | Controller | Playhead/edit on GUI; `begin_frame_request` → worker render → `apply_frame_snapshot` |
-| Runner | Page-owned `GuiTaskRunner` (`frame_runner`) + `GuiTaskKind.TRACKING_REVIEW_FRAME` |
-| Serialization | One in-flight worker; newer requests bump generation; `on_finished` restarts for latest identity |
+| Decoder | Dedicated persistent `TrackingReviewFrameDecoder` (not short-lived `GuiTaskRunner` threads) |
+| Task kind | `GuiTaskKind.TRACKING_REVIEW_FRAME` reserved for identity/docs; page uses `has_running_task` |
 
-### Decoder ownership (recommended)
+### Why not `GuiTaskRunner` for each frame?
 
-**Worker-exclusive sequential capture**, relocating the existing
-`TrackingReviewController._read_frame` logic — not a new abstraction and not a
-full switch to open-per-frame `PreparedFrameAccessor`.
+`GuiTaskRunner` creates a new `QThread` per task. OpenCV `VideoCapture` is not
+safe across unrelated short-lived threads, and sequential NAS playback depends on
+keeping one capture warm. Sprint 2 therefore uses a **dedicated decoder thread**
+with the same latest-wins coalesce semantics as S10, while preserving the
+existing sequential-capture algorithm inside that worker.
 
-Rationale:
+### Decoder thread ownership
 
-1. Sequential capture is ~66 ms/frame; random `read_raw_frame_at_index` on this
-   NAS video averages multi-second seeks. Playback needs the sequential path.
-2. `PreparedFrameAccessor` is the right LRU idea for raw revisits, but its default
-   reader is random-access and would regress continuous playback if used alone.
-3. Compatible reuse: keep S1 `read_raw_frame_at_index` for non-sequential jumps
-   (already true today); optionally add a small raw-frame LRU *inside* the
-   worker-owned helper without publishing a second public video API.
+- `cv2.VideoCapture` is created, read, seeked, and released **only** on the
+  decoder thread (`_DecoderEngine`).
+- GUI never holds a live capture after this change.
+- `queue_request` is thread-safe so rapid scrub can overwrite pending work even
+  while OpenCV is blocked inside a seek/read.
+- Only one pending request is retained (no unbounded backlog).
+- No raw-frame LRU was added.
 
-Rules:
+### Frame request / stale-result rejection
 
-- Capture open/read/seek/release only on the frame worker thread.
-- GUI thread never holds a live `VideoCapture` after this change.
-- Session change / page teardown / app exit: bump `session_generation`, wait for
-  runner idle (or schedule close on finished), then release capture.
-- Add `TrackingReviewPage.has_running_task` and include it in `MainWindow.closeEvent`
-  (today S3 is omitted from the close wait list).
+1. Scrub / step / play tick / source change / edit refresh updates cheap metadata
+   on the GUI thread, then calls `begin_frame_request()`.
+2. Pose points and skeleton edges are snapshotted on the GUI thread; the worker
+   never reads `TrackingReviewSession` or widgets.
+3. `apply_frame_snapshot` accepts only when `request_id`, `frame_generation`,
+   `session_generation`, `run_id`, `frame_idx`, `pose_source`, and `edit_revision`
+   still match.
+4. Labels always show the **selected** prepared frame; pixels may lag with a
+   lightweight “Loading frame…” indicator. An old pixmap is never treated as the
+   newly selected frame.
 
-### Pose snapshot rule (thread safety)
+### Scrub / playback behavior
 
-`pose_points_for_frame` is already an O(1) lookup. On the GUI thread, when
-issuing a frame request:
+- Rapid scrub: latest requested frame wins; obsolete pending requests are dropped.
+- Playback keeps the existing 8 ms wall-clock timer and
+  `PlaybackTimingState` skip semantics (scientific playhead).
+- Decode requests coalesce; slow NAS decode does not freeze controls.
+- Display may lag the playhead during fast playback; that is display catch-up,
+  not a new scientific frame-skipping policy.
+- Pause stops the timer immediately; in-flight snapshots still must match identity.
 
-1. Read immutable `tuple[PoseNodePoint, ...]` + `skeleton_edges` for the target
-   frame / source.
-2. Pass those into the worker.
-3. Worker never reads `TrackingReviewSession`, widgets, or working-pose tables.
+### Edit / session invalidation
 
-Edits continue to patch `_corrected_by_frame` on the GUI thread (existing code).
-After an edit, bump `edit_revision` and re-issue a frame request for the current
-playhead.
+- Manual edits, resets, and pose-source changes call `invalidate_composed_frames()`
+  (`edit_revision++`), then request a fresh compose of the current frame.
+- `open_run` / session switches bump `session_generation` and release the worker
+  capture.
+- Previously rendered overlays cannot apply after an edit/source/session change.
+- Correction history and acceptance behavior are unchanged. No automatic
+  acceptance was introduced.
 
-### Stale-result / scrub coalesce semantics
+### Shutdown lifecycle
 
-Mirror S10 decode:
+- `TrackingReviewPage.has_running_task` covers decoder busy + controller pending
+  + soft-timeout “still shutting down” ownership.
+- `MainWindow.closeEvent` soft-waits on S3 frame work (like S10), then calls
+  `review_page.shutdown_frame_decoder()` before accepting close.
+- Soft shutdown wait default: 5 s. A stalled NAS seek may outlive that limit;
+  the thread is **not** force-terminated.
+- Soft timeout returns False and is **not** treated as successful completion:
+  application close stays deferred; worker/VideoCapture ownership remains valid
+  until the thread finishes and emits `finished`.
+- Hard remaining limit: OpenCV may hold the worker until the in-flight seek
+  returns; document and wait, do not kill the thread.
 
-1. Every scrub/step/play tick / source change / edit refresh calls
-   `begin_frame_request()` → new `request_id` + bumped `frame_generation`.
-2. If `frame_runner.is_running`: do **not** queue; store as `active_*` only.
-3. On worker finished: if a newer active identity exists, start that one only.
-4. `apply_frame_snapshot` accepts iff `request_id`, `frame_generation`,
-   `session_generation`, `run_id`, `frame_idx`, `pose_source`, and
-   `edit_revision` still match current controller intent.
-5. Prefer the most recent requested frame; never apply an older generation after
-   a newer one has been requested.
-6. Playback remains wall-clock scheduled on the GUI timer (`PlaybackTimingState`);
-   only composition moves async. Showing frame N after the playhead has moved to
-   N+k is rejected by identity mismatch.
+### UI feedback
 
-### Cache / edit invalidation
+- Unobtrusive `frame_pending_label` under the viewer for pending / decode failure.
+- Transport and scrubber stay enabled while decoding.
+- Frame-dependent manual edits (`blank` / `swap` / “use current as start|end”)
+  stay disabled until `displayed_frame_idx == playhead` and not pending, so edits
+  cannot silently target a lagging visible frame.
+- Undo/reset/accept remain available (history / run-level actions).
+- No modal dialogs for normal seeking (failures use status text).
 
-| Cache | Invalidate when |
+### Synchronous helper preserved
+
+`TrackingReviewController.current_view()` remains a **synchronous** headless /
+unit-test helper that composes on the calling thread via the injected frame
+reader. The GUI page uses only the async begin/apply path.
+
+---
+
+## Baseline vs after (E-session)
+
+Session: `test_cases/E_full_session_integration`  
+Run: `current_lab_two_mouse_headstage_v1__20260919T181948`  
+Video: NAS UNC prepared MP4  
+
+### Before (sync GUI-thread `current_view`, 2026-11-05)
+
+| Path | Result |
 | --- | --- |
-| Worker sequential capture position | Non-sequential jump; session/run change |
-| Optional raw LRU | Session/run/video path change (not on pose edits) |
-| Composed overlay image | Never reuse across `edit_revision` or `pose_source` changes |
-| Pose point tables | Existing edit/reset paths only |
+| Cold `current_view()` frame 0 | **517.5 ms** (GUI blocked) |
+| Sequential frames 1–30 | **avg 91.0 ms** (GUI blocked) |
+| Random 15 seeks | **avg 4849.6 ms** (GUI blocked; up to 18.1 s) |
+| Warm sequential capture only | **avg 66.3 ms** |
+| Overlay ×20 warm | **avg 0.7 ms** |
 
-Never display a composed frame whose `edit_revision` is older than the session’s
-current revision.
+### After (async request-to-display, 2026-11-09 offscreen audit)
 
-### UI feedback (minimal)
+Script: `scripts/_pq_sprint2_s3_video_responsiveness_audit.py`
 
-- Keep scrubber, transport, and edit controls enabled while a frame is pending
-  (GUI stays interactive).
-- Unobtrusive pending indicator (status text or light progress on the video
-  chrome) — no modal during playback/scrub.
-- Metadata labels (frame index, corrections, acceptance) update immediately when
-  the playhead changes; pixels catch up when the snapshot applies.
-- Preserve synchronous `current_view()` for headless unit tests (compose on the
-  calling thread), as Sprint 1 did for discovery collect/apply.
-
-### Explicit non-goals
-
-- No tracking algorithm / corrector changes
-- No pose schema or scientific source changes
-- No shared video-player rewrite / new public video framework
-- No S2 validation refactor
-- No S4–S8 science-task cancellation changes
-- No S3 review UI redesign
-
----
-
-## Proposed page flow
-
-```text
-User scrub / step / play tick / edit / source change
-        ↓
-Update playhead + cheap labels on GUI thread
-        ↓
-begin_frame_request()  (snapshot pose points + identity)
-        ↓
-GuiTaskRunner frame worker (if idle; else coalesce)
-        ↓
-decode (worker-owned capture) + draw_pose_overlay
-        ↓
-apply_frame_snapshot() if identity still current
-        ↓
-PoseVideoView.set_frame(image_bgr)
-```
-
----
-
-## Test plan (when implementing)
-
-Focused suite (proposed): `tests/ui/test_tracking_review_video_responsiveness.py`
-plus helpers in `tests/ui/_responsiveness_support.py`.
-
-Coverage:
-
-- Decode/render off GUI thread
-- Rapid scrub with stale-frame rejection
-- Playback ordering / seek-during-playback / pause-resume
-- Session/run switch while decode pending
-- Manual edit → revision bump → refresh
-- Cache/composed-frame invalidation after edits
-- Missing frame / decoder failure surfacing
-- Worker/resource cleanup; no unsafe shutdown
-- Pose/artifact immutability except explicit edits
-
-Regressions: existing S3 review, manual edits, workspace, overlay-QC GUI tests.
-Static: Ruff + targeted Mypy on touched modules.
-
----
-
-## Performance plan (when implementing)
-
-Repeat the baseline script with async path instrumentation:
-
-- seek/decode time (worker)
-- overlay time (worker)
-- GUI present/repaint time
-- perceived scrub latency (time-to-interactive vs time-to-final-pixels)
-- cold vs warm; playback; cache/memory growth
-
-Visible Windows GUI pass: rapid scrub + short playback on the same E-session run.
-Document remaining jitter / frame-order anomalies.
-
----
-
-## Open decisions for review
-
-1. **Decoder:** approve worker-owned sequential capture (recommended) vs
-   PreparedFrameAccessor-only (simpler, likely worse playback on NAS).
-2. **Optional raw LRU** inside the worker helper (size 8, S10-like) — yes/no.
-3. **Pending chrome:** status-bar text only vs small indeterminate indicator on
-   the viewer.
-4. **`current_view()`:** keep as synchronous test/API helper that still
-   decodes inline, while the page uses async `begin_frame_request` /
-   `apply_frame_snapshot` exclusively.
-5. **Close/navigation:** treat in-flight S3 frame work like S10 soft-busy
-   (wait on close; allow session browse to supersede via generation bump).
-
----
-
-## Implementation sequence (after approval)
-
-1. Add identity/snapshot types + controller begin/apply/worker APIs; relocate
-   capture ownership off the GUI thread.
-2. Wire `TrackingReviewPage` to `frame_runner` with latest-wins coalesce and
-   minimal pending feedback; add `has_running_task` + MainWindow close wait.
-3. Edit/source/session invalidation via `edit_revision` / `session_generation`.
-4. Responsiveness tests + existing S3 regressions.
-5. E-session timing audit + visible GUI note.
-6. Finalize this roadmap doc and a short note in
-   `docs/subsystem_03/mvp_scope_and_roadmap.md`.
-
----
-
-## Required report fields (pre-implementation)
-
-| Item | Status |
+| Path | Result |
 | --- | --- |
-| 1. Files changed | None yet (design only) |
-| 2. Original S3 blocking paths | Documented above |
-| 3. Worker/decoder ownership design | Proposed above — needs approval |
-| 4. Frame request / stale-result semantics | Proposed (S10 latest-wins) |
-| 5. Edit/cache invalidation | `edit_revision` + no stale composed frames |
-| 6. Before/after performance | Before only (table above); after TBD |
-| 7. Visible GUI evidence | Not run (awaiting implementation) |
-| 8. Tests/static checks | Not run |
-| 9. Remaining defects / acceptance | N/A until implementation |
+| Cold request→display frame 0 | **113.4 ms** (GUI not blocked) |
+| Sequential request→display 1–30 | **avg 9.5 ms** (warm capture path) |
+| Seek frame 5000 request→display | **2.50 s** |
+| GUI timer ticks in first 250 ms of that seek | **49** (loop stayed live) |
+| Random seeks request→display (n=10) | **avg 4228.7 ms** (73–13600) |
+| Playback displayed-index catch-up in 2.0 s | **238 index delta → 119.0 /s** |
+| tracemalloc peak | **116.4 MiB** |
+| Cleanup | ok |
 
-**Recommendation:** Approve the worker-owned sequential-capture + S10-style
-latest-wins `GuiTaskRunner` design, then implement. Do not commit/push until
-after implementation review.
+### Clarifying the reported “119 FPS”
+
+That figure is **not** decoded frames/sec and **not** distinct images presented/sec.
+
+| Metric | Meaning in the audit harness |
+| --- | --- |
+| Scientific playhead advance/sec | `session.current_frame` delta / wall window via `PlaybackTimingState` |
+| Decode completions/sec | Worker `snapshot_ready` emissions (includes stale/coalesced work) |
+| Distinct images presented/sec | Count of accepted `apply_frame_snapshot` updates that call `set_frame` |
+| Frames skipped/coalesced | Playhead can advance multiple indices while only the latest pending decode runs |
+| Displayed-index catch-up/sec | `(displayed_after - displayed_before) / window` — **this is what 119 measured** |
+| Timer ticks | 8 ms playback poll / GUI responsiveness probe only; never frame throughput |
+
+So “238 frames → 119 FPS” means the last successfully displayed frame index advanced by ~238 over 2 s after catch-up, while many intermediate indices were skipped by latest-wins coalesce. Actual decode and distinct present rates are lower and must be reported separately.
+
+Interpretation:
+
+- Random NAS seek cost remains a usability limitation (~seconds).
+- The GUI stays interactive during those seeks (primary Sprint 2 goal).
+- Scientific playhead still follows wall-clock `PlaybackTimingState`; display may lag.
+- Sequential numbers are warmer/faster than the Nov-5 baseline; treat them as
+  same-session after measurements, not a claim of new decode algorithms.
+
+---
+
+## Visible GUI validation
+
+Script: `scripts/_pq_sprint2_visible_gui_smoke.py`  
+Evidence: `docs/roadmap/_pq_sprint2_visible_gui_evidence.txt`
+
+| Check | Result |
+| --- | --- |
+| Qt platform | `windows` (visible) |
+| Open S3 run / frame 0 | displayed |
+| Rapid scrub to distant frames | selected frame 100 displayed |
+| Step forward | displayed |
+| Play ~1.5 s / pause | playhead advanced; pixels catch up asynchronously |
+| Reversible swap identities + undo on frame 0 | edit_revision advanced then undo restored workflow |
+| App/page cleanup | ok |
+
+Session switch while decoding and full MainWindow close-during-seek were covered
+by automated lifecycle tests; the visible smoke focused on scrub/play/edit on the
+E-session run without accepting tracking.
+
+---
+
+## Tests and static checks
+
+Focused suite: `tests/ui/test_tracking_review_video_responsiveness.py`
+
+Coverage exercised:
+
+1. Decode off GUI thread  
+2. Stable worker-thread ownership for reads  
+3. Rapid scrub latest-wins / bounded pending  
+4–6. Playback order, pause, seek-after-pause  
+7–8. Manual edit + pose-source invalidation  
+9. Session/run switch stale rejection  
+10. Decoder failure surfacing (no seek modal)  
+11. Safe worker shutdown  
+12. Single pending slot  
+13. Frame/overlay apply identity sync  
+14–15. Correction/acceptance + sync `current_view` immutability helpers  
+
+Regressions run green: S3 review, manual edits, sprint4 page load, S2→S3 handoff,
+S3 overlay entry button.  
+
+Static:
+
+- Ruff clean on touched modules  
+- Mypy clean on controller; decoder/page clean with `--disable-error-code=import-untyped`
+  (PySide6 stubs; `ui` is outside default mypy packages)
+
+---
+
+## Known limitations / remaining risks
+
+1. **NAS random seek latency** is unchanged in magnitude; responsiveness ≠ faster
+   OpenCV seeks. Caching/re-encoding still require measurement + review.
+2. Soft shutdown wait (5 s) cannot abort an in-flight OpenCV seek.
+3. During fast playback, displayed pixels may lag the scientific playhead until
+   the latest coalesced request completes.
+4. No shared video-player unification; S10 still uses `PreparedFrameAccessor`.
+5. No raw-frame LRU yet (explicit non-goal for this increment).
+
+---
+
+## Changed files (implementation)
+
+| File | Role |
+| --- | --- |
+| `src/ui/tracking_review_frame_decoder.py` | New persistent decoder worker |
+| `src/ui/controllers/tracking_review_controller.py` | Identity/begin/apply; capture removed from GUI |
+| `src/ui/pages/tracking_review_page.py` | Async refresh, pending chrome, `has_running_task` |
+| `src/ui/tasks.py` | `GuiTaskKind.TRACKING_REVIEW_FRAME` |
+| `src/ui/main_window.py` | S3 close wait + decoder shutdown |
+| `tests/ui/test_tracking_review_video_responsiveness.py` | New focused suite |
+| `tests/ui/_responsiveness_support.py` | Wait for idle before destroy |
+| `tests/ui/test_s2_s3_handoff.py` / sprint4 / overlay GUI | Safe teardown |
+| `scripts/_pq_sprint2_s3_video_responsiveness_audit.py` | Offscreen timing audit |
+| `scripts/_pq_sprint2_visible_gui_smoke.py` | Visible Windows smoke |
+| `docs/roadmap/product_quality_sprint_2_responsive_s3_video.md` | This document |
+| `docs/subsystem_03/mvp_scope_and_roadmap.md` | Short pointer |
+
+---
+
+## Architectural acceptance
+
+Accepted for final integration on `main`: dedicated decoder-thread + immutable
+frame-request design for S3 review, including the post-review safety
+corrections below. Sprint 2 meets the responsiveness goal without scientific
+schema/algorithm changes and without introducing a shared player or raw-frame
+cache.
+
+Post-design-review safety corrections included in this integration:
+
+1. Soft shutdown timeout retains worker ownership and defers app/page close.
+2. Frame-dependent edits stay disabled until displayed pixels match the playhead.
+3. Audit/docs clarify that “119 FPS” was displayed-index catch-up, not decode/present rate.
+
+Product Quality Sprint 2 is closed. Stop before Product Quality Sprint 3.

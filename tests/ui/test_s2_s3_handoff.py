@@ -88,6 +88,15 @@ def _wait_until(predicate, timeout_sec: float = 10.0) -> None:
     _APPLICATION.processEvents()
 
 
+def _close_main_window(window: MainWindow) -> None:
+    """Drain S3 frame decode before destroying the window's decoder thread."""
+
+    _wait_until(lambda: not window.review_page.has_running_task, timeout_sec=60.0)
+    window.close()
+    window.deleteLater()
+    _APPLICATION.processEvents()
+
+
 def test_selecting_valid_completed_s2_enables_s3_action(tmp_path: Path) -> None:
     s2_run, s1 = _completed_s2(tmp_path)
     session_root = s1["session_root"]
@@ -228,7 +237,7 @@ def test_new_s3_run_becomes_reviewable_via_main_window(tmp_path: Path) -> None:
 
     assert window.review_page.controller.session is not None
     assert window.review_page.controller.session.run_dir.name.endswith("20260301T150000")
-    window.close()
+    _close_main_window(window)
 
 
 def test_s3_busy_indicator_disables_action_and_restores_on_success(
@@ -283,7 +292,7 @@ def test_s3_busy_indicator_disables_action_and_restores_on_success(
     assert page.s3_progress.isHidden() is True
     assert page.s3_stage_label.isHidden() is True
     assert pose_controller.state.task_running is False
-    window.close()
+    _close_main_window(window)
 
 
 def test_s3_busy_indicator_restores_controls_on_failure(tmp_path: Path) -> None:

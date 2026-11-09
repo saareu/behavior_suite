@@ -51,6 +51,7 @@ class GuiTaskKind(StrEnum):
     BEHAVIORAL_REVIEW_WINDOW = "behavioral_review_window"
     BEHAVIORAL_REVIEW_EDIT = "behavioral_review_edit"
     BEHAVIORAL_REVIEW_PUBLISH = "behavioral_review_publish"
+    TRACKING_REVIEW_FRAME = "tracking_review_frame"
     PI_REPORT_EXPORT = "pi_report_export"
     OVERLAY_QC_EXPORT = "overlay_qc_export"
     WORKSPACE_SCAN = "workspace_scan"

@@ -17,6 +17,7 @@ from tests.tracking_correction.test_manual_edits import (
     _flush_working,
 )
 from tests.tracking_correction.test_review import _completed_s3 as _review_completed_s3
+from tests.ui._responsiveness_support import wait_until
 
 from tracking_correction.contracts import TrackingCorrectionRequest
 from tracking_correction.review import (
@@ -30,6 +31,13 @@ from ui.controllers.pose_inference_controller import PoseInferenceController
 from ui.pages.tracking_review_page import TrackingReviewPage
 
 _APPLICATION = QApplication.instance() or QApplication([])
+
+
+def _close_review_page(page: TrackingReviewPage) -> None:
+    wait_until(lambda: not page.has_running_task, timeout_sec=120.0)
+    page.close()
+    page.deleteLater()
+    _APPLICATION.processEvents()
 
 
 def test_s3_output_follows_s2_layout_not_stale_provenance(tmp_path: Path) -> None:
@@ -168,13 +176,16 @@ def test_first_discovered_s3_run_is_loaded(tmp_path: Path) -> None:
     assert first.success and second.success
 
     page = TrackingReviewPage()
-    page.open_project(s1["session_root"])
-    assert page.controller.session is not None
-    assert page.run_combo.count() == 2
-    # Discovery sorts newest first; the visually selected item must match the loaded run.
-    selected_data = Path(str(page.run_combo.currentData()))
-    assert page.controller.session.run_dir.resolve() == selected_data.resolve()
-    assert page.run_combo.currentIndex() == 0
+    try:
+        page.open_project(s1["session_root"])
+        assert page.controller.session is not None
+        assert page.run_combo.count() == 2
+        # Discovery sorts newest first; the visually selected item must match the loaded run.
+        selected_data = Path(str(page.run_combo.currentData()))
+        assert page.controller.session.run_dir.resolve() == selected_data.resolve()
+        assert page.run_combo.currentIndex() == 0
+    finally:
+        _close_review_page(page)
 
 
 def test_episode_list_selection_navigates(tmp_path: Path) -> None:
@@ -192,32 +203,35 @@ def test_episode_list_selection_navigates(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     page = TrackingReviewPage()
-    page.open_run(s3_dir)
-    # Visible list is manual edits only; machine records stay on Auto ◀/▶.
-    assert page.episode_list.count() == 0
-    assert page.controller.session is not None
-    assert len(page.controller.session.correction_episodes) >= 2
-    page.controller.next_correction_episode()
-    assert page.controller.session.current_frame == 1
+    try:
+        page.open_run(s3_dir)
+        # Visible list is manual edits only; machine records stay on Auto ◀/▶.
+        assert page.episode_list.count() == 0
+        assert page.controller.session is not None
+        assert len(page.controller.session.correction_episodes) >= 2
+        page.controller.next_correction_episode()
+        assert page.controller.session.current_frame == 1
 
-    session = page.controller.session
-    session.swap_identities(1, 3)
-    session.blank_node("nose", track=0, frame_idx=5)
-    page._populate_episode_list(session.navigable_episodes)
-    assert page.episode_list.count() == 2
-    texts = [
-        page.episode_list.item(i).text() for i in range(page.episode_list.count())
-    ]
-    assert texts[0].startswith("1 | swap_identities | 1–3 |")
-    assert "tracks" in texts[0]
-    assert texts[1].startswith("2 | blank_node | f5 |")
-    assert "nose" in texts[1]
-    assert "track 0" in texts[1]
+        session = page.controller.session
+        session.swap_identities(1, 3)
+        session.blank_node("nose", track=0, frame_idx=5)
+        page._populate_episode_list(session.navigable_episodes)
+        assert page.episode_list.count() == 2
+        texts = [
+            page.episode_list.item(i).text() for i in range(page.episode_list.count())
+        ]
+        assert texts[0].startswith("1 | swap_identities | 1–3 |")
+        assert "tracks" in texts[0]
+        assert texts[1].startswith("2 | blank_node | f5 |")
+        assert "nose" in texts[1]
+        assert "track 0" in texts[1]
 
-    page.episode_list.setCurrentRow(1)
-    assert page.controller.session.current_frame == 5
-    page.episode_list.setCurrentRow(0)
-    assert page.controller.session.current_frame == 1
+        page.episode_list.setCurrentRow(1)
+        assert page.controller.session.current_frame == 5
+        page.episode_list.setCurrentRow(0)
+        assert page.controller.session.current_frame == 1
+    finally:
+        _close_review_page(page)
 
 
 def test_jump_to_episode_api(tmp_path: Path) -> None:

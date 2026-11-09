@@ -151,6 +151,14 @@ These may improve later workflows but are not missing MVP requirements:
 - additional tracking profiles/backends;
 - algorithmic corrector cleanup after the behavior-preserving MVP integration.
 
+## Product quality note (Sprint 2)
+
+S3 review video decode/overlay composition now runs on a dedicated decoder
+thread with latest-wins frame requests so scrubbing and playback controls stay
+interactive. Scientific pose values, correction/acceptance semantics, and
+`tracked_pose.parquet` are unchanged. See
+`docs/roadmap/product_quality_sprint_2_responsive_s3_video.md`.
+
 ## Related design history
 
 Gate 1–4 decision documents under `docs/subsystem_03/` remain design history.

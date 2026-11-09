@@ -70,6 +70,9 @@ def silence_modal_dialogs(monkeypatch: Any) -> None:
 def destroy_page(page: Any) -> None:
     """Close and delete a page once its workers are done, flushing deferred deletes."""
 
+    has_running = getattr(page, "has_running_task", None)
+    if callable(has_running):
+        wait_until(lambda: not bool(has_running()), timeout_sec=120.0)
     page.close()
     page.deleteLater()
     APPLICATION.processEvents()

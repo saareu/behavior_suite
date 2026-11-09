@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtGui import QCloseEvent, QColor, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -40,7 +40,12 @@ from tracking_correction.review import (
     track_legend_entries,
 )
 from tracking_correction.run_discovery import TrackingCorrectionRunSummary
-from ui.controllers.tracking_review_controller import TrackingReviewController
+from ui.controllers.tracking_review_controller import (
+    FrameRenderSnapshot,
+    FrameRequestIdentity,
+    TrackingReviewController,
+)
+from ui.tracking_review_frame_decoder import TrackingReviewFrameDecoder
 from ui.widgets.pose_video_view import PoseVideoView
 
 # Poll frequently; wall-clock math decides which prepared frame to show.
@@ -53,6 +58,8 @@ class TrackingReviewPage(QWidget):
     unexpected_error = Signal(str)
     status_message = Signal(str)
     accepted = Signal(object)
+    task_running_changed = Signal(bool)
+    task_finished = Signal()
 
     def __init__(
         self,
@@ -66,12 +73,23 @@ class TrackingReviewPage(QWidget):
         self._timer.timeout.connect(self._on_playback_tick)
         self._reviewable_runs: tuple[TrackingCorrectionRunSummary, ...] = ()
         self._episode_list_items: list[CorrectionEpisode] = []
+        self._frame_decoder = TrackingReviewFrameDecoder(
+            self,
+            frame_reader=self.controller.frame_reader,
+            use_sequential_capture=self.controller.use_sequential_capture,
+        )
+        self._frame_decoder.snapshot_ready.connect(self._on_frame_snapshot)
+        self._frame_decoder.decode_failed.connect(self._on_frame_decode_failed)
+        self._frame_decoder.finished.connect(self._on_frame_decoder_finished)
+        self._last_emitted_running: bool | None = None
 
         self.video = PoseVideoView()
         self.video.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
         )
+        self.frame_pending_label = QLabel("")
+        self.frame_pending_label.setStyleSheet("color: #b0b0b0;")
         self.run_label = QLabel("No project or S3 run loaded")
         self.run_label.setWordWrap(True)
         self.run_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -157,6 +175,7 @@ class TrackingReviewPage(QWidget):
         viewer_layout = QVBoxLayout(viewer_panel)
         viewer_layout.setContentsMargins(0, 0, 0, 0)
         viewer_layout.addWidget(self.video, 1)
+        viewer_layout.addWidget(self.frame_pending_label)
         viewer_layout.addWidget(self.scrubber)
         viewer_layout.addLayout(transport)
 
@@ -264,6 +283,37 @@ class TrackingReviewPage(QWidget):
         self.undo_button.clicked.connect(self._undo_manual_edit)
         self.reset_manual_button.clicked.connect(self._reset_manual_edits)
         self._set_controls_enabled(False)
+        self._emit_running_changed()
+
+    def shutdown_frame_decoder(self, *, wait_ms: int = 5_000) -> bool:
+        """Stop playback and cooperatively release the decoder thread."""
+
+        self._stop_playback()
+        self.controller.abandon_pending_frame()
+        finished = self._frame_decoder.shutdown(wait_ms=wait_ms)
+        self._update_frame_pending_chrome()
+        self._update_frame_dependent_edit_enablement()
+        self._emit_running_changed()
+        return finished
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        if not self.shutdown_frame_decoder():
+            # Soft timeout: keep page/controller/decoder ownership until the
+            # worker thread finishes; never destroy a still-executing decoder.
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    @property
+    def has_running_task(self) -> bool:
+        return self._frame_decoder.is_running or self.controller.frame_pending
+
+    def _emit_running_changed(self) -> None:
+        running = self.has_running_task
+        if running == self._last_emitted_running:
+            return
+        self._last_emitted_running = running
+        self.task_running_changed.emit(running)
 
     def _build_legend_widget(self) -> QGroupBox:
         box = QGroupBox("Track colors")
@@ -348,6 +398,7 @@ class TrackingReviewPage(QWidget):
         """Open one completed automatic S3 run for review."""
 
         self._stop_playback()
+        self._frame_decoder.release_capture()
         try:
             session = self.controller.open_run(s3_run_dir)
         except TrackingCorrectionError as exc:
@@ -493,6 +544,9 @@ class TrackingReviewPage(QWidget):
             self.episode_list,
         ):
             widget.setEnabled(enabled)
+        if enabled:
+            # Frame-dependent actions require displayed pixels == playhead.
+            self._update_frame_dependent_edit_enablement()
 
     def _populate_node_combo(self, nodes: tuple[str, ...]) -> None:
         current = self.node_combo.currentData()
@@ -507,30 +561,35 @@ class TrackingReviewPage(QWidget):
         self.node_combo.blockSignals(False)
 
     def _refresh_view(self, *, sync_episode_list: bool = True) -> None:
-        try:
-            view = self.controller.current_view()
-        except TrackingCorrectionError as exc:
-            self.status_message.emit(str(exc))
-            QMessageBox.warning(self, "Frame load failed", str(exc))
-            return
-        except Exception as exc:
-            self.unexpected_error.emit(str(exc))
-            return
+        """Update cheap playhead metadata immediately and request async pixels."""
+
         session = self.controller.session
-        self.video.set_frame(view.image_bgr)
+        if session is None:
+            return
+        self._refresh_metadata(sync_episode_list=sync_episode_list)
+        self._request_current_frame()
+
+    def _refresh_metadata(self, *, sync_episode_list: bool = True) -> None:
+        session = self.controller.session
+        if session is None:
+            return
+        frame_idx = session.current_frame
+        frame_count = session.frame_count
+        correction_types = session.current_correction_types()
+        episode = session.current_correction_episode()
+        acceptance_state = session.acceptance_state
+        manual_edit_count = session.manual_edit_count
+
         self.frame_label.setText(
-            f"Prepared frame: {view.frame_idx} / {max(0, view.frame_count - 1)} "
-            f"({view.frame_count} frames @ {session.fps_header:g} Hz — {session.fps_source})"
-            if session is not None
-            else f"Prepared frame: {view.frame_idx} / {max(0, view.frame_count - 1)}"
+            f"Prepared frame: {frame_idx} / {max(0, frame_count - 1)} "
+            f"({frame_count} frames @ {session.fps_header:g} Hz — {session.fps_source})"
         )
-        if view.correction_types:
+        if correction_types:
             self.correction_label.setText(
-                "Corrections on this frame: " + ", ".join(view.correction_types)
+                "Corrections on this frame: " + ", ".join(correction_types)
             )
         else:
             self.correction_label.setText("Corrections on this frame: none")
-        episode = view.correction_episode
         if episode is None:
             self.episode_label.setText("Machine episode: none")
         else:
@@ -539,46 +598,132 @@ class TrackingReviewPage(QWidget):
                 f"Machine episode: frames {episode.start_frame}–{episode.end_frame} "
                 f"({episode.frame_count} frames); types: {types}"
             )
-        if session is not None:
-            edge_count = len(session.skeleton_edges)
-            self.skeleton_label.setText(
-                f"Skeleton: {edge_count} edge(s) from {session.skeleton_source}"
-            )
-            self._refresh_legend(
-                implanted_track=session.headstage_track_for_frame(view.frame_idx)
-            )
-            if sync_episode_list:
-                self._populate_episode_list(session.navigable_episodes)
-                self._sync_episode_list_selection(session.current_frame)
-        else:
-            self._refresh_legend(implanted_track=None)
-        if view.acceptance_state == ACCEPTANCE_SUPERSEDED:
+        edge_count = len(session.skeleton_edges)
+        self.skeleton_label.setText(
+            f"Skeleton: {edge_count} edge(s) from {session.skeleton_source}"
+        )
+        self._refresh_legend(
+            implanted_track=session.headstage_track_for_frame(frame_idx)
+        )
+        if sync_episode_list:
+            self._populate_episode_list(session.navigable_episodes)
+            self._sync_episode_list_selection(frame_idx)
+        if acceptance_state == ACCEPTANCE_SUPERSEDED:
             self.acceptance_label.setText(
                 "Acceptance: superseded — press Accept Tracking again"
             )
         else:
-            self.acceptance_label.setText(f"Acceptance: {view.acceptance_state}")
-        self.manual_edits_label.setText(f"Manual edits: {view.manual_edit_count}")
-        self._populate_node_combo(view.available_nodes)
+            self.acceptance_label.setText(f"Acceptance: {acceptance_state}")
+        self.manual_edits_label.setText(f"Manual edits: {manual_edit_count}")
+        self._populate_node_combo(session.available_node_names)
         self.scrubber.blockSignals(True)
-        self.scrubber.setValue(view.frame_idx)
+        self.scrubber.setValue(frame_idx)
         self.scrubber.blockSignals(False)
-        already = is_currently_accepted(view.acceptance_state)
+        already = is_currently_accepted(acceptance_state)
         if already:
             self.accept_button.setText("Accept Tracking (already accepted)")
-        elif view.acceptance_state == ACCEPTANCE_SUPERSEDED:
+        elif acceptance_state == ACCEPTANCE_SUPERSEDED:
             self.accept_button.setText("Accept Tracking (re-accept required)")
         else:
             self.accept_button.setText("Accept Tracking")
-        can_undo = view.manual_edit_count > 0
+        can_undo = manual_edit_count > 0
         self.undo_button.setEnabled(self.accept_button.isEnabled() and can_undo)
         self.reset_manual_button.setEnabled(
             self.accept_button.isEnabled()
-            and (
-                can_undo
-                or (session is not None and session.has_automatic_baseline)
-            )
+            and (can_undo or session.has_automatic_baseline)
         )
+        self._update_frame_pending_chrome()
+        self._update_frame_dependent_edit_enablement()
+
+    def _request_current_frame(self) -> None:
+        request = self.controller.begin_frame_request()
+        if request is None:
+            return
+        self._frame_decoder.submit(request)
+        self._update_frame_pending_chrome()
+        self._update_frame_dependent_edit_enablement()
+        self._emit_running_changed()
+
+    def _update_frame_pending_chrome(self) -> None:
+        error = self.controller.last_frame_error
+        if error:
+            self.frame_pending_label.setText(f"Decode failed: {error}")
+            return
+        if self.controller.frame_pending:
+            selected = (
+                None
+                if self.controller.session is None
+                else self.controller.session.current_frame
+            )
+            displayed = self.controller.displayed_frame_idx
+            if displayed is not None and selected is not None and displayed != selected:
+                self.frame_pending_label.setText(
+                    f"Loading frame {selected}… (showing {displayed}; "
+                    "frame edits paused until display catches up)"
+                )
+            elif selected is not None:
+                self.frame_pending_label.setText(
+                    f"Loading frame {selected}… "
+                    "(frame edits paused until display catches up)"
+                )
+            else:
+                self.frame_pending_label.setText(
+                    "Loading frame… (frame edits paused until display catches up)"
+                )
+            return
+        self.frame_pending_label.setText("")
+
+    def _update_frame_dependent_edit_enablement(self) -> None:
+        """Disable playhead-tied edits while visible pixels lag the playhead."""
+
+        session_ready = (
+            self.controller.session is not None and self.accept_button.isEnabled()
+        )
+        allow = session_ready and self.controller.display_matches_playhead
+        for widget in (
+            self.swap_identities_button,
+            self.swap_node_button,
+            self.blank_node_button,
+            self.use_current_start_button,
+            self.use_current_end_button,
+        ):
+            widget.setEnabled(allow)
+
+    def _require_display_matches_playhead(self, action: str) -> bool:
+        if self.controller.display_matches_playhead:
+            return True
+        message = (
+            f"{action} is unavailable until the selected prepared frame is displayed."
+        )
+        self.status_message.emit(message)
+        return False
+
+    def _on_frame_snapshot(self, result: object) -> None:
+        if not isinstance(result, FrameRenderSnapshot):
+            self.unexpected_error.emit(
+                f"Unexpected S3 frame result type: {type(result)!r}"
+            )
+            return
+        accepted = self.controller.apply_frame_snapshot(result)
+        self._update_frame_pending_chrome()
+        self._update_frame_dependent_edit_enablement()
+        if not accepted:
+            return
+        if result.image_bgr is not None:
+            self.video.set_frame(result.image_bgr)
+
+    def _on_frame_decode_failed(self, identity: object, message: str) -> None:
+        if not isinstance(identity, FrameRequestIdentity):
+            return
+        if not self.controller.note_frame_failure(identity, message):
+            return
+        self._update_frame_pending_chrome()
+        self._update_frame_dependent_edit_enablement()
+        self.status_message.emit(f"Frame decode failed: {message}")
+
+    def _on_frame_decoder_finished(self) -> None:
+        self._emit_running_changed()
+        self.task_finished.emit()
 
     def _sync_episode_list_selection(self, frame_idx: int) -> None:
         selected = -1
@@ -793,16 +938,22 @@ class TrackingReviewPage(QWidget):
         session = self.controller.session
         if session is None:
             return
+        if not self._require_display_matches_playhead("Use current as start"):
+            return
         self.interval_start_spin.setValue(session.current_frame)
 
     def _use_current_as_end(self) -> None:
         session = self.controller.session
         if session is None:
             return
+        if not self._require_display_matches_playhead("Use current as end"):
+            return
         self.interval_end_spin.setValue(session.current_frame)
 
     def _swap_identities(self) -> None:
         self._stop_playback()
+        if not self._require_display_matches_playhead("Swap identities"):
+            return
         try:
             result = self.controller.swap_identities(
                 self.interval_start_spin.value(),
@@ -832,6 +983,8 @@ class TrackingReviewPage(QWidget):
 
     def _swap_node(self) -> None:
         self._stop_playback()
+        if not self._require_display_matches_playhead("Swap node"):
+            return
         node = self._selected_node()
         if node is None:
             QMessageBox.warning(self, "Swap node failed", "Select a node first.")
@@ -863,6 +1016,8 @@ class TrackingReviewPage(QWidget):
 
     def _blank_node(self) -> None:
         self._stop_playback()
+        if not self._require_display_matches_playhead("Blank node"):
+            return
         node = self._selected_node()
         if node is None:
             QMessageBox.warning(self, "Blank node failed", "Select a node first.")

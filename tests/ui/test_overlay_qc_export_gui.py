@@ -1134,8 +1134,14 @@ def test_s3_page_entry_button_present() -> None:
     from ui.pages.tracking_review_page import TrackingReviewPage
 
     page = TrackingReviewPage(TrackingReviewController())
-    assert page.export_qc_overlay_button.text() == "Export QC Overlay Video…"
-    assert callable(page._open_overlay_qc_export)
+    try:
+        assert page.export_qc_overlay_button.text() == "Export QC Overlay Video…"
+        assert callable(page._open_overlay_qc_export)
+    finally:
+        page._frame_decoder.shutdown(wait_ms=2_000)
+        page.close()
+        page.deleteLater()
+        _APPLICATION.processEvents()
 
 
 def test_s5_dialog_family_launch_and_option_toggles(tmp_path: Path) -> None:
