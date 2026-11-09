@@ -36,14 +36,23 @@ CLIPS_DIRNAME = "clips"
 # CSV format profiles (shared leaf constants; avoid circular imports with
 # results_packaging.legacy_framewise_csv).
 LEGACY_FRAMEWISE_PROFILE_ID = "legacy_framewise_v1"
+LEGACY_FRAMEWISE_V2_PROFILE_ID = "legacy_framewise_v2"
 PACKAGE_BOUTS_AUTOMATED_PROFILE_ID = "package_bouts_automated"
 CSV_FORMAT_PROFILES: frozenset[str] = frozenset(
     {
         LEGACY_FRAMEWISE_PROFILE_ID,
+        LEGACY_FRAMEWISE_V2_PROFILE_ID,
         PACKAGE_BOUTS_AUTOMATED_PROFILE_ID,
     }
 )
-DEFAULT_CSV_FORMAT_PROFILE = LEGACY_FRAMEWISE_PROFILE_ID
+LEGACY_FRAMEWISE_PROFILE_IDS: frozenset[str] = frozenset(
+    {
+        LEGACY_FRAMEWISE_PROFILE_ID,
+        LEGACY_FRAMEWISE_V2_PROFILE_ID,
+    }
+)
+# New export jobs default to prepared-frame v2; v1 remains explicitly selectable.
+DEFAULT_CSV_FORMAT_PROFILE = LEGACY_FRAMEWISE_V2_PROFILE_ID
 
 # Selection modes (exactly one per job).
 SELECTION_ALL_PACKAGE_BOUTS = "all_package_bouts"

@@ -11,7 +11,9 @@ from results_packaging.legacy_framewise_csv.contracts import (
     DEFAULT_CSV_FORMAT_PROFILE,
     FRAMEWISE_JOB_KIND,
     LEGACY_FRAMEWISE_PROFILE_ID,
+    LEGACY_FRAMEWISE_V2_PROFILE_ID,
     LegacyFramewiseError,
+    is_legacy_framewise_profile,
 )
 from results_packaging.media_csv_export.config import (
     CsvExportSettings,
@@ -26,11 +28,11 @@ from results_packaging.media_csv_export.contracts import (
 
 @dataclass(frozen=True, slots=True)
 class LegacyFramewiseExportSettings:
-    """Immutable settings for a legacy_framewise_v1 export job."""
+    """Immutable settings for a legacy framewise CSV export job (v1 or v2)."""
 
     schema_version: str = EXPORT_SETTINGS_SCHEMA_VERSION
     job_kind: str = FRAMEWISE_JOB_KIND
-    format_profile: str = LEGACY_FRAMEWISE_PROFILE_ID
+    format_profile: str = DEFAULT_CSV_FORMAT_PROFILE
     behavior_source_kind: str = "automated_s8"
 
     def validated(self) -> LegacyFramewiseExportSettings:
@@ -41,10 +43,11 @@ class LegacyFramewiseExportSettings:
         if self.job_kind != JOB_KIND_CSV:
             raise LegacyFramewiseError(f"job_kind must be {JOB_KIND_CSV!r}.")
         profile = str(self.format_profile).strip()
-        if profile != LEGACY_FRAMEWISE_PROFILE_ID:
+        if not is_legacy_framewise_profile(profile):
             raise LegacyFramewiseError(
-                f"LegacyFramewiseExportSettings only accepts "
-                f"{LEGACY_FRAMEWISE_PROFILE_ID!r}; got {profile!r}."
+                "LegacyFramewiseExportSettings only accepts "
+                f"{LEGACY_FRAMEWISE_PROFILE_ID!r} or "
+                f"{LEGACY_FRAMEWISE_V2_PROFILE_ID!r}; got {profile!r}."
             )
         kind = str(self.behavior_source_kind).strip()
         if kind not in {"automated_s8", "published_s10"}:
@@ -55,6 +58,11 @@ class LegacyFramewiseExportSettings:
 
     def to_settings_dict(self) -> dict[str, Any]:
         cfg = self.validated()
+        row_grain = (
+            "s1_prepared_video_frame"
+            if cfg.format_profile == LEGACY_FRAMEWISE_V2_PROFILE_ID
+            else "dense_frame"
+        )
         return {
             "schema_version": cfg.schema_version,
             "job_kind": cfg.job_kind,
@@ -62,10 +70,15 @@ class LegacyFramewiseExportSettings:
             "behavior_source_kind": cfg.behavior_source_kind,
             "notes": {
                 "never_mutates_upstream_science": True,
-                "original_frame_authority": "sync_index.raw_decode_frame_idx",
+                "original_frame_authority": (
+                    "s1_prepared_sync.raw_decode_frame_idx"
+                    if cfg.format_profile == LEGACY_FRAMEWISE_V2_PROFILE_ID
+                    else "sync_index.raw_decode_frame_idx"
+                ),
                 "pose_authority": "s4_final_pose",
                 "coordinate_space": "prepared_video_pixels",
                 "coordinate_format": "round_to_integer_one_decimal",
+                "row_grain": row_grain,
                 "crlf": True,
             },
         }
@@ -86,7 +99,7 @@ def csv_settings_with_format_profile(
     *,
     default_format_profile: str = DEFAULT_CSV_FORMAT_PROFILE,
 ) -> CsvExportSettings:
-    """Build CsvExportSettings including format_profile (default legacy)."""
+    """Build CsvExportSettings including format_profile (default legacy v2)."""
 
     raw = dict(data or {})
     format_profile = normalize_csv_format_profile(

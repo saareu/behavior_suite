@@ -1,9 +1,9 @@
-"""Contracts for the legacy-compatible framewise CSV profile.
+"""Contracts for the legacy-compatible framewise CSV profiles.
 
-Profile ``legacy_framewise_v1`` matches the laboratory reference column names,
-order, and formatting of historical framewise exports. Scientific values come
-from pinned S8/S10 states, S9 ``sync_index``, and S4 ``final_pose`` — this
-module never mutates upstream artifacts.
+Profiles ``legacy_framewise_v1`` (dense-row domain) and ``legacy_framewise_v2``
+(prepared-frame domain) share the laboratory 23-column header and formatting.
+Scientific values come from pinned S8/S10 states, S9/S4 SyncMaps, and S4
+``final_pose`` — this module never mutates upstream artifacts.
 """
 
 from __future__ import annotations
@@ -14,11 +14,18 @@ from results_packaging.media_csv_export.contracts import (  # noqa: F401
     CSV_FORMAT_PROFILES,
     DEFAULT_CSV_FORMAT_PROFILE,
     LEGACY_FRAMEWISE_PROFILE_ID,
+    LEGACY_FRAMEWISE_PROFILE_IDS,
+    LEGACY_FRAMEWISE_V2_PROFILE_ID,
     PACKAGE_BOUTS_AUTOMATED_PROFILE_ID,
 )
 
 LEGACY_FRAMEWISE_PROFILE_VERSION = "1"
+LEGACY_FRAMEWISE_V2_PROFILE_VERSION = "2"
 LEGACY_FRAMEWISE_CSV_FILENAME = "legacy_framewise_v1.csv"
+LEGACY_FRAMEWISE_V2_CSV_FILENAME = "legacy_framewise_v2.csv"
+LEGACY_FRAMEWISE_V2_ALIGNMENT_FILENAME = (
+    "legacy_framewise_v2_frame_alignment.parquet"
+)
 
 BEHAVIOR_SOURCE_AUTOMATED = "automated_s8"
 BEHAVIOR_SOURCE_REVIEWED = "published_s10"
@@ -49,6 +56,16 @@ LEGACY_FRAMEWISE_COLUMNS: tuple[str, ...] = (
     "tail_base_1_y",
 )
 
+# Sidecar columns (not part of the laboratory CSV).
+FRAME_ALIGNMENT_COLUMNS: tuple[str, ...] = (
+    "prepared_frame_idx",
+    "raw_decode_frame_idx",
+    "behavior_dense_frame_idx",
+    "pose_dense_frame_idx",
+    "behavior_coverage",
+    "pose_coverage",
+)
+
 # Pose nodes/tracks emitted by the reference schema (no headstage_1 columns).
 LEGACY_POSE_NODE_TRACKS: tuple[tuple[str, int], ...] = (
     ("headstage", 0),
@@ -66,16 +83,19 @@ FRAMEWISE_EXPORT_RUN_PREFIX = "csv_export"
 FRAMEWISE_JOB_KIND = "csv_export"
 
 EXPORT_MANIFEST_SCHEMA_VERSION = "legacy_framewise_export_manifest_v1"
+EXPORT_MANIFEST_SCHEMA_VERSION_V2 = "legacy_framewise_export_manifest_v2"
 COORDINATE_SPACE = "prepared_video_pixels"
 COORDINATE_FORMAT_POLICY = (
     "round_half_even_to_integer_then_one_decimal; "
     "empty_field_for_missing; "
     "reference_.0_is_formatting_convention_not_source_dtype; "
-    "rounding_exclusive_to_legacy_framewise_v1_csv_serialization; "
+    "rounding_exclusive_to_legacy_framewise_csv_serialization; "
     "does_not_mutate_s4_final_pose"
 )
 ORIGINAL_FRAME_INDEXING = "0_based_raw_decode_frame_idx"
 DENSE_FRAME_INDEXING = "0_based_contiguous_dense_sample_idx"
+PREPARED_FRAME_INDEXING = "0_based_s1_prepared_video_frame_idx"
+PLATEAU_POLICY_LAST_IN_PLATEAU = "last_in_plateau"
 
 # Indexing notes recorded in manifests (not CSV columns).
 INDEXING_NOTES = (
@@ -84,6 +104,22 @@ INDEXING_NOTES = (
     "(0-based contiguous analysis grid). Legitimate many-to-one dense→original "
     "mappings are preserved. prepared_frame_idx is never substituted for frame."
 )
+INDEXING_NOTES_V2 = (
+    "Row domain = S1 prepared-video frames (prepared_frame_idx 0..n-1). "
+    "frame = S1 prepared_sync.raw_decode_frame_idx for that prepared frame "
+    "(0-based original-video decode index). dense_frame_idx = behavioral dense "
+    "sample selected via package SyncMap + LAST_IN_PLATEAU (nullable / "
+    "noncontiguous / repeated allowed). Pose coordinates come from an "
+    "independently resolved S4 SyncMap + LAST_IN_PLATEAU sample. Missing "
+    "coverage retains the prepared-frame row with empty fields from that "
+    "source; never interpolate or invent labels/coordinates."
+)
+
+
+def is_legacy_framewise_profile(profile: str | None) -> bool:
+    """True for dense v1 or prepared-frame v2 laboratory CSV profiles."""
+
+    return str(profile or "").strip() in LEGACY_FRAMEWISE_PROFILE_IDS
 
 
 class LegacyFramewiseError(ValueError):

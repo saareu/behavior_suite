@@ -25,6 +25,8 @@ from results_packaging.media_csv_export.config import (
 from results_packaging.media_csv_export.contracts import (
     DEFAULT_CSV_FORMAT_PROFILE,
     LEGACY_FRAMEWISE_PROFILE_ID,
+    LEGACY_FRAMEWISE_PROFILE_IDS,
+    LEGACY_FRAMEWISE_V2_PROFILE_ID,
     PACKAGE_BOUTS_AUTOMATED_PROFILE_ID,
     SELECTION_ALL_PACKAGE_BOUTS,
     SELECTION_CHANNELS_BEHAVIORS,
@@ -51,7 +53,7 @@ class ExportUiSettings:
     format_profile: str = DEFAULT_CSV_FORMAT_PROFILE
     pre_context_sec: float = 0.0
     post_context_sec: float = 0.0
-    # Explicit S4 when lineage missing (legacy_framewise_v1 only; never auto-newest).
+    # Explicit S4 when lineage missing (legacy framewise only; never auto-newest).
     pose_run_dir: str | None = None
     # C3-5 opt-in overlay media (default remains naked / unannotated).
     overlay_enabled: bool = False
@@ -77,6 +79,7 @@ class ExportUiSettings:
         )
         if format_profile not in {
             LEGACY_FRAMEWISE_PROFILE_ID,
+            LEGACY_FRAMEWISE_V2_PROFILE_ID,
             PACKAGE_BOUTS_AUTOMATED_PROFILE_ID,
         }:
             raise ExportConfigError(
@@ -89,10 +92,10 @@ class ExportUiSettings:
             if self.pose_run_dir is not None and str(self.pose_run_dir).strip()
             else None
         )
-        if pose_dir is not None and format_profile != LEGACY_FRAMEWISE_PROFILE_ID:
+        if pose_dir is not None and format_profile not in LEGACY_FRAMEWISE_PROFILE_IDS:
             raise ExportConfigError(
-                "pose_run_dir is only valid with format_profile="
-                f"{LEGACY_FRAMEWISE_PROFILE_ID!r}."
+                "pose_run_dir is only valid with legacy framewise format profiles "
+                f"{sorted(LEGACY_FRAMEWISE_PROFILE_IDS)}."
             )
         overlay_enabled = bool(self.overlay_enabled)
         overlay_include_behavior = bool(self.overlay_include_behavior)
@@ -343,7 +346,7 @@ def export_provenance_summary(
 
 @dataclass(frozen=True, slots=True)
 class LegacyPoseUiState:
-    """GUI pose-source state for legacy_framewise_v1 (lineage default vs picker)."""
+    """GUI pose-source state for legacy framewise CSV (lineage default vs picker)."""
 
     format_is_legacy: bool
     lineage_available: bool
@@ -365,13 +368,13 @@ def build_legacy_pose_ui_state(
     """Compute whether the S4 picker must be shown (never auto-select newest)."""
 
     from results_packaging.legacy_framewise_csv import (
-        LEGACY_FRAMEWISE_PROFILE_ID,
         inspect_package_pose_lineage,
+        is_legacy_framewise_profile,
         list_pose_run_candidates,
     )
 
     profile = str(format_profile or DEFAULT_CSV_FORMAT_PROFILE).strip()
-    is_legacy = profile == LEGACY_FRAMEWISE_PROFILE_ID
+    is_legacy = is_legacy_framewise_profile(profile)
     if not is_legacy:
         return LegacyPoseUiState(
             format_is_legacy=False,

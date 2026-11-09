@@ -24,7 +24,7 @@ def format_coordinate(value: Any) -> str:
     integer, then one decimal place), not evidence that the scientific source
     was integer-typed. Missing / non-finite values become empty fields.
 
-    This rounding is exclusive to ``legacy_framewise_v1`` CSV serialization and
+    This rounding is exclusive to legacy framewise CSV serialization (v1/v2) and
     must never be written back into S4 ``final_pose`` or other scientific stores.
     """
 
@@ -59,12 +59,15 @@ def format_legacy_framewise_rows(table: pd.DataFrame) -> list[list[str]]:
         row: list[str] = []
         for col, value in zip(LEGACY_FRAMEWISE_COLUMNS, rec, strict=True):
             if col in ("frame", "dense_frame_idx", "pred_side_by_side"):
-                if value is None or (isinstance(value, float) and math.isnan(value)):
-                    try:
-                        if pd.isna(value):
-                            row.append("")
-                            continue
-                    except (TypeError, ValueError):
+                # v2 permits nullable dense_frame_idx / SBS; v1 keeps these populated.
+                try:
+                    if value is None or pd.isna(value):
+                        row.append("")
+                        continue
+                except (TypeError, ValueError):
+                    if value is None or (
+                        isinstance(value, float) and math.isnan(value)
+                    ):
                         row.append("")
                         continue
                 row.append(str(int(value)))

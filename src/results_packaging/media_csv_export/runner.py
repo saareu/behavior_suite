@@ -92,20 +92,21 @@ def run_csv_export(
 ) -> CsvExportJobResult:
     """Validate package and publish a new automated CSV export job.
 
-    Default format profile is ``legacy_framewise_v1``. Pass
+    Default format profile is ``legacy_framewise_v2``. Pass
+    ``format_profile=legacy_framewise_v1`` for the dense-row laboratory CSV, or
     ``format_profile=package_bouts_automated`` for the historical bout table.
     """
 
     settings = _resolve_csv_settings(request)
     from results_packaging.legacy_framewise_csv.contracts import (
-        LEGACY_FRAMEWISE_PROFILE_ID,
+        is_legacy_framewise_profile,
     )
     from results_packaging.legacy_framewise_csv.runner import (
         LegacyFramewiseExportRequest,
         run_legacy_framewise_csv_export,
     )
 
-    if settings.format_profile == LEGACY_FRAMEWISE_PROFILE_ID:
+    if is_legacy_framewise_profile(settings.format_profile):
         # Pose is resolved from S6 lineage on the package; explicit pose_run_dir
         # is required when lineage is absent (never latest-S4 fallback).
         pose_dir = request.pose_run_dir
@@ -116,6 +117,7 @@ def run_csv_export(
                 session_root=Path(request.session_root).expanduser().resolve(),
                 package_dir=Path(request.package_dir).expanduser().resolve(),
                 behavior_source_kind="automated_s8",
+                format_profile=settings.format_profile,
                 timestamp=request.timestamp,
                 export_job_id=request.export_job_id,
                 output_root=request.output_root,

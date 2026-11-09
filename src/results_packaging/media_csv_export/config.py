@@ -16,7 +16,7 @@ from results_packaging.media_csv_export.contracts import (
     EXPORT_SETTINGS_SCHEMA_VERSION,
     JOB_KIND_CSV,
     JOB_KIND_MEDIA,
-    LEGACY_FRAMEWISE_PROFILE_ID,
+    LEGACY_FRAMEWISE_PROFILE_IDS,
     PACKAGE_BOUTS_AUTOMATED_PROFILE_ID,
     SELECTION_ALL_PACKAGE_BOUTS,
     SELECTION_BOUT_ID_LIST,
@@ -176,7 +176,7 @@ class CsvExportSettings:
     job_kind: str = JOB_KIND_CSV
     selection: SelectionSpec = field(default_factory=SelectionSpec)
     format_profile: str = DEFAULT_CSV_FORMAT_PROFILE
-    # Explicit S4 run when S6→S4 lineage is unavailable (legacy_framewise_v1 only).
+    # Explicit S4 run when S6→S4 lineage is unavailable (legacy framewise only).
     pose_run_dir: str | None = None
 
     def validated(self) -> CsvExportSettings:
@@ -193,7 +193,7 @@ class CsvExportSettings:
                 f"{sorted(CSV_FORMAT_PROFILES)}."
             )
         selection = self.selection
-        if profile == LEGACY_FRAMEWISE_PROFILE_ID:
+        if profile in LEGACY_FRAMEWISE_PROFILE_IDS:
             # Framewise export ignores bout selection; keep a validated default.
             selection = SelectionSpec().validated()
         else:
@@ -201,10 +201,10 @@ class CsvExportSettings:
         pose_dir: str | None = None
         if self.pose_run_dir is not None and str(self.pose_run_dir).strip():
             pose_dir = str(Path(str(self.pose_run_dir).strip()).expanduser().resolve())
-        if pose_dir is not None and profile != LEGACY_FRAMEWISE_PROFILE_ID:
+        if pose_dir is not None and profile not in LEGACY_FRAMEWISE_PROFILE_IDS:
             raise ExportConfigError(
-                "pose_run_dir is only valid with format_profile="
-                f"{LEGACY_FRAMEWISE_PROFILE_ID!r}."
+                "pose_run_dir is only valid with legacy framewise format profiles "
+                f"{sorted(LEGACY_FRAMEWISE_PROFILE_IDS)}."
             )
         return replace(
             self,
@@ -228,11 +228,25 @@ class CsvExportSettings:
                 }
             )
         else:
+            from results_packaging.media_csv_export.contracts import (
+                LEGACY_FRAMEWISE_V2_PROFILE_ID,
+            )
+
+            row_grain = (
+                "s1_prepared_video_frame"
+                if cfg.format_profile == LEGACY_FRAMEWISE_V2_PROFILE_ID
+                else "dense_frame"
+            )
+            original_authority = (
+                "s1_prepared_sync.raw_decode_frame_idx"
+                if cfg.format_profile == LEGACY_FRAMEWISE_V2_PROFILE_ID
+                else "sync_index.raw_decode_frame_idx"
+            )
             notes.update(
                 {
                     "export_provenance": "automated_or_published_reviewed",
-                    "row_grain": "dense_frame",
-                    "original_frame_authority": "sync_index.raw_decode_frame_idx",
+                    "row_grain": row_grain,
+                    "original_frame_authority": original_authority,
                     "pose_authority": "s4_final_pose",
                     "crlf": True,
                     "pose_run_dir": cfg.pose_run_dir,

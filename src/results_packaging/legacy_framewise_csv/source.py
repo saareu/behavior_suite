@@ -18,24 +18,35 @@ from behavioral_review.contracts import (
     PublicationError as ReviewPublicationError,
 )
 from behavioral_review.discovery import reopen_reviewed_run
+from behavioral_review.sync import SyncMap
+from overlay.contracts import PlateauPolicy
 from pose_finalization.contracts import FINAL_POSE_FILENAME, RUN_META_FILENAME
 from pose_finalization.runner import (
     PoseFinalizationError,
     validate_s4_run_for_downstream,
 )
+from preprocess.sync_writer import load_prepared_sync_npz
 from project.file_digest import sha256_file
 from results_packaging.legacy_framewise_csv.contracts import (
     BEHAVIOR_SOURCE_AUTOMATED,
     BEHAVIOR_SOURCE_REVIEWED,
+    INDEXING_NOTES_V2,
+    LEGACY_FRAMEWISE_PROFILE_ID,
+    LEGACY_FRAMEWISE_V2_PROFILE_ID,
     LEGACY_POSE_NODE_TRACKS,
+    PLATEAU_POLICY_LAST_IN_PLATEAU,
     LegacyFramewiseEligibilityError,
     LegacyFramewiseSourceError,
+    is_legacy_framewise_profile,
 )
 from results_packaging.media_csv_export.source import (
     ExportSourcePackage,
     validate_package_for_export,
 )
-from results_packaging.sync_index import validate_sync_index
+from results_packaging.sync_index import (
+    build_sync_index_from_prepared_sync,
+    validate_sync_index,
+)
 
 PoseSelectionMode = Literal["lineage_s6", "explicit"]
 
@@ -67,6 +78,17 @@ class LegacyFramewiseSource:
     warnings: tuple[str, ...]
     digests: dict[str, str | None]
     pose_alignment: dict[str, Any]
+    # Prepared-frame / independent timing authorities (required for v2).
+    format_profile: str = LEGACY_FRAMEWISE_PROFILE_ID
+    prepared_sync_path: Path | None = None
+    prepared_sync_sha256: str | None = None
+    prepared_frame_idx: np.ndarray | None = None
+    raw_decode_frame_idx: np.ndarray | None = None
+    n_prepared_frames: int | None = None
+    behavior_sync: SyncMap | None = None
+    pose_sync: SyncMap | None = None
+    pose_sync_build_audit: dict[str, Any] | None = None
+    timing_contract: dict[str, Any] | None = None
 
 
 def resolve_automated_legacy_framewise_source(
@@ -75,6 +97,7 @@ def resolve_automated_legacy_framewise_source(
     package_dir: Path | str,
     allow_stale_source: bool = False,
     pose_run_dir: Path | str | None = None,
+    format_profile: str = LEGACY_FRAMEWISE_PROFILE_ID,
 ) -> LegacyFramewiseSource:
     """Resolve S9 package + S8 states + lineage-pinned or explicit S4 pose."""
 
@@ -92,6 +115,7 @@ def resolve_automated_legacy_framewise_source(
         review_run_id=None,
         behavior_states_path=_require_s8_states_path(package),
         pose_run_dir=pose_run_dir,
+        format_profile=format_profile,
     )
 
 
@@ -102,6 +126,7 @@ def resolve_reviewed_legacy_framewise_source(
     package_dir: Path | str | None = None,
     allow_stale_source: bool = False,
     pose_run_dir: Path | str | None = None,
+    format_profile: str = LEGACY_FRAMEWISE_PROFILE_ID,
 ) -> LegacyFramewiseSource:
     """Resolve published S10 reviewed states + parent S9 package + S4 pose.
 
@@ -152,6 +177,7 @@ def resolve_reviewed_legacy_framewise_source(
         review_run_id=str(opened.get("review_run_id") or review_dir.name),
         behavior_states_path=states_path,
         pose_run_dir=pose_run_dir,
+        format_profile=format_profile,
     )
 
 
@@ -164,7 +190,14 @@ def _assemble_from_package(
     review_run_id: str | None,
     behavior_states_path: Path,
     pose_run_dir: Path | str | None,
+    format_profile: str = LEGACY_FRAMEWISE_PROFILE_ID,
 ) -> LegacyFramewiseSource:
+    profile = str(format_profile or LEGACY_FRAMEWISE_PROFILE_ID).strip()
+    if not is_legacy_framewise_profile(profile):
+        raise LegacyFramewiseEligibilityError(
+            f"Unsupported legacy framewise format_profile {profile!r}."
+        )
+
     sync_path = package.package_dir / "sync_index.parquet"
     if not sync_path.is_file():
         raise LegacyFramewiseEligibilityError(f"sync_index.parquet missing: {sync_path}")
@@ -178,7 +211,7 @@ def _assemble_from_package(
     if "raw_decode_frame_idx" not in sync.columns:
         raise LegacyFramewiseEligibilityError(
             "sync_index lacks raw_decode_frame_idx; original-video frame mapping "
-            "is unavailable for legacy_framewise_v1 (refusing dense+trim guess)."
+            "is unavailable for legacy framewise CSV (refusing dense+trim guess)."
         )
 
     if not behavior_states_path.is_file():
@@ -187,11 +220,13 @@ def _assemble_from_package(
         )
     states = pd.read_parquet(behavior_states_path)
 
+    require_independent_pose_timing = profile == LEGACY_FRAMEWISE_V2_PROFILE_ID
     pose_resolved = _resolve_final_pose(
         root=root,
         package=package,
         pose_run_dir=pose_run_dir,
         sync_index=sync,
+        require_independent_pose_timing=require_independent_pose_timing,
     )
     pose = pose_resolved.table
 
@@ -199,25 +234,102 @@ def _assemble_from_package(
     if package.stale_warning:
         warnings.append(package.stale_warning)
 
-    mapping_prov = {
-        "authority": "results_package_sync_index.raw_decode_frame_idx",
-        "upstream": "s1_prepared_sync.raw_decode_frame_idx[prepared_frame_idx]",
-        "indexing": "0_based_raw_decode_order",
-        "dense_indexing": "0_based_contiguous",
-        "coordinate_domain": "prepared_video_pixels",
-        "frame_domain": "original_video_raw_decode_idx",
-        "notes": (
-            "frame column is original-video decode index from S1 via S9 sync_index; "
-            "prepared_frame_idx is not exported as frame. Pose x/y remain in "
-            "prepared-video pixel space (different domain from frame)."
-        ),
-    }
+    prepared_sync_path: Path | None = None
+    prepared_sync_sha: str | None = None
+    prepared_frame_idx: np.ndarray | None = None
+    raw_decode_frame_idx: np.ndarray | None = None
+    n_prepared_frames: int | None = None
+    behavior_sync: SyncMap | None = None
+    pose_sync: SyncMap | None = None
+    pose_sync_audit: dict[str, Any] | None = None
+    timing_contract: dict[str, Any] | None = None
+
+    if profile == LEGACY_FRAMEWISE_V2_PROFILE_ID:
+        prepared_sync_path = _resolve_prepared_sync_path(
+            root=root,
+            pose_run_dir=pose_resolved.pose_run_dir,
+        )
+        try:
+            prepared = load_prepared_sync_npz(prepared_sync_path)
+        except Exception as exc:  # noqa: BLE001
+            raise LegacyFramewiseEligibilityError(
+                f"Authoritative S1 prepared_sync.npz could not be loaded for "
+                f"legacy_framewise_v2: {exc}"
+            ) from exc
+        prepared_frame_idx = np.asarray(prepared.prepared_frame_idx, dtype=np.int64)
+        raw_decode_frame_idx = np.asarray(prepared.raw_decode_frame_idx, dtype=np.int64)
+        n_prepared_frames = int(prepared_frame_idx.shape[0])
+        prepared_sync_sha = sha256_file(prepared_sync_path)
+        try:
+            behavior_sync = SyncMap.from_sync_index(sync)
+        except Exception as exc:  # noqa: BLE001
+            raise LegacyFramewiseEligibilityError(
+                "Behavioral SyncMap could not be built from package sync_index "
+                f"for independent prepared-frame timing: {exc}"
+            ) from exc
+        try:
+            pose_sync, pose_sync_audit = _build_independent_pose_sync(
+                prepared_sync_path=prepared_sync_path,
+                final_pose=pose,
+                package_run_id=package.package_run_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise LegacyFramewiseEligibilityError(
+                "Authoritative independent S4 SyncMap could not be established "
+                f"from S1 prepared_sync + S4 dense timeline (fail-closed): {exc}"
+            ) from exc
+        timing_contract = {
+            "row_domain": "s1_prepared_video_frames",
+            "behavior_timing_authority": "results_package_sync_index",
+            "pose_timing_authority": (
+                "s1_prepared_sync_nn_map_validated_against_s4_dense"
+            ),
+            "behavior_plateau_policy": PLATEAU_POLICY_LAST_IN_PLATEAU,
+            "pose_plateau_policy": PLATEAU_POLICY_LAST_IN_PLATEAU,
+            "plateau_policy_enum": PlateauPolicy.LAST_IN_PLATEAU.value,
+            "overlay_timing_semantics_reused": True,
+            "dense_indices_assumed_equal": False,
+            "n_prepared_frames": n_prepared_frames,
+            "behavior_n_dense": int(behavior_sync.n_dense),
+            "pose_n_dense": int(pose_sync.n_dense),
+            "prepared_sync_path": str(prepared_sync_path),
+            "prepared_sync_sha256": prepared_sync_sha,
+            "notes": INDEXING_NOTES_V2,
+        }
+
+    if profile == LEGACY_FRAMEWISE_V2_PROFILE_ID:
+        mapping_prov = {
+            "authority": "s1_prepared_sync.raw_decode_frame_idx",
+            "upstream": "s1_prepared_sync.npz",
+            "indexing": "0_based_raw_decode_order",
+            "prepared_indexing": "0_based_prepared_video",
+            "dense_indexing": "nullable_behavioral_last_in_plateau",
+            "coordinate_domain": "prepared_video_pixels",
+            "frame_domain": "original_video_raw_decode_idx",
+            "row_domain": "s1_prepared_video_frames",
+            "notes": INDEXING_NOTES_V2,
+        }
+    else:
+        mapping_prov = {
+            "authority": "results_package_sync_index.raw_decode_frame_idx",
+            "upstream": "s1_prepared_sync.raw_decode_frame_idx[prepared_frame_idx]",
+            "indexing": "0_based_raw_decode_order",
+            "dense_indexing": "0_based_contiguous",
+            "coordinate_domain": "prepared_video_pixels",
+            "frame_domain": "original_video_raw_decode_idx",
+            "notes": (
+                "frame column is original-video decode index from S1 via S9 sync_index; "
+                "prepared_frame_idx is not exported as frame. Pose x/y remain in "
+                "prepared-video pixel space (different domain from frame)."
+            ),
+        }
 
     digests: dict[str, str | None] = {
         "sync_index_sha256": sha256_file(sync_path),
         "behavior_states_sha256": sha256_file(behavior_states_path),
         "final_pose_sha256": pose_resolved.final_pose_sha256,
         "package_manifest_sha256": package.package_manifest_sha256,
+        "prepared_sync_sha256": prepared_sync_sha,
     }
 
     return LegacyFramewiseSource(
@@ -244,6 +356,16 @@ def _assemble_from_package(
         warnings=tuple(warnings),
         digests=digests,
         pose_alignment=dict(pose_resolved.alignment),
+        format_profile=profile,
+        prepared_sync_path=prepared_sync_path,
+        prepared_sync_sha256=prepared_sync_sha,
+        prepared_frame_idx=prepared_frame_idx,
+        raw_decode_frame_idx=raw_decode_frame_idx,
+        n_prepared_frames=n_prepared_frames,
+        behavior_sync=behavior_sync,
+        pose_sync=pose_sync,
+        pose_sync_build_audit=pose_sync_audit,
+        timing_contract=timing_contract,
     )
 
 
@@ -303,6 +425,7 @@ def _resolve_final_pose(
     package: ExportSourcePackage,
     pose_run_dir: Path | str | None,
     sync_index: pd.DataFrame,
+    require_independent_pose_timing: bool = False,
 ) -> _ResolvedPose:
     """Resolve S4 from exact S6 lineage, else require an explicit S4 run.
 
@@ -331,6 +454,7 @@ def _resolve_final_pose(
             expected_run_id=lineage.get("run_id"),
             selection_mode="lineage_s6",
             sync_index=sync_index,
+            require_independent_pose_timing=require_independent_pose_timing,
         )
 
     if explicit_dir is None:
@@ -348,6 +472,7 @@ def _resolve_final_pose(
         expected_run_id=None,
         selection_mode="explicit",
         sync_index=sync_index,
+        require_independent_pose_timing=require_independent_pose_timing,
     )
 
 
@@ -533,6 +658,7 @@ def _load_and_validate_pose_run(
     expected_run_id: str | None,
     selection_mode: PoseSelectionMode,
     sync_index: pd.DataFrame,
+    require_independent_pose_timing: bool = False,
 ) -> _ResolvedPose:
     warnings: list[str] = []
     try:
@@ -581,7 +707,14 @@ def _load_and_validate_pose_run(
             )
 
     table = pd.read_parquet(pose_path)
-    alignment = _validate_pose_alignment(table, sync_index=sync_index)
+    if require_independent_pose_timing:
+        alignment = _validate_pose_schema_for_independent_timing(table)
+        alignment["independent_timing"] = True
+        alignment["behavioral_dense_equality_required"] = False
+    else:
+        alignment = _validate_pose_alignment(table, sync_index=sync_index)
+        alignment["independent_timing"] = False
+        alignment["behavioral_dense_equality_required"] = True
     return _ResolvedPose(
         table=table,
         final_pose_path=pose_path,
@@ -592,6 +725,155 @@ def _load_and_validate_pose_run(
         alignment=alignment,
         warnings=warnings,
     )
+
+
+def _resolve_prepared_sync_path(*, root: Path, pose_run_dir: Path | None) -> Path:
+    """Resolve authoritative S1 prepared_sync for v2 (fail closed)."""
+
+    candidate = (root / "preprocess" / "prepared_sync.npz").resolve()
+    if candidate.is_file():
+        return candidate
+    if pose_run_dir is not None:
+        meta_path = pose_run_dir / RUN_META_FILENAME
+        if meta_path.is_file():
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            source_s3 = meta.get("source_s3") or {}
+            recorded = source_s3.get("prepared_sync")
+            if isinstance(recorded, str) and recorded.strip():
+                path = Path(recorded).expanduser().resolve()
+                if path.is_file():
+                    return path
+            session = source_s3.get("session_root")
+            if isinstance(session, str) and session.strip():
+                alt = Path(session).expanduser() / "preprocess" / "prepared_sync.npz"
+                if alt.is_file():
+                    return alt.resolve()
+    raise LegacyFramewiseEligibilityError(
+        "Authoritative S1 prepared_sync.npz missing; legacy_framewise_v2 cannot "
+        f"establish the prepared-video frame universe (looked for {candidate})."
+    )
+
+
+def _build_independent_pose_sync(
+    *,
+    prepared_sync_path: Path,
+    final_pose: pd.DataFrame,
+    package_run_id: str | None,
+) -> tuple[SyncMap, dict[str, Any]]:
+    """Build S4 SyncMap from prepared_sync + S4 dense timeline (overlay authority)."""
+
+    unique_dense = _unique_dense_timeline_from_final_pose(final_pose)
+    sync_build = build_sync_index_from_prepared_sync(
+        prepared_sync_path,
+        s8_unique_dense_times=unique_dense,
+        package_run_id=package_run_id,
+    )
+    sync = SyncMap.from_sync_index(sync_build.sync_index)
+    audit = {
+        **sync_build.audit_dict(),
+        "timing_authority": "s1_prepared_sync_nn_map_validated_against_s4_dense",
+        "plateau_policy": PLATEAU_POLICY_LAST_IN_PLATEAU,
+    }
+    return sync, audit
+
+
+def _unique_dense_timeline_from_final_pose(final_pose: pd.DataFrame) -> pd.DataFrame:
+    if final_pose is None or final_pose.empty:
+        raise LegacyFramewiseSourceError("final_pose table is empty.")
+    if "sample_idx" not in final_pose.columns or "time_sec" not in final_pose.columns:
+        raise LegacyFramewiseSourceError(
+            "final_pose must include sample_idx and time_sec to build independent "
+            "S4 SyncMap timing."
+        )
+    grouped = (
+        final_pose.groupby("sample_idx", sort=True, as_index=False)["time_sec"]
+        .first()
+        .sort_values("sample_idx", kind="mergesort")
+        .reset_index(drop=True)
+    )
+    grouped["dense_frame_idx"] = grouped["sample_idx"].astype("int64")
+    grouped["sample_idx"] = grouped["sample_idx"].astype("int64")
+    return grouped[["dense_frame_idx", "sample_idx", "time_sec"]]
+
+
+def _validate_pose_schema_for_independent_timing(
+    final_pose: pd.DataFrame,
+) -> dict[str, Any]:
+    """Validate S4 schema/timeline for v2 without requiring behavioral dense equality."""
+
+    required = {"sample_idx", "track", "node", "x", "y", "time_sec"}
+    missing = sorted(required - set(final_pose.columns))
+    if missing:
+        raise LegacyFramewiseSourceError(
+            f"final_pose missing required columns for independent timing: {missing}"
+        )
+    samples = pd.to_numeric(final_pose["sample_idx"], errors="coerce")
+    if samples.isna().any():
+        raise LegacyFramewiseSourceError("final_pose has NaN sample_idx.")
+    sample_vals = samples.astype(np.int64)
+    sample_set = set(int(v) for v in sample_vals.unique().tolist())
+    if not sample_set:
+        raise LegacyFramewiseSourceError("final_pose has no sample_idx values.")
+    sample_min = int(min(sample_set))
+    sample_max = int(max(sample_set))
+    expected = set(range(sample_min, sample_max + 1))
+    if sample_min != 0 or sample_set != expected:
+        raise LegacyFramewiseSourceError(
+            "S4 final_pose sample_idx must be contiguous 0-based for independent "
+            f"SyncMap timing (min={sample_min}, max={sample_max}, "
+            f"n_unique={len(sample_set)})."
+        )
+
+    nodes = set(str(v) for v in final_pose["node"].astype(str).unique().tolist())
+    tracks = set(
+        int(v)
+        for v in pd.to_numeric(final_pose["track"], errors="coerce")
+        .dropna()
+        .astype(np.int64)
+    )
+    required_nodes = {node for node, _track in LEGACY_POSE_NODE_TRACKS}
+    missing_nodes = sorted(required_nodes - nodes)
+    if missing_nodes:
+        raise LegacyFramewiseSourceError(
+            f"final_pose lacks required pose nodes for legacy export: {missing_nodes}"
+        )
+    if not {0, 1}.issubset(tracks):
+        raise LegacyFramewiseSourceError(
+            f"final_pose must include tracks 0 and 1; found {sorted(tracks)}"
+        )
+
+    present_pairs = {
+        (str(node), int(track))
+        for node, track in zip(
+            final_pose["node"].astype(str).to_numpy(),
+            pd.to_numeric(final_pose["track"], errors="coerce")
+            .fillna(-1)
+            .astype(np.int64)
+            .to_numpy(),
+            strict=True,
+        )
+    }
+    missing_pairs = [
+        f"{node}_{track}"
+        for node, track in LEGACY_POSE_NODE_TRACKS
+        if (node, track) not in present_pairs
+    ]
+    if missing_pairs:
+        raise LegacyFramewiseSourceError(
+            "final_pose lacks required node/track pairs for legacy export: "
+            f"{missing_pairs}"
+        )
+
+    return {
+        "n_pose_samples": len(sample_set),
+        "sample_min": sample_min,
+        "sample_max": sample_max,
+        "nodes": sorted(nodes),
+        "tracks": sorted(tracks),
+        "timeline_match": None,
+        "schema_ok": True,
+        "timing_mode": "independent_s4_sync_map",
+    }
 
 
 def _validate_pose_alignment(

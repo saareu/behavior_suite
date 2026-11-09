@@ -372,7 +372,11 @@ class ResultsPackagingPage(QWidget):
         self.export_post_context_spin.valueChanged.connect(self._export_settings_changed)
         self.export_format_combo = QComboBox()
         self.export_format_combo.addItem(
-            "legacy_framewise_v1 (default; automated S8 + pose)",
+            "legacy_framewise_v2 (default; prepared-frame + independent pose timing)",
+            "legacy_framewise_v2",
+        )
+        self.export_format_combo.addItem(
+            "legacy_framewise_v1 (dense-row laboratory CSV)",
             "legacy_framewise_v1",
         )
         self.export_format_combo.addItem(
@@ -1059,7 +1063,10 @@ class ResultsPackagingPage(QWidget):
         self._sync_pose_picker_widgets(settings)
         self._sync_overlay_widgets(settings)
         # Bout-selection widgets apply to media / historical bout CSV only.
-        framewise = str(settings.format_profile) == "legacy_framewise_v1"
+        framewise = str(settings.format_profile) in {
+            "legacy_framewise_v1",
+            "legacy_framewise_v2",
+        }
         for widget in (
             self.export_selection_combo,
             self.export_channels_edit,
@@ -1205,10 +1212,13 @@ class ResultsPackagingPage(QWidget):
         pose_data = self.export_pose_combo.currentData()
         pose_dir = str(pose_data) if pose_data else None
         format_profile = str(
-            self.export_format_combo.currentData() or "legacy_framewise_v1"
+            self.export_format_combo.currentData() or "legacy_framewise_v2"
         )
         # Only keep an explicit pose selection when the picker is active.
-        if format_profile != "legacy_framewise_v1" or not self.export_pose_combo.isVisible():
+        if format_profile not in {
+            "legacy_framewise_v1",
+            "legacy_framewise_v2",
+        } or not self.export_pose_combo.isVisible():
             pose_dir = None
         overlay_enabled = bool(self.export_overlay_checkbox.isChecked())
         overlay_include_pose = bool(self.export_overlay_pose_checkbox.isChecked())

@@ -1751,26 +1751,29 @@ class BehavioralReviewController:
             if opt.is_draft:
                 raise BehavioralReviewUiError(
                     "Draft S10 reviews are not eligible for final "
-                    "legacy_framewise_v1 CSV export; publish first."
+                    "legacy framewise CSV export; publish first."
                 )
             return Path(opt.run_dir).expanduser().resolve()
         if self.state.review_run_dir is not None and not self.state.draft_open:
             return Path(self.state.review_run_dir).expanduser().resolve()
         raise BehavioralReviewUiError(
             "Select a published S10 reviewed run before exporting "
-            "legacy_framewise_v1 CSV (drafts are not eligible)."
+            "legacy framewise CSV (drafts are not eligible)."
         )
 
     def legacy_csv_pose_ui_state(self, *, pose_run_dir: str | None = None):
         """Lineage vs explicit S4 picker state for published-S10 CSV export."""
 
+        from results_packaging.media_csv_export.contracts import (
+            DEFAULT_CSV_FORMAT_PROFILE,
+        )
         from ui.controllers.results_export_support import build_legacy_pose_ui_state
 
         if self.state.session_root is None:
             return build_legacy_pose_ui_state(
                 session_root=None,
                 package_dir=None,
-                format_profile="legacy_framewise_v1",
+                format_profile=DEFAULT_CSV_FORMAT_PROFILE,
                 selected_pose_run_dir=pose_run_dir,
             )
         package_dir: Path | None = None
@@ -1796,7 +1799,7 @@ class BehavioralReviewController:
         return build_legacy_pose_ui_state(
             session_root=self.state.session_root,
             package_dir=package_dir,
-            format_profile="legacy_framewise_v1",
+            format_profile=DEFAULT_CSV_FORMAT_PROFILE,
             selected_pose_run_dir=pose_run_dir,
         )
 
@@ -1833,7 +1836,7 @@ class BehavioralReviewController:
         if pose_run_dir is None or not str(pose_run_dir).strip():
             raise BehavioralReviewUiError(
                 "S6→S4 lineage is unavailable. Select a completed S4 pose run "
-                "explicitly before exporting legacy_framewise_v1 CSV "
+                "explicitly before exporting legacy framewise CSV "
                 "(automatic newest-S4 selection is disabled)."
             )
         return Path(str(pose_run_dir)).expanduser().resolve()
@@ -1844,8 +1847,9 @@ class BehavioralReviewController:
         progress_callback=None,
         timestamp: str | None = None,
         pose_run_dir: Path | str | None = None,
+        format_profile: str | None = None,
     ):
-        """Export legacy_framewise_v1 from published reviewed states only."""
+        """Export legacy framewise CSV from published reviewed states only."""
 
         if self.state.session_root is None:
             raise BehavioralReviewUiError("Open a session before CSV export.")
@@ -1857,12 +1861,17 @@ class BehavioralReviewController:
             LegacyFramewiseExportRequest,
             run_legacy_framewise_csv_export,
         )
+        from results_packaging.media_csv_export.contracts import (
+            DEFAULT_CSV_FORMAT_PROFILE,
+        )
 
+        profile = str(format_profile or DEFAULT_CSV_FORMAT_PROFILE).strip()
         return run_legacy_framewise_csv_export(
             LegacyFramewiseExportRequest(
                 session_root=Path(self.state.session_root).expanduser().resolve(),
                 review_run_dir=review_dir,
                 behavior_source_kind="published_s10",
+                format_profile=profile,
                 timestamp=timestamp,
                 pose_run_dir=resolved_pose,
             ),

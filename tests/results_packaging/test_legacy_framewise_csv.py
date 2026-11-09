@@ -160,9 +160,11 @@ def test_missing_raw_decode_is_eligibility_error():
         )
 
 
-def test_default_csv_settings_profile_is_legacy():
+def test_default_csv_settings_profile_is_legacy_v2():
+    from results_packaging.legacy_framewise_csv import LEGACY_FRAMEWISE_V2_PROFILE_ID
+
     settings = CsvExportSettings().validated()
-    assert settings.format_profile == LEGACY_FRAMEWISE_PROFILE_ID
+    assert settings.format_profile == LEGACY_FRAMEWISE_V2_PROFILE_ID
 
 
 def test_both_mouse_directions_and_sbs_conflict_rejected():

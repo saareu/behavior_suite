@@ -8,8 +8,8 @@
 | Item | Value |
 | --- | --- |
 | Profile id | `legacy_framewise_v1` |
-| Default for new CSV jobs | Yes (S9 + S10) |
-| Preserved prior profile | `package_bouts_automated` (bout table CSV) |
+| Default for new CSV jobs | No — default is now `legacy_framewise_v2` (prepared-frame). v1 remains explicitly selectable. |
+| Preserved prior profile | `package_bouts_automated` (bout table CSV); also see `legacy_framewise_csv_export_v2.md` |
 | Output file | `results_exports/csv_export__{ts}/legacy_framewise_v1.csv` |
 | Line endings | CRLF |
 | Columns | Exactly 23 (see contract below) |

@@ -286,20 +286,21 @@ def publish_csv_export(
 
     cfg = settings.validated()
     from results_packaging.legacy_framewise_csv.contracts import (
-        LEGACY_FRAMEWISE_PROFILE_ID,
+        is_legacy_framewise_profile,
     )
     from results_packaging.legacy_framewise_csv.runner import (
         LegacyFramewiseExportRequest,
         run_legacy_framewise_csv_export,
     )
 
-    if cfg.format_profile == LEGACY_FRAMEWISE_PROFILE_ID:
+    if is_legacy_framewise_profile(cfg.format_profile):
         pose_dir = cfg.pose_run_dir
         return run_legacy_framewise_csv_export(
             LegacyFramewiseExportRequest(
                 session_root=Path(session_root).expanduser().resolve(),
                 package_dir=source.package_dir,
                 behavior_source_kind="automated_s8",
+                format_profile=cfg.format_profile,
                 timestamp=timestamp,
                 export_job_id=export_job_id,
                 output_root=output_root,

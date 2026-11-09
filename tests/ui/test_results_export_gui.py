@@ -268,7 +268,7 @@ def test_legacy_pose_picker_required_when_lineage_missing(
         # Explicit selection unlocks launch.
         controller.update_export_settings(
             ExportUiSettings(
-                format_profile="legacy_framewise_v1",
+                format_profile="legacy_framewise_v2",
                 pose_run_dir=str(pose_dir),
             )
         )

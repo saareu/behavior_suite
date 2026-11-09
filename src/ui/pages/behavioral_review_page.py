@@ -842,9 +842,9 @@ class BehavioralReviewPage(QWidget):
         csv_group = QGroupBox("Export legacy framewise CSV")
         csv_form = QFormLayout(csv_group)
         csv_hint = QLabel(
-            "Default profile legacy_framewise_v1 from the selected "
-            "published S10 reviewed run (automated S8 labels are exported "
-            "from S9). Drafts are not eligible."
+            "Default profile legacy_framewise_v2 (prepared-frame) from the "
+            "selected published S10 reviewed run (automated S8 labels are "
+            "exported from S9). Drafts are not eligible."
         )
         csv_hint.setWordWrap(True)
         self.legacy_csv_source_label = QLabel(
@@ -863,7 +863,7 @@ class BehavioralReviewPage(QWidget):
         self.legacy_csv_pose_row_label = QLabel("Explicit S4 pose run")
         self.legacy_csv_pose_row_label.setVisible(False)
         self.legacy_csv_export_button = QPushButton(
-            "Export legacy_framewise_v1 CSV"
+            "Export legacy_framewise_v2 CSV"
         )
         self.legacy_csv_export_button.clicked.connect(
             self._export_legacy_framewise_csv
@@ -2925,7 +2925,7 @@ class BehavioralReviewPage(QWidget):
             QMessageBox.warning(self, "CSV export unavailable", str(exc))
             return
         self.legacy_csv_status_label.setText(
-            f"Exporting legacy_framewise_v1 from {review_dir.name}…"
+            f"Exporting legacy_framewise_v2 from {review_dir.name}…"
         )
         self.legacy_csv_export_button.setEnabled(False)
         self.status_message.emit("Legacy framewise CSV export started…")
@@ -2946,7 +2946,7 @@ class BehavioralReviewPage(QWidget):
         try:
             self.legacy_csv_runner.start_progressive(
                 operation,
-                task_name="S10 legacy_framewise_v1 CSV export",
+                task_name="S10 legacy_framewise_v2 CSV export",
                 context=context,
                 on_success=self._on_legacy_csv_export_success,
                 on_error=self._on_legacy_csv_export_error,
@@ -2962,19 +2962,19 @@ class BehavioralReviewPage(QWidget):
                 f"CSV export completed: {result.n_rows} rows → {result.job_dir}"
             )
             self.status_message.emit(
-                f"legacy_framewise_v1 CSV exported ({result.n_rows} rows)."
+                f"legacy_framewise_v2 CSV exported ({result.n_rows} rows)."
             )
         else:
             self.legacy_csv_status_label.setText(
                 f"CSV export failed: {result.error_message or result.status}"
             )
             self.status_message.emit(
-                f"legacy_framewise_v1 CSV failed: {result.error_message}"
+                f"legacy_framewise_v2 CSV failed: {result.error_message}"
             )
 
     def _on_legacy_csv_export_error(self, exc: BaseException) -> None:
         self.legacy_csv_status_label.setText(f"CSV export failed: {exc}")
-        self.status_message.emit(f"legacy_framewise_v1 CSV failed: {exc}")
+        self.status_message.emit(f"legacy_framewise_v2 CSV failed: {exc}")
 
     def _export_reviewed_overlay_media(self) -> None:
         if self.pi_report_runner.is_running or self.pi_report_controller.state.task_running:
