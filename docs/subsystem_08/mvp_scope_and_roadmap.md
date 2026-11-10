@@ -16,7 +16,7 @@ MainWindow
        BehavioralInferencePage (S7)
        BehavioralArbitrationPage (S8)
             BehavioralArbitrationController
-            GuiTaskRunner (non-cancellable arbitration / discovery)
+            GuiTaskRunner (cooperative cancel for arbitration; discovery soft-wait)
             behavioral_arbitration.* (headless scientific core)
 ```
 
@@ -37,7 +37,7 @@ S8 consumes eligible S7 predictions plus the **exact** linked S6 feature columns
 - Group 3 exposes **S7 and S8**; last Behavior page (`s7`/`s8`) is remembered.
 - Session root is shared with S1–S7.
 - **S2 / S4 tasks** hard-block all navigation.
-- **S8 arbitration** soft-locks like S5–S7: Groups 1–3 remain reachable; duplicate Run and session/source/settings mutation stay blocked; no Cancel.
+- **S8 arbitration** soft-locks like S5–S7: Groups 1–3 remain reachable; duplicate Run and session/source/settings mutation stay blocked; cooperative Cancel is available before publication (see PQ Sprint 3 Increment 2).
 - Default S7 source is newest **S8-ready** (full ethogram + linked eligible S6); manual selection is preserved on refresh.
 
 ---
@@ -122,7 +122,7 @@ Arbitration formulas and numeric thresholds were **not** changed for MVP closure
 ## Known limitations (non-MVP follow-ups)
 
 1. Group 4 packaging/review is out of S8 scope (delivered as S9+S10; see subsystem 09/10 docs).
-2. No cooperative cancellation for arbitration.
+2. Cooperative cancellation for arbitration is delivered in PQ Sprint 3 Increment 2 (`docs/roadmap/product_quality_sprint_3_increment_2_s8_cancellation.md`); mid-stage Sprint wrappers remain atomic until they return.
 3. No overlay video or manual bout editing inside S8.
 4. Two-mouse (K=2) gate remains the MVP default; K>2 out of scope.
 5. Reduced / partial-detector ethogram profile remains unresolved (full coverage hard-fail only).

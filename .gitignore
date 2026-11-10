@@ -22,6 +22,8 @@ bsuite_runs/
 /tmp_s9_gui_e_session_probe.py
 /tmp_audit_*.py
 *.s10bak
+# Product-quality sprint disposable GUI smoke trees (local only).
+/tmp_pq*/
 # Overlay / PI acceptance evidence trees (local lab only).
 /tmp_overlay*/
 /tmp_pi*/

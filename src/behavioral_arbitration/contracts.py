@@ -101,6 +101,7 @@ STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
 STATUS_COMPLETED_WITH_WARNINGS = "completed_with_warnings"
 STATUS_FAILED = "failed"
+STATUS_CANCELED = "canceled"
 
 # Discovery classifications.
 ELIGIBLE_DOWNSTREAM = "eligible"
@@ -243,3 +244,7 @@ class TemporalError(BehavioralArbitrationError):
 
 class PublicationError(BehavioralArbitrationError):
     """Immutable S8 publish / artifact write failure."""
+
+
+class BehavioralArbitrationCancelledError(BehavioralArbitrationError):
+    """Confirmed cooperative cancellation before the publication critical section."""

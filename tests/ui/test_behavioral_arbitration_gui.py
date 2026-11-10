@@ -266,7 +266,14 @@ def test_group_navigation_allowed_during_s8_arbitration(
 ) -> None:
     controller, fixture = _ready_controller(monkeypatch, tmp_path)
 
-    def _slow_runner(request: BehavioralArbitrationRequest, progress_callback=None):
+    def _slow_runner(
+        request: BehavioralArbitrationRequest,
+        progress_callback=None,
+        *,
+        cancellation_requested=None,
+        publication_started=None,
+    ):
+        del cancellation_requested, publication_started
         time.sleep(0.2)
         if progress_callback is not None:
             from preprocess.models import OperationProgress
@@ -379,7 +386,14 @@ def test_page_progress_and_failure_presentation(
     fixture = build_synthetic_session(tmp_path)
     _patch_s7_s6_ok(monkeypatch, fixture)
 
-    def _failing_runner(request: BehavioralArbitrationRequest, progress_callback=None):
+    def _failing_runner(
+        request: BehavioralArbitrationRequest,
+        progress_callback=None,
+        *,
+        cancellation_requested=None,
+        publication_started=None,
+    ):
+        del request, progress_callback, cancellation_requested, publication_started
         raise RuntimeError("synthetic arbitration failure")
 
     controller = BehavioralArbitrationController(runner=_failing_runner)

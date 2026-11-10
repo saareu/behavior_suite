@@ -17,6 +17,7 @@ from uuid import uuid4
 from behavioral_arbitration import (
     LABEL_ENGAGED,
     LABEL_UNDEFINED,
+    STATUS_CANCELED,
     BehavioralArbitrationConfig,
     BehavioralArbitrationError,
     BehavioralArbitrationProjectSummary,
@@ -38,9 +39,11 @@ from behavioral_arbitration import (
 from behavioral_arbitration.config import PosturalSettings
 from behavioral_arbitration.contracts import QC_FILENAME
 from preprocess.models import OperationProgress
+from runtime.cancellation import CancellationCallback
 from ui.controllers.run_preprocess_controller import open_folder_in_platform_explorer
 
 ProgressCallback = Callable[[OperationProgress], None]
+PublicationStartedCallback = Callable[[], None]
 FolderOpener = Callable[[Path], bool]
 BehavioralArbitrationRunner = Callable[..., BehavioralArbitrationRunResult]
 
@@ -575,13 +578,26 @@ class BehavioralArbitrationController:
         self,
         request: BehavioralArbitrationRequest,
         progress_callback: ProgressCallback | None = None,
+        *,
+        cancellation_requested: CancellationCallback | None = None,
+        publication_started: PublicationStartedCallback | None = None,
     ) -> BehavioralArbitrationRunResult:
-        return self._runner(request, progress_callback=progress_callback)
+        """Run one validated request (worker-thread safe; no Qt updates)."""
+
+        return self._runner(
+            request,
+            progress_callback=progress_callback,
+            cancellation_requested=cancellation_requested,
+            publication_started=publication_started,
+        )
 
     def execute_arbitration_launch(
         self,
         identity: ArbitrationRequestIdentity,
         progress_callback: ProgressCallback | None = None,
+        *,
+        cancellation_requested: CancellationCallback | None = None,
+        publication_started: PublicationStartedCallback | None = None,
     ) -> BehavioralArbitrationRunResult:
         """Worker-thread entry: revalidate sources, then publish arbitration."""
 
@@ -599,7 +615,12 @@ class BehavioralArbitrationController:
             )
         request = self._build_request_after_revalidate(identity)
         self.state.run_stage = "Running behavioral arbitration…"
-        return self._runner(request, progress_callback=progress_callback)
+        return self._runner(
+            request,
+            progress_callback=progress_callback,
+            cancellation_requested=cancellation_requested,
+            publication_started=publication_started,
+        )
 
     def record_success(
         self,
@@ -635,7 +656,10 @@ class BehavioralArbitrationController:
         message: str,
         *,
         expected_identity: ArbitrationRequestIdentity | None = None,
+        canceled: bool = False,
     ) -> bool:
+        """Record a failed or canceled run without marking it completed."""
+
         self.state.task_running = False
         if (
             expected_identity is not None
@@ -645,7 +669,7 @@ class BehavioralArbitrationController:
         ):
             return False
         self.state.last_result = None
-        self.state.run_stage = "Failed"
+        self.state.run_stage = STATUS_CANCELED if canceled else "Failed"
         self.state.run_error = message
         self.state.active_arbitration_identity = None
         return True

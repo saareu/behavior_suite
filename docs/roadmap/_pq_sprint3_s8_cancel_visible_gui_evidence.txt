@@ -1,0 +1,20 @@
+session_root=C:\behavior_suite\tmp_pq_sprint3_s8_cancel_gui\session
+method=instrumented_slow_worker_plus_real_cancel_persist
+prior_completed_run=behavioral_arbitration__20261110T120000
+prior_completed_eligible=True
+opened_s8_page=True
+cancel_enabled_during_run=True
+cancel_requested_feedback='Cancel requested — stopping after the current arbitration stage.'
+terminal_stage='Canceled'
+controller_run_stage='canceled'
+canceled_run_count=1
+canceled_eligible=False
+canceled_science_absent=True
+canceled_meta_present=True
+prior_still_eligible=True
+eligible_run_ids=['behavioral_arbitration__20261110T120000']
+close_deferred=True
+close_after_s8=True
+after_close_stage='Canceled'
+rerun_possible=True
+PASS

@@ -172,7 +172,7 @@ unchanged; no threshold optimization.
 
 ## Remaining limitations
 
-1. S4 / S6 / S7 / S8 scientific runners are not yet wired to the shared contract.
+1. S4 / S6 / S7 scientific runners are not yet wired to the shared contract (S8 is Increment 2).
 2. In-flight OpenCV `VideoCapture.read()` is not interruptible mid-call.
 3. Canceled runs share the discovery label `failed_or_incomplete` (no distinct
    canceled discovery chip yet).
@@ -216,5 +216,5 @@ Architectural design review passed. Final verification on 2026-11-09 confirmed:
   eligible.
 - Focused cancel/GUI/task regressions green; Ruff/Mypy clean on touched scope.
 
-**Stop before Increment 2 / S4–S8 cancellation. No further cancellation wiring
-in this increment.**
+**Increment 1 stopped before S4–S8. S8 cancellation is Increment 2
+(`product_quality_sprint_3_increment_2_s8_cancellation.md`).**

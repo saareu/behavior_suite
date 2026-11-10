@@ -3,6 +3,14 @@
 Completed S8 runs remain on disk when their recorded S7/S6 sources later
 change; discovery distinguishes eligible vs stale without rewriting historical
 completion status.
+
+Downstream (S9) selection policy
+--------------------------------
+Prefer the newest currently eligible completed run
+(``status in {completed, completed_with_warnings}`` and
+``classification == eligible``). Failed, incomplete, canceled, structurally
+invalid, and stale-source runs are never selected for downstream handoff.
+Canceled runs keep the outward ``failed_or_incomplete`` discovery classification.
 """
 
 from __future__ import annotations
@@ -232,6 +240,8 @@ def _classify_run(
         return MISSING_REQUIRED_ARTIFACTS, ()
     if status == STATUS_FAILED:
         return FAILED_OR_INCOMPLETE, ()
+    # canceled / running / failed and any other non-completed status share the
+    # outward failed_or_incomplete classification (no broader display change).
     if status not in (STATUS_COMPLETED, STATUS_COMPLETED_WITH_WARNINGS):
         return FAILED_OR_INCOMPLETE, ()
     if not states_present or not bouts_present:

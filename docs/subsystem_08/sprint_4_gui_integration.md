@@ -75,7 +75,7 @@ GUI blocking time for Run is now the cheap accept path; backend arbitration dura
 3. Confirm an **S8-ready** S7 run (default newest S8-ready; manual preserved on refresh).
 4. Inspect linked S6 id/path/alignment and detector / feature readiness reasons.
 5. Review scientific settings (Stage 8 vs Stage 10 clearly labeled); Apply settings.
-6. **Run Behavioral Arbitration** — button disables immediately (“Launching…”); settings snapshotted; cancellation unsupported.
+6. **Run Behavioral Arbitration** — button disables immediately (“Launching…”); settings snapshotted; cooperative Cancel available before publication (PQ Sprint 3 Increment 2).
 7. Soft-navigate to other groups during execution; return to S8 for progress/status.
 8. Inspect ethogram, bout, and QC/provenance panels; reopen prior S8 runs without re-arbitrating.
 
@@ -102,7 +102,7 @@ Scientific formulas are not duplicated in GUI code; the page orchestrates `behav
 - Coarse phase progress: intake (incl. revalidation) → arbitration → states → bouts → QC → publish (no fabricated fine percentages).
 - Duplicate start rejected; source/settings mutations page-locked while busy.
 - Soft group navigation remains enabled; S2/S4 hard locks unchanged.
-- Close waits for non-cancellable S8 work; partial science never marked eligible.
+- Close cooperatively cancels S8 when still interruptible (or waits through publication); partial science never marked eligible.
 - Post-success S7/S8 rediscovery is asynchronous; stale discovery snapshots are rejected.
 
 ---

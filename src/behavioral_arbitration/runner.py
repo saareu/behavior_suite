@@ -50,10 +50,12 @@ from behavioral_arbitration.contracts import (
     RUN_META_FILENAME,
     RUN_META_SCHEMA_VERSION,
     SETTINGS_USED_FILENAME,
+    STATUS_CANCELED,
     STATUS_COMPLETED,
     STATUS_COMPLETED_WITH_WARNINGS,
     STATUS_FAILED,
     STATUS_RUNNING,
+    BehavioralArbitrationCancelledError,
     PublicationError,
 )
 from behavioral_arbitration.expand import expand_dyadic_to_directional
@@ -113,8 +115,15 @@ from project.validation_memo import (
     memoized_validation,
     run_dir_fingerprint,
 )
+from runtime.cancellation import (
+    CancellationCallback,
+    raise_if_cancellation_requested,
+)
 
 ProgressCallback = Callable[[OperationProgress], None]
+PublicationStartedCallback = Callable[[], None]
+
+_CANCEL_MESSAGE = "Behavioral arbitration cancelled before publication."
 
 _SPRINT3_EXPECTED_RULE_CODES: tuple[str, ...] = (
     RULE_GAP_FILL,
@@ -376,11 +385,19 @@ def run_behavioral_arbitration_sprint3(
 def run_behavioral_arbitration_publication(
     request: BehavioralArbitrationRequest,
     progress_callback: ProgressCallback | None = None,
+    *,
+    cancellation_requested: CancellationCallback | None = None,
+    publication_started: PublicationStartedCallback | None = None,
 ) -> BehavioralArbitrationRunResult:
     """Full Sprint 1–3 pipeline with immutable S8 publish (never overwrites S7/S6).
 
     Progress callbacks are coarse phase markers only — no scientific work is
     duplicated for GUI instrumentation.
+
+    Cooperative cancellation is optional. When ``cancellation_requested`` is
+    provided, safe checkpoints raise :class:`BehavioralArbitrationCancelledError`
+    before the publication critical section. Once publication begins, cancellation
+    is ignored and the run finishes as completed or failed.
     """
 
     purpose = request.run_purpose.strip()
@@ -388,6 +405,8 @@ def run_behavioral_arbitration_publication(
         raise PublicationError("run_purpose must not be empty.")
 
     total_phases = 6
+    # Checkpoint 1: before expensive joint S7/S6 source loading and validation.
+    _raise_if_s8_cancelled(cancellation_requested)
     _report_progress(
         progress_callback,
         phase="intake",
@@ -497,8 +516,12 @@ def run_behavioral_arbitration_publication(
     diagnostics_written = False
     states_table: pd.DataFrame | None = None
     bouts_table: pd.DataFrame | None = None
+    canceled = False
+    in_publication = False
 
     try:
+        # Checkpoint 2: after source intake / run bootstrap, before arbitration.
+        _raise_if_s8_cancelled(cancellation_requested)
         _report_progress(
             progress_callback,
             phase="arbitration",
@@ -508,9 +531,23 @@ def run_behavioral_arbitration_publication(
             is_indeterminate=False,
         )
         # Re-enter through request (intake already validated; sprint1 revalidates).
+        # Call Sprint wrappers separately so cancel can stop between stages without
+        # changing scientific stage semantics (identical to run_*_sprint3 alone).
         pub_request = replace(request, s7_run_dir=s7_run_dir)
-        sprint3 = run_behavioral_arbitration_sprint3(pub_request)
+        sprint1 = run_behavioral_arbitration_sprint1(pub_request)
+        # Checkpoint 3a: between Sprint 1 and Sprint 2.
+        _raise_if_s8_cancelled(cancellation_requested)
+        sprint2 = run_behavioral_arbitration_sprint2(
+            pub_request, sprint1_result=sprint1
+        )
+        # Checkpoint 3b: between Sprint 2 and Sprint 3.
+        _raise_if_s8_cancelled(cancellation_requested)
+        sprint3 = run_behavioral_arbitration_sprint3(
+            pub_request, sprint2_result=sprint2
+        )
 
+        # Checkpoint 4: after arbitration, before behavioral-state construction.
+        _raise_if_s8_cancelled(cancellation_requested)
         _report_progress(
             progress_callback,
             phase="states",
@@ -526,6 +563,8 @@ def run_behavioral_arbitration_publication(
             source_s6_run_id=sprint3.source_s6_run_id,
             run_id=run_id,
         )
+        # Checkpoint 5: after states, before bout construction.
+        _raise_if_s8_cancelled(cancellation_requested)
         _report_progress(
             progress_callback,
             phase="bouts",
@@ -547,6 +586,8 @@ def run_behavioral_arbitration_publication(
         if RULE_LABEL_FINALIZE not in observed and RULE_LABEL_UNDEFINED not in observed:
             expected_rules.append(RULE_LABEL_FINALIZE)
 
+        # Checkpoint 6: after bouts, before QC.
+        _raise_if_s8_cancelled(cancellation_requested)
         _report_progress(
             progress_callback,
             phase="qc",
@@ -576,6 +617,11 @@ def run_behavioral_arbitration_publication(
             digests=digests,
         )
 
+        # Checkpoint 7: final pre-publication gate (after upstream revalidation).
+        _raise_if_s8_cancelled(cancellation_requested)
+        in_publication = True
+        if publication_started is not None:
+            publication_started()
         _report_progress(
             progress_callback,
             phase="publish",
@@ -607,6 +653,29 @@ def run_behavioral_arbitration_publication(
             completed_units=total_phases,
             total_units=total_phases,
             is_indeterminate=False,
+        )
+    except BehavioralArbitrationCancelledError as exc:
+        if in_publication:
+            # Should not occur: cancel checks stop before publication begins.
+            status = STATUS_FAILED
+            success = False
+            error_message = str(exc)
+            canceled = False
+        else:
+            status = STATUS_CANCELED
+            success = False
+            canceled = True
+            error_message = str(exc)
+        _unlink_science_artifacts(paths)
+        science_written = False
+        diagnostics_written = False
+        _report_progress(
+            progress_callback,
+            phase="canceled",
+            message=f"Behavioral arbitration canceled: {exc}",
+            completed_units=None,
+            total_units=total_phases,
+            is_indeterminate=True,
         )
     except Exception as exc:
         status = STATUS_FAILED
@@ -642,6 +711,9 @@ def run_behavioral_arbitration_publication(
         settings_snapshot=settings_snapshot,
         diagnostics_written=diagnostics_written,
     )
+
+    if canceled:
+        raise BehavioralArbitrationCancelledError(error_message or _CANCEL_MESSAGE)
 
     return BehavioralArbitrationRunResult(
         success=success,
@@ -685,6 +757,16 @@ def _report_progress(
             is_indeterminate=is_indeterminate,
             processed_video_time_sec=None,
         )
+    )
+
+
+def _raise_if_s8_cancelled(
+    cancellation_requested: CancellationCallback | None,
+) -> None:
+    raise_if_cancellation_requested(
+        cancellation_requested,
+        message=_CANCEL_MESSAGE,
+        error=BehavioralArbitrationCancelledError,
     )
 
 

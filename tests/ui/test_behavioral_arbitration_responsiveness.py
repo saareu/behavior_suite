@@ -169,7 +169,14 @@ def test_page_run_button_accepts_immediately(
     _patch_s7_s6_ok(monkeypatch, fixture)
     started = {"at": None}
 
-    def _slow_runner(request: BehavioralArbitrationRequest, progress_callback=None):
+    def _slow_runner(
+        request: BehavioralArbitrationRequest,
+        progress_callback=None,
+        *,
+        cancellation_requested=None,
+        publication_started=None,
+    ):
+        del progress_callback, cancellation_requested, publication_started
         started["at"] = time.perf_counter()
         time.sleep(0.25)
         return BehavioralArbitrationRunResult(

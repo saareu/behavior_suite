@@ -32,6 +32,8 @@ from PySide6.QtWidgets import (
 )
 
 from behavioral_arbitration import (
+    STATUS_CANCELED,
+    BehavioralArbitrationCancelledError,
     BehavioralArbitrationError,
     BehavioralArbitrationRunResult,
 )
@@ -76,6 +78,7 @@ class BehavioralArbitrationPage(QWidget):
         self._syncing_widgets = False
         self._active_discovery_identity: DiscoveryRequestIdentity | None = None
         self._active_arbitration_identity: ArbitrationRequestIdentity | None = None
+        self._arbitration_cancel_requested = False
         self._started_at: float | None = None
         self._last_running_state = False
         self._spin_map: dict[str, QDoubleSpinBox | QSpinBox] = {}
@@ -127,7 +130,9 @@ class BehavioralArbitrationPage(QWidget):
                 self.progress.setRange(0, 0)
                 self.stage_label.setText(state.run_stage)
             elif not state.task_running and not self.task_runner.is_running:
-                if state.run_error:
+                if state.run_stage == STATUS_CANCELED:
+                    self.stage_label.setText("Canceled")
+                elif state.run_error:
                     self.stage_label.setText(f"Failed: {state.run_error}")
                 else:
                     self.stage_label.setText(state.run_stage)
@@ -145,8 +150,9 @@ class BehavioralArbitrationPage(QWidget):
             "channels, and bout tables (Pipeline 100). Does not train models, edit "
             "bouts, or auto-generate overlays after arbitration. Optional QC overlay "
             "video export uses the shared dialog and an eligible S9 package that pins "
-            "this S8 run. Cancellation is not supported; partial artifacts are never "
-            "published as completed."
+            "this S8 run. Arbitration can be canceled cooperatively before "
+            "publication; if a run directory already exists it is kept as "
+            "canceled for traceability and is not eligible for Subsystem 9."
         )
         scope.setWordWrap(True)
 
@@ -317,6 +323,9 @@ class BehavioralArbitrationPage(QWidget):
         run_row = QHBoxLayout()
         self.run_button = QPushButton("Run Behavioral Arbitration")
         self.run_button.clicked.connect(self._run_arbitration)
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self._cancel_arbitration)
+        self.cancel_button.setEnabled(False)
         self.open_output_button = QPushButton("Open S8 run folder")
         self.open_output_button.clicked.connect(self._open_output_folder)
         self.overlay_qc_button = QPushButton("Export QC Overlay Video…")
@@ -324,6 +333,7 @@ class BehavioralArbitrationPage(QWidget):
         self.apply_settings_button = QPushButton("Apply settings")
         self.apply_settings_button.clicked.connect(self._apply_settings)
         run_row.addWidget(self.run_button)
+        run_row.addWidget(self.cancel_button)
         run_row.addWidget(self.open_output_button)
         run_row.addWidget(self.overlay_qc_button)
         run_row.addWidget(self.apply_settings_button)
@@ -831,12 +841,14 @@ class BehavioralArbitrationPage(QWidget):
             return
 
         self._active_arbitration_identity = identity
+        self._arbitration_cancel_requested = False
         self._started_at = time.perf_counter()
         self.elapsed_timer.start()
         self._update_enabled()
         self._emit_running_changed()
         self.status_message.emit(
-            "S8 arbitration started (settings snapshotted; cancellation unsupported)."
+            "S8 arbitration started (settings snapshotted; Cancel stops after "
+            "the current safe checkpoint)."
         )
 
         context = GuiTaskContext(
@@ -849,7 +861,10 @@ class BehavioralArbitrationPage(QWidget):
 
         def _operation(report: object) -> BehavioralArbitrationRunResult:
             return self.controller.execute_arbitration_launch(
-                identity, progress_callback=report  # type: ignore[arg-type]
+                identity,
+                progress_callback=report,  # type: ignore[arg-type]
+                cancellation_requested=context.is_cancellation_requested,
+                publication_started=context.mark_publication_critical_section,
             )
 
         try:
@@ -862,10 +877,15 @@ class BehavioralArbitrationPage(QWidget):
                 on_error=lambda exc: self._on_arbitration_error(exc, identity),
                 on_finished=lambda: self._on_arbitration_finished(identity),
             )
+            # Runner ownership is live only after start; refresh Cancel enablement.
+            self._update_enabled()
+            self._emit_running_changed()
         except TaskAlreadyRunningError:
             self.controller.record_failure(
                 "Arbitration already running.", expected_identity=identity
             )
+            self._active_arbitration_identity = None
+            self._arbitration_cancel_requested = False
             self.progress.setVisible(False)
             self.elapsed_timer.stop()
             self._update_enabled()
@@ -875,6 +895,63 @@ class BehavioralArbitrationPage(QWidget):
                 "Task already running",
                 "A Subsystem 8 arbitration task is already active.",
             )
+
+    def _cancel_arbitration(self) -> None:
+        """Request cooperative cancellation of the active scientific arbitration."""
+
+        if self._active_arbitration_identity is None or not self.task_runner.is_running:
+            return
+        context = self.task_runner.active_context
+        if context is not None and context.is_publication_critical_section():
+            self.stage_label.setText(
+                "Publication in progress — cancellation is no longer possible; "
+                "waiting for the worker to finish."
+            )
+            self.status_message.emit(
+                "S8 publication critical section already started; waiting for completion."
+            )
+            self._update_enabled()
+            return
+        if self._arbitration_cancel_requested:
+            return
+        self.task_runner.request_cancellation()
+        self._arbitration_cancel_requested = True
+        self.stage_label.setText(
+            "Cancel requested — stopping after the current arbitration stage."
+        )
+        self.status_message.emit(
+            "S8 cancel requested. Waiting for the worker to confirm termination."
+        )
+        self._update_enabled()
+
+    def request_cooperative_shutdown(self) -> str:
+        """Request cooperative cancel of scientific arbitration for app close.
+
+        Idempotent. Does not force-stop the QThread. If publication has already
+        started, wait for the real completed/failed outcome.
+        """
+
+        if self._active_arbitration_identity is None or not self.task_runner.is_running:
+            return (
+                "An S8 task is active. The window remains responsive and will close "
+                "when the task finishes."
+            )
+        context = self.task_runner.active_context
+        if context is not None and context.is_publication_critical_section():
+            return (
+                "S8 arbitration is publishing artifacts (noninterruptible). "
+                "The window remains open until publication finishes."
+            )
+        self.task_runner.request_cancellation()
+        self._arbitration_cancel_requested = True
+        self.stage_label.setText(
+            "Cancel requested — stopping after the current arbitration stage."
+        )
+        self._update_enabled()
+        return (
+            "S8 arbitration cancel requested. The window remains responsive and will "
+            "close after the worker confirms termination."
+        )
 
     def _on_arbitration_progress(
         self,
@@ -887,6 +964,16 @@ class BehavioralArbitrationPage(QWidget):
             return
         if not isinstance(event, GuiTaskProgressEvent):
             return
+        if event.in_publication_critical_section:
+            # Publication gate already passed: show real phase, never promise cancel.
+            pass
+        elif event.cancellation_requested or self._arbitration_cancel_requested:
+            self._arbitration_cancel_requested = True
+            self.stage_label.setText(
+                "Cancel requested — stopping after the current arbitration stage."
+            )
+            self._update_enabled()
+            return
         self.stage_label.setText(format_pipeline_progress(event))
         if (
             not event.is_indeterminate
@@ -897,6 +984,7 @@ class BehavioralArbitrationPage(QWidget):
             self.progress.setValue(int(event.completed_units))
         else:
             self.progress.setRange(0, 0)
+        self._update_enabled()
 
     def _on_arbitration_success(
         self, result: object, identity: ArbitrationRequestIdentity
@@ -912,6 +1000,8 @@ class BehavioralArbitrationPage(QWidget):
                 "Ignored stale S8 arbitration result after session/source change."
             )
             return
+        # Cancel requested after the publication gate (or after completion) does not
+        # rewrite a successful scientific outcome.
         self.stage_label.setText(f"Finished: {result.status}")
         self.refresh_from_state()
         warnings = f" ({len(result.warnings)} warnings)" if result.warnings else ""
@@ -929,19 +1019,42 @@ class BehavioralArbitrationPage(QWidget):
     def _on_arbitration_error(
         self, exc: BaseException, identity: ArbitrationRequestIdentity
     ) -> None:
+        canceled = isinstance(exc, BehavioralArbitrationCancelledError)
         message = str(exc)
         accepted = self.controller.record_failure(
-            message, expected_identity=identity
+            message, expected_identity=identity, canceled=canceled
         )
         if not accepted:
+            self.status_message.emit(
+                "Ignored stale S8 arbitration failure after session/source change."
+            )
             return
-        self.stage_label.setText(f"Failed: {message}")
+        if canceled:
+            self.stage_label.setText("Canceled")
+        else:
+            self.stage_label.setText(f"Failed: {message}")
         self.refresh_from_state()
         if self.controller.state.session_root is not None:
             with contextlib.suppress(BehavioralArbitrationUiError):
                 discovery_identity = self.controller.begin_discovery()
                 self._start_discovery_task(discovery_identity)
-        if isinstance(exc, (BehavioralArbitrationUiError, BehavioralArbitrationError)):
+        if canceled:
+            # Pre-bootstrap cancel confirms without creating a run directory; only
+            # post-bootstrap cancels retain a canceled run for traceability.
+            QMessageBox.information(
+                self,
+                "Behavioral arbitration canceled",
+                f"{message}\n\n"
+                "No science artifacts were published. A canceled run directory is "
+                "retained only when cancellation occurred after run bootstrap; "
+                "otherwise no S8 run was created. Canceled runs are not eligible "
+                "for Subsystem 9.",
+            )
+            self.status_message.emit(
+                "S8 canceled before publication. No science artifacts published; "
+                "a new run may be started."
+            )
+        elif isinstance(exc, (BehavioralArbitrationUiError, BehavioralArbitrationError)):
             QMessageBox.warning(self, "Behavioral arbitration failed", message)
             self.status_message.emit(f"S8 failed: {message}")
         else:
@@ -953,6 +1066,7 @@ class BehavioralArbitrationPage(QWidget):
             and identity.request_id == self._active_arbitration_identity.request_id
         ):
             self._active_arbitration_identity = None
+        self._arbitration_cancel_requested = False
         self.controller.state.task_running = False
         self.elapsed_timer.stop()
         self._started_at = None
@@ -1051,6 +1165,21 @@ class BehavioralArbitrationPage(QWidget):
             spin.setEnabled(not busy)
         can_run = self.controller.can_run_arbitration() and not busy
         self.run_button.setEnabled(can_run)
+        context = self.task_runner.active_context
+        arbitration_active = (
+            self._active_arbitration_identity is not None
+            and self.task_runner.is_running
+        )
+        in_publication = bool(
+            context is not None and context.is_publication_critical_section()
+        )
+        cancel_requested = bool(
+            self._arbitration_cancel_requested
+            or (context is not None and context.is_cancellation_requested())
+        )
+        self.cancel_button.setEnabled(
+            arbitration_active and not cancel_requested and not in_publication
+        )
         has_output = (
             self.controller.selected_s8_run() is not None
             or self.controller.state.last_result is not None
