@@ -49,6 +49,7 @@ STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
 STATUS_COMPLETED_WITH_WARNINGS = "completed_with_warnings"
 STATUS_FAILED = "failed"
+STATUS_CANCELED = "canceled"
 
 # Dense-pose sample provenance (uint8). Reconstructed samples never receive
 # fabricated SLEAP confidence scores.
@@ -116,3 +117,7 @@ FINAL_POSE_COLUMNS = (
 
 class PoseFinalizationError(RuntimeError):
     """Expected Subsystem 04 validation or timing error."""
+
+
+class PoseFinalizationCancelledError(PoseFinalizationError):
+    """Confirmed cooperative cancellation before the publication critical section."""

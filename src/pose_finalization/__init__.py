@@ -25,10 +25,12 @@ from pose_finalization.contracts import (
     SAVGOL_ENABLED_DEFAULT,
     SAVGOL_POLYORDER_DEFAULT,
     SAVGOL_WINDOW_LENGTH_DEFAULT,
+    STATUS_CANCELED,
     STATUS_COMPLETED,
     STATUS_COMPLETED_WITH_WARNINGS,
     STATUS_FAILED,
     TARGET_FPS_DEFAULT,
+    PoseFinalizationCancelledError,
     PoseFinalizationError,
 )
 from pose_finalization.dense_pose import (
@@ -102,6 +104,7 @@ __all__ = [
     "PROVENANCE_ORIGINAL",
     "PROVENANCE_PROTECTED_MANUAL_BLANK",
     "PROVENANCE_TEMPORAL_RESAMPLE",
+    "PoseFinalizationCancelledError",
     "PoseFinalizationError",
     "PoseFinalizationProjectSummary",
     "PoseFinalizationRequest",
@@ -113,6 +116,7 @@ __all__ = [
     "SAVGOL_POLYORDER_DEFAULT",
     "SAVGOL_WINDOW_LENGTH_DEFAULT",
     "STALE_SOURCE",
+    "STATUS_CANCELED",
     "STATUS_COMPLETED",
     "STATUS_COMPLETED_WITH_WARNINGS",
     "STATUS_FAILED",

@@ -30,6 +30,7 @@ class GuiTaskKind(StrEnum):
     CAGE_DETECTION = "cage_detection"
     PREPROCESS_RUN = "preprocess_run"
     POSE_INFERENCE_DISCOVERY = "pose_inference_discovery"
+    POSE_FINALIZATION = "pose_finalization"
     POSE_FINALIZATION_DISCOVERY = "pose_finalization_discovery"
     BLOB_FEATURES_EXTRACTION = "blob_features_extraction"
     BLOB_FEATURES_PREVIEW = "blob_features_preview"

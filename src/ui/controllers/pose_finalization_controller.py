@@ -15,6 +15,7 @@ from pose_finalization import (
     SAVGOL_ENABLED_DEFAULT,
     SAVGOL_POLYORDER_DEFAULT,
     SAVGOL_WINDOW_LENGTH_DEFAULT,
+    STATUS_CANCELED,
     TARGET_FPS_DEFAULT,
     AcceptedS3Run,
     GapFillConfig,
@@ -31,9 +32,14 @@ from pose_finalization.run_discovery import (
     PoseFinalizationRunSummary,
     summarize_pose_finalization_project,
 )
+from preprocess.models import OperationProgress
+from runtime.cancellation import CancellationCallback
 from ui.controllers.run_preprocess_controller import open_folder_in_platform_explorer
 
 FolderOpener = Callable[[Path], bool]
+ProgressCallback = Callable[[OperationProgress], None]
+PublicationStartedCallback = Callable[[], None]
+PoseFinalizationRunner = Callable[..., PoseFinalizationResult]
 
 
 class PoseFinalizationUiError(ValueError):
@@ -64,6 +70,16 @@ class DiscoveryRequestIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class FinalizationRequestIdentity:
+    """Identity used to reject stale asynchronous finalization results."""
+
+    request_id: str
+    session_root: Path
+    s3_run_id: str
+    s3_run_dir: Path
+
+
+@dataclass(frozen=True, slots=True)
 class DiscoverySnapshot:
     """Payload collected off the GUI thread for one discovery generation."""
 
@@ -86,6 +102,7 @@ class PoseFinalizationUiState:
     discovery_running: bool = False
     discovery_generation: int = 0
     active_discovery_identity: DiscoveryRequestIdentity | None = None
+    active_finalization_identity: FinalizationRequestIdentity | None = None
     run_stage: str = "Not started"
     run_error: str | None = None
     last_result: PoseFinalizationResult | None = None
@@ -99,7 +116,7 @@ class PoseFinalizationController:
         self,
         *,
         folder_opener: FolderOpener = open_folder_in_platform_explorer,
-        runner: Callable[[PoseFinalizationRequest], PoseFinalizationResult] = run_pose_finalization,
+        runner: PoseFinalizationRunner = run_pose_finalization,
     ) -> None:
         self.state = PoseFinalizationUiState()
         self._folder_opener = folder_opener
@@ -363,11 +380,15 @@ class PoseFinalizationController:
             )
         return None
 
-    def build_request(self, *, timestamp: str | None = None) -> PoseFinalizationRequest:
-        """Build a validated runner request from the current GUI state."""
+    def build_request(
+        self, *, timestamp: str | None = None
+    ) -> tuple[PoseFinalizationRequest, FinalizationRequestIdentity]:
+        """Build a validated runner request and identity from the current GUI state."""
 
         if self.state.discovery_running:
             raise PoseFinalizationUiError("S4 discovery is still running.")
+        if self.state.task_running:
+            raise PoseFinalizationUiError("Pose finalization is already running.")
         accepted = self.selected_accepted_s3()
         if accepted is None:
             reason = self.cannot_run_reason() or "No accepted S3 run selected."
@@ -379,7 +400,7 @@ class PoseFinalizationController:
         except PoseFinalizationError as exc:
             self.refresh_discovery()
             raise PoseFinalizationUiError(str(exc)) from exc
-        return PoseFinalizationRequest(
+        request = PoseFinalizationRequest(
             s3_run_dir=validated.run_dir,
             session_root=validated.session_root,
             run_purpose="gui",
@@ -396,33 +417,97 @@ class PoseFinalizationController:
                 polyorder=settings.savgol_polyorder,
             ),
         )
+        identity = FinalizationRequestIdentity(
+            request_id=str(uuid4()),
+            session_root=validated.session_root.resolve(strict=False),
+            s3_run_id=validated.run_id,
+            s3_run_dir=validated.run_dir.resolve(strict=False),
+        )
+        self.state.active_finalization_identity = identity
+        self.state.task_running = True
+        self.state.run_stage = "Running pose finalization…"
+        self.state.run_error = None
+        return request, identity
 
     def execute_request(
-        self, request: PoseFinalizationRequest
+        self,
+        request: PoseFinalizationRequest,
+        progress_callback: ProgressCallback | None = None,
+        *,
+        cancellation_requested: CancellationCallback | None = None,
+        publication_started: PublicationStartedCallback | None = None,
     ) -> PoseFinalizationResult:
         """Run one validated request (worker-thread safe; no Qt updates)."""
 
-        return self._runner(request)
+        return self._runner(
+            request,
+            progress_callback=progress_callback,
+            cancellation_requested=cancellation_requested,
+            publication_started=publication_started,
+        )
 
-    def record_success(self, result: PoseFinalizationResult) -> None:
-        """Apply a successful result on the GUI thread after the worker finishes."""
+    def record_success(
+        self,
+        result: PoseFinalizationResult,
+        *,
+        expected_identity: FinalizationRequestIdentity | None = None,
+    ) -> bool:
+        """Apply a successful result only when the finalization identity is current."""
 
+        self.state.task_running = False
+        if not self._is_current_finalization_result(expected_identity):
+            return False
         self.state.last_result = result
         self.state.run_stage = result.status
         self.state.run_error = None
         self.state.selected_s4_run_id = result.run_id
+        self.state.active_finalization_identity = None
         try:
             self.refresh_discovery()
             self.state.selected_s4_run_id = result.run_id
         except PoseFinalizationUiError:
             pass
+        return True
 
-    def record_failure(self, message: str) -> None:
-        """Record a failed/interrupted run without marking it completed."""
+    def record_failure(
+        self,
+        message: str,
+        *,
+        expected_identity: FinalizationRequestIdentity | None = None,
+        canceled: bool = False,
+    ) -> bool:
+        """Record a failed or canceled run without marking it completed."""
 
+        self.state.task_running = False
+        if (
+            expected_identity is not None
+            and self.state.active_finalization_identity is not None
+            and expected_identity.request_id
+            != self.state.active_finalization_identity.request_id
+        ):
+            return False
         self.state.last_result = None
-        self.state.run_stage = "Failed"
+        self.state.run_stage = STATUS_CANCELED if canceled else "Failed"
         self.state.run_error = message
+        self.state.active_finalization_identity = None
+        return True
+
+    def _is_current_finalization_result(
+        self, expected: FinalizationRequestIdentity | None
+    ) -> bool:
+        if expected is None:
+            return self.state.active_finalization_identity is None
+        active = self.state.active_finalization_identity
+        if active is None:
+            return False
+        if expected.request_id != active.request_id:
+            return False
+        current_root = self.state.session_root
+        if current_root is None:
+            return False
+        return current_root.resolve(strict=False) == expected.session_root.resolve(
+            strict=False
+        )
 
     def open_selected_s4_folder(self) -> bool:
         """Open the selected S4 run directory in the platform file browser."""

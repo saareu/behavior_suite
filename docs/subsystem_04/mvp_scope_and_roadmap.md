@@ -9,6 +9,12 @@ runs on a background `GuiTaskRunner` (`POSE_FINALIZATION_DISCOVERY`) using the
 S7 request-identity pattern. Digest checks are unchanged. See
 [`../roadmap/product_quality_sprint_1_async_discovery.md`](../roadmap/product_quality_sprint_1_async_discovery.md).
 
+**Product-quality note (Sprint 3 Increment 3):** Scientific S4 finalization now
+supports cooperative cancellation with a publication gate, explicit
+`status=canceled`, S6 ineligibility for canceled runs, GUI Cancel, preserved
+hard-navigation lock until worker stop, and deferred MainWindow shutdown. See
+[`../roadmap/product_quality_sprint_3_increment_3_s4_cancellation.md`](../roadmap/product_quality_sprint_3_increment_3_s4_cancellation.md).
+
 ## Agreed S4 boundary
 
 Subsystem 04 consumes an **explicitly accepted** Subsystem 03 result and
@@ -32,12 +38,14 @@ possible. It is **never** equivalent to acceptance for S4.
 2. S4 automatically selects the latest eligible accepted S3 run; choose another
    accepted run when several exist.
 3. Optionally open Advanced Settings (defaults are preserved if left closed).
-4. Click **Run Finalization** (background `GuiTaskRunner`; duplicate launches
-   blocked while a run is active).
-5. Inspect processing status (`completed`, `completed_with_warnings`, or
-   `failed`).
+4. Click **Run Finalization** (background progressive `GuiTaskRunner`; duplicate
+   launches blocked while a run is active). Optional **Cancel** requests a
+   cooperative stop at the next safe checkpoint before publication.
+5. Inspect processing status (`completed`, `completed_with_warnings`,
+   `failed`, or worker-confirmed `canceled`). Canceled runs are retained for
+   auditability and are not S6-eligible.
 6. View the compact QC summary and open the S4 run folder for
-   `final_pose.parquet`.
+   `final_pose.parquet` when published.
 
 There is no S4 visual review workspace and no S4 user-acceptance step.
 After S3 acceptance, the main window can continue to Subsystem 4; S4 still

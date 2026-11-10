@@ -3,23 +3,25 @@
 Pipeline:
   validate accepted S3
   → authoritative S1 timing
-  → dense 120 Hz construction + gap fill
+  → dense 120 Hz construction
+  → gap fill / reconstruction
   → Savitzky–Golay smoothing
   → QC
   → revalidate S3 acceptance
   → write final artifacts
 
 Upstream S1/S2/S3 artifacts remain read-only. Partial/invalid outputs are never
-marked completed.
+marked completed. Cooperative cancellation is optional and checked only at safe
+stage boundaries before the publication critical section.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -35,18 +37,30 @@ from pose_finalization.contracts import (
     RUN_META_SCHEMA_VERSION,
     SETTINGS_SCHEMA_VERSION,
     SETTINGS_USED_FILENAME,
+    STATUS_CANCELED,
     STATUS_COMPLETED,
     STATUS_COMPLETED_WITH_WARNINGS,
     STATUS_FAILED,
     STATUS_RUNNING,
+    PoseFinalizationCancelledError,
     PoseFinalizationError,
 )
 from pose_finalization.dense_pose import DensePoseResult, construct_dense_pose
 from pose_finalization.export import build_final_pose_table, write_final_pose_parquet
-from pose_finalization.gap_fill import GapFillConfig
+from pose_finalization.gap_fill import GapFillConfig, fill_coordinate_gaps
 from pose_finalization.qc import QcConfig, QcSummary, evaluate_finalization_qc
 from pose_finalization.smoothing import SmoothConfig, SmoothResult, apply_savgol_smoothing
 from pose_finalization.timing import build_timing_map_from_prepared_sync
+from preprocess.models import OperationProgress
+from runtime.cancellation import (
+    CancellationCallback,
+    raise_if_cancellation_requested,
+)
+
+ProgressCallback = Callable[[OperationProgress], None]
+PublicationStartedCallback = Callable[[], None]
+
+_CANCEL_MESSAGE = "Pose finalization cancelled before publication."
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,13 +105,35 @@ class _RunPaths:
     processing_log: Path
 
 
-def run_pose_finalization(request: PoseFinalizationRequest) -> PoseFinalizationResult:
-    """Run the Sprint 3 pose-finalization pipeline and persist S4 artifacts."""
+def run_pose_finalization(
+    request: PoseFinalizationRequest,
+    progress_callback: ProgressCallback | None = None,
+    *,
+    cancellation_requested: CancellationCallback | None = None,
+    publication_started: PublicationStartedCallback | None = None,
+) -> PoseFinalizationResult:
+    """Run the Sprint 3 pose-finalization pipeline and persist S4 artifacts.
+
+    Cooperative cancellation is optional. When ``cancellation_requested`` is
+    provided, safe checkpoints raise :class:`PoseFinalizationCancelledError`
+    before the publication critical section. Once publication begins, cancellation
+    is ignored and the run finishes as completed or failed.
+    """
 
     purpose = request.run_purpose.strip()
     if not purpose:
         raise PoseFinalizationError("run_purpose must not be empty.")
 
+    # Checkpoint 0: before accepted-S3 validation / run bootstrap.
+    _raise_if_s4_cancelled(cancellation_requested)
+    _report_progress(
+        progress_callback,
+        phase="validating_inputs",
+        message="Validating inputs",
+        completed_units=0,
+        total_units=None,
+        is_indeterminate=True,
+    )
     accepted = _resolve_input(request)
     timestamp = _sanitize_timestamp(request.timestamp or _now_timestamp())
     run_id = f"pose_finalization__{timestamp}"
@@ -172,20 +208,79 @@ def run_pose_finalization(request: PoseFinalizationRequest) -> PoseFinalizationR
     success = False
     warnings: tuple[str, ...] = ()
     final_pose_written = False
+    canceled = False
+    in_publication = False
 
     try:
+        # Checkpoint 1: after bootstrap, before timing / expensive pose loading.
+        _raise_if_s4_cancelled(cancellation_requested)
+        _report_progress(
+            progress_callback,
+            phase="preparing_timing",
+            message="Preparing timing",
+            completed_units=1,
+            total_units=None,
+            is_indeterminate=True,
+        )
         timing = build_timing_map_from_prepared_sync(accepted.prepared_sync_path)
+
+        # Checkpoint 2: after source/timing validation.
+        _raise_if_s4_cancelled(cancellation_requested)
+        _report_progress(
+            progress_callback,
+            phase="building_dense_pose",
+            message="Building dense pose",
+            completed_units=2,
+            total_units=None,
+            is_indeterminate=True,
+        )
+        # Checkpoint 3: immediately before dense construction (loads tracked pose).
+        _raise_if_s4_cancelled(cancellation_requested)
         dense = construct_dense_pose(
             accepted.tracked_pose_path,
             timing,
             gap_fill_config=gap_cfg,
-            apply_gap_fill=True,
+            apply_gap_fill=False,
+        )
+
+        # Checkpoint 4: after dense construction, before gap reconstruction.
+        _raise_if_s4_cancelled(cancellation_requested)
+        _report_progress(
+            progress_callback,
+            phase="reconstructing_gaps",
+            message="Reconstructing gaps",
+            completed_units=3,
+            total_units=None,
+            is_indeterminate=True,
+        )
+        dense = _apply_gap_fill(dense, gap_cfg)
+
+        # Checkpoint 5: after gap filling / reconstruction.
+        _raise_if_s4_cancelled(cancellation_requested)
+        _report_progress(
+            progress_callback,
+            phase="smoothing",
+            message="Smoothing",
+            completed_units=4,
+            total_units=None,
+            is_indeterminate=True,
         )
         smooth = apply_savgol_smoothing(
             x=dense.x,
             y=dense.y,
             protected=dense.protected,
             config=smooth_cfg,
+        )
+
+        # Checkpoint 6: after smoothing.
+        _raise_if_s4_cancelled(cancellation_requested)
+        _report_progress(
+            progress_callback,
+            phase="computing_qc",
+            message="Computing QC",
+            completed_units=5,
+            total_units=None,
+            is_indeterminate=True,
         )
         table = build_final_pose_table(dense, smooth)
         qc_summary = evaluate_finalization_qc(
@@ -199,6 +294,16 @@ def run_pose_finalization(request: PoseFinalizationRequest) -> PoseFinalizationR
                 "S4 structural QC failed: " + "; ".join(qc_summary.failures)
             )
 
+        # Checkpoint 7: after QC computation.
+        _raise_if_s4_cancelled(cancellation_requested)
+        _report_progress(
+            progress_callback,
+            phase="revalidating_sources",
+            message="Revalidating sources",
+            completed_units=6,
+            total_units=None,
+            is_indeterminate=True,
+        )
         # Revalidate immediately before completion so a superseded/mutated S3
         # acceptance cannot produce a completed S4 artifact.
         revalidated = validate_accepted_s3_run(accepted.run_dir)
@@ -207,6 +312,19 @@ def run_pose_finalization(request: PoseFinalizationRequest) -> PoseFinalizationR
                 "Accepted S3 tracked_pose.parquet changed during S4 processing."
             )
 
+        # Checkpoint 8: final pre-publication gate.
+        _raise_if_s4_cancelled(cancellation_requested)
+        in_publication = True
+        if publication_started is not None:
+            publication_started()
+        _report_progress(
+            progress_callback,
+            phase="writing_artifacts",
+            message="Writing artifacts",
+            completed_units=7,
+            total_units=None,
+            is_indeterminate=True,
+        )
         write_final_pose_parquet(paths.final_pose, table)
         final_pose_written = True
 
@@ -217,6 +335,30 @@ def run_pose_finalization(request: PoseFinalizationRequest) -> PoseFinalizationR
             status = STATUS_COMPLETED
             warnings = ()
         success = True
+        _report_progress(
+            progress_callback,
+            phase="completed",
+            message=f"Pose finalization finished ({status})",
+            completed_units=8,
+            total_units=None,
+            is_indeterminate=True,
+        )
+    except PoseFinalizationCancelledError as exc:
+        if in_publication:
+            # Should not occur: cancel checks stop before publication begins.
+            status = STATUS_FAILED
+            success = False
+            error_message = str(exc)
+            canceled = False
+        else:
+            status = STATUS_CANCELED
+            success = False
+            canceled = True
+            error_message = str(exc)
+        if paths.final_pose.exists():
+            with suppress(OSError):
+                paths.final_pose.unlink()
+        final_pose_written = False
     except Exception as exc:
         status = STATUS_FAILED
         success = False
@@ -245,6 +387,8 @@ def run_pose_finalization(request: PoseFinalizationRequest) -> PoseFinalizationR
         final_pose_written=final_pose_written,
     )
 
+    if canceled:
+        raise PoseFinalizationCancelledError(error_message or _CANCEL_MESSAGE)
     if not success:
         raise PoseFinalizationError(error_message or "Pose finalization failed.")
 
@@ -322,6 +466,56 @@ def validate_s4_run_for_downstream(s4_run_dir: Path | str) -> dict[str, Any]:
         "source_s3_run_id": accepted.run_id,
         "tracked_pose_sha256": accepted.tracked_pose_sha256,
     }
+
+
+def _apply_gap_fill(dense: DensePoseResult, gap_cfg: GapFillConfig) -> DensePoseResult:
+    """Apply the public gap-fill API and rebuild the immutable dense result."""
+
+    filled_x, filled_y, filled_prov = fill_coordinate_gaps(
+        x=dense.x,
+        y=dense.y,
+        provenance=dense.provenance,
+        protected=dense.protected,
+        node_names=dense.node_names,
+        config=gap_cfg,
+    )
+    for array in (filled_x, filled_y, filled_prov):
+        array.setflags(write=False)
+    return replace(dense, x=filled_x, y=filled_y, provenance=filled_prov)
+
+
+def _raise_if_s4_cancelled(
+    cancellation_requested: CancellationCallback | None,
+) -> None:
+    raise_if_cancellation_requested(
+        cancellation_requested,
+        message=_CANCEL_MESSAGE,
+        error=PoseFinalizationCancelledError,
+    )
+
+
+def _report_progress(
+    progress_callback: ProgressCallback | None,
+    *,
+    phase: str,
+    message: str,
+    completed_units: int | None,
+    total_units: int | None,
+    is_indeterminate: bool,
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(
+        OperationProgress(
+            phase=phase,
+            message=message,
+            completed_units=completed_units,
+            total_units=total_units,
+            total_is_estimate=False,
+            is_indeterminate=is_indeterminate,
+            processed_video_time_sec=None,
+        )
+    )
 
 
 def _resolve_input(request: PoseFinalizationRequest) -> AcceptedS3Run:

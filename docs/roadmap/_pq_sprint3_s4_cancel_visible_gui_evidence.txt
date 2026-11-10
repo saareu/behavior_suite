@@ -1,0 +1,10 @@
+PQ Sprint 3 Increment 3 — S4 visible GUI cancellation smoke
+work_root: C:\behavior_suite\tmp_pq_sprint3_s4_cancel_gui
+PASS: Cancel enabled during cancellable S4 processing
+PASS: hard navigation locked while worker active
+PASS: Cancel requested feedback visible; navigation still locked
+PASS: worker-confirmed Canceled; unpublished artifacts removed
+PASS: canceled run ineligible; prior completed remains eligible
+PASS: close during active cancel defers shutdown; worker retained
+PASS: deferred close waited for worker completion
+RESULT: PASS

@@ -15,10 +15,10 @@ from PySide6.QtWidgets import QApplication
 
 from pose_finalization import (
     ELIGIBLE_DOWNSTREAM,
-    PoseFinalizationRequest,
-    PoseFinalizationResult,
     STALE_SOURCE,
     STATUS_COMPLETED,
+    PoseFinalizationRequest,
+    PoseFinalizationResult,
     run_pose_finalization,
 )
 from preprocess.sync_writer import build_prepared_sync, write_prepared_sync_npz
@@ -27,6 +27,8 @@ from tracking_correction.contracts import (
     ACCEPTANCE_NOT_ACCEPTED,
     ACCEPTANCE_SUPERSEDED,
     FINAL_TRACKED_POSE_FILENAME,
+)
+from tracking_correction.contracts import (
     RUN_META_FILENAME as S3_RUN_META_FILENAME,
 )
 from ui.controllers.pose_finalization_controller import (
@@ -214,11 +216,15 @@ def test_advanced_settings_validation_and_defaults(tmp_path: Path) -> None:
         controller.update_settings(
             PoseFinalizationUiSettings(savgol_window_length=10)
         )
-    request = controller.build_request(timestamp="20261019T200000")
+    request, identity = controller.build_request(timestamp="20261019T200000")
+    assert identity.s3_run_id
     assert request.gap_fill_config is not None
     assert request.gap_fill_config.linear_max_frames == 20
     assert request.smooth_config is not None
     assert request.smooth_config.enabled is True
+    # build_request arms the active-run identity; clear for this settings-only check.
+    controller.state.task_running = False
+    controller.state.active_finalization_identity = None
 
 
 def test_page_run_finalization_background_and_qc(tmp_path: Path) -> None:
@@ -251,7 +257,14 @@ def test_page_duplicate_launch_blocked(tmp_path: Path) -> None:
     session = tmp_path / "session"
     _write_accepted_session(session, n_frames=30)
 
-    def slow_runner(request: PoseFinalizationRequest) -> PoseFinalizationResult:
+    def slow_runner(
+        request: PoseFinalizationRequest,
+        progress_callback=None,
+        *,
+        cancellation_requested=None,
+        publication_started=None,
+    ) -> PoseFinalizationResult:
+        del progress_callback, cancellation_requested, publication_started
         time.sleep(0.4)
         return run_pose_finalization(request)
 
@@ -309,7 +322,14 @@ def test_failed_run_not_marked_completed(tmp_path: Path) -> None:
     session = tmp_path / "session"
     _write_accepted_session(session, n_frames=16)
 
-    def boom(_request: PoseFinalizationRequest) -> PoseFinalizationResult:
+    def boom(
+        _request: PoseFinalizationRequest,
+        progress_callback=None,
+        *,
+        cancellation_requested=None,
+        publication_started=None,
+    ) -> PoseFinalizationResult:
+        del progress_callback, cancellation_requested, publication_started
         raise RuntimeError("forced failure")
 
     controller = PoseFinalizationController(runner=boom)

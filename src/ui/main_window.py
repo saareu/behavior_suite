@@ -1234,7 +1234,7 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """Wait for non-cancellable S2/S3/S4/S6/S7/S9/S10 work; cooperatively cancel S1/S5/S8."""
+        """Wait for non-cancellable S2/S3/S6/S7/S9/S10 work; cooperatively cancel S1/S4/S5/S8."""
 
         # Abandon in-flight workspace discovery; never write a partial catalog.
         self.workspace_controller.cancel_background_scan(reason="window closing")
@@ -1261,10 +1261,8 @@ class MainWindow(QMainWindow):
         if self.finalization_page.has_running_task:
             event.ignore()
             self._close_after_s4_task = True
-            self.statusBar().showMessage(
-                "Pose finalization is active and has no safe cancellation hook. "
-                "The window remains responsive and will close when the task finishes."
-            )
+            message = self.finalization_page.request_cooperative_shutdown()
+            self.statusBar().showMessage(message)
             return
         if self.blob_features_page.has_running_task:
             event.ignore()

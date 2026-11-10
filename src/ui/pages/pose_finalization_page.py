@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from pose_finalization import TARGET_FPS_DEFAULT
+from pose_finalization import STATUS_CANCELED, TARGET_FPS_DEFAULT
 from pose_finalization.run_discovery import (
     ELIGIBLE_DOWNSTREAM,
     FAILED_OR_INCOMPLETE,
@@ -39,6 +39,7 @@ from pose_finalization.run_discovery import (
 from ui.controllers.pose_finalization_controller import (
     DiscoveryRequestIdentity,
     DiscoverySnapshot,
+    FinalizationRequestIdentity,
     PoseFinalizationController,
     PoseFinalizationUiError,
     PoseFinalizationUiSettings,
@@ -46,8 +47,10 @@ from ui.controllers.pose_finalization_controller import (
 from ui.tasks import (
     GuiTaskContext,
     GuiTaskKind,
+    GuiTaskProgressEvent,
     GuiTaskRunner,
     TaskAlreadyRunningError,
+    format_pipeline_progress,
     format_task_duration,
 )
 from ui.workspace.page_binding import request_shared_session
@@ -73,6 +76,8 @@ class PoseFinalizationPage(QWidget):
         self._started_at: float | None = None
         self._last_running_state: bool | None = None
         self._active_discovery_identity: DiscoveryRequestIdentity | None = None
+        self._active_finalization_identity: FinalizationRequestIdentity | None = None
+        self._finalization_cancel_requested = False
         self._build_ui()
         self.elapsed_timer = QTimer(self)
         self.elapsed_timer.setInterval(500)
@@ -128,7 +133,9 @@ class PoseFinalizationPage(QWidget):
         title.setStyleSheet("font-size: 20px; font-weight: 600;")
         scope = QLabel(
             "Finalize an explicitly accepted Subsystem 3 result into dense 120 Hz "
-            "final_pose.parquet. No visual review or S4 acceptance step."
+            "final_pose.parquet. No visual review or S4 acceptance step. "
+            "Finalization can be canceled cooperatively before publication; canceled "
+            "runs are kept for traceability and are not eligible for Subsystem 6."
         )
         scope.setWordWrap(True)
 
@@ -193,11 +200,15 @@ class PoseFinalizationPage(QWidget):
         run_row = QHBoxLayout()
         self.run_button = QPushButton("Run Finalization")
         self.run_button.clicked.connect(self._run_finalization)
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self._cancel_finalization)
+        self.cancel_button.setEnabled(False)
         self.open_output_button = QPushButton("Open S4 run folder")
         self.open_output_button.clicked.connect(self._open_output_folder)
         self.overlay_qc_button = QPushButton("Export QC Overlay Video…")
         self.overlay_qc_button.clicked.connect(self._open_overlay_qc_export)
         run_row.addWidget(self.run_button)
+        run_row.addWidget(self.cancel_button)
         run_row.addWidget(self.open_output_button)
         run_row.addWidget(self.overlay_qc_button)
         run_row.addStretch(1)
@@ -388,7 +399,9 @@ class PoseFinalizationPage(QWidget):
         """Replace the transient "Discovering…" text with the last run status."""
 
         state = self.controller.state
-        if state.run_error:
+        if state.run_stage == STATUS_CANCELED:
+            self.stage_label.setText("Canceled")
+        elif state.run_error:
             self.stage_label.setText(f"Failed: {state.run_error}")
         elif state.last_result is not None:
             self.stage_label.setText(f"Finished: {state.last_result.status}")
@@ -498,34 +511,61 @@ class PoseFinalizationPage(QWidget):
         try:
             settings = self._read_settings_from_widgets()
             self.controller.update_settings(settings)
-            request = self.controller.build_request()
+            request, identity = self.controller.build_request()
         except PoseFinalizationUiError as exc:
             QMessageBox.warning(self, "Cannot run finalization", str(exc))
             self.status_message.emit(str(exc))
             self.refresh_from_state()
             return
 
+        self._active_finalization_identity = identity
+        self._finalization_cancel_requested = False
         self._started_at = time.perf_counter()
-        self.controller.state.task_running = True
-        self.controller.state.run_stage = "Running pose finalization…"
-        self.controller.state.run_error = None
         self.stage_label.setText("Running pose finalization…")
+        self.progress.setRange(0, 0)
         self.progress.setVisible(True)
         self.elapsed_timer.start()
         self._update_enabled()
         self._emit_running_changed()
-        self.status_message.emit("Pose finalization started.")
+        self.status_message.emit(
+            "Pose finalization started (Cancel stops after the next safe checkpoint)."
+        )
+
+        context = GuiTaskContext(
+            task_id=uuid4().hex,
+            task_kind=GuiTaskKind.POSE_FINALIZATION,
+            project_dir=identity.session_root,
+            raw_video_path=None,
+            generation=0,
+        )
+
+        def _operation(report: object) -> object:
+            return self.controller.execute_request(
+                request,
+                progress_callback=report,  # type: ignore[arg-type]
+                cancellation_requested=context.is_cancellation_requested,
+                publication_started=context.mark_publication_critical_section,
+            )
 
         try:
-            self.task_runner.start(
-                lambda: self.controller.execute_request(request),
+            self.task_runner.start_progressive(
+                _operation,
                 task_name="pose finalization",
-                on_success=self._on_run_success,
-                on_error=self._on_run_error,
-                on_finished=self._on_run_finished,
+                context=context,
+                on_progress=lambda event: self._on_run_progress(event, identity),
+                on_success=lambda result: self._on_run_success(result, identity),
+                on_error=lambda exc: self._on_run_error(exc, identity),
+                on_finished=lambda: self._on_run_finished(identity),
             )
+            self._update_enabled()
+            self._emit_running_changed()
         except TaskAlreadyRunningError:
-            self.controller.state.task_running = False
+            self.controller.record_failure(
+                "Pose finalization already running.",
+                expected_identity=identity,
+            )
+            self._active_finalization_identity = None
+            self._finalization_cancel_requested = False
             self.progress.setVisible(False)
             self.elapsed_timer.stop()
             self._update_enabled()
@@ -536,13 +576,113 @@ class PoseFinalizationPage(QWidget):
                 "A pose finalization task is already active.",
             )
 
-    def _on_run_success(self, result: object) -> None:
+    def _cancel_finalization(self) -> None:
+        """Request cooperative cancellation of the active scientific finalization."""
+
+        if self._active_finalization_identity is None or not self.task_runner.is_running:
+            return
+        context = self.task_runner.active_context
+        if context is not None and context.is_publication_critical_section():
+            self.stage_label.setText(
+                "Publication in progress — cancellation is no longer possible; "
+                "waiting for the worker to finish."
+            )
+            self.status_message.emit(
+                "S4 publication critical section already started; waiting for completion."
+            )
+            self._update_enabled()
+            return
+        if self._finalization_cancel_requested:
+            return
+        self.task_runner.request_cancellation()
+        self._finalization_cancel_requested = True
+        self.stage_label.setText(
+            "Cancel requested — waiting for a safe processing checkpoint."
+        )
+        self.status_message.emit(
+            "S4 cancel requested. Waiting for the worker to confirm termination."
+        )
+        self._update_enabled()
+
+    def request_cooperative_shutdown(self) -> str:
+        """Request cooperative cancel of scientific finalization for app close.
+
+        Idempotent. Does not force-stop the QThread. If publication has already
+        started, wait for the real completed/failed outcome.
+        """
+
+        if self._active_finalization_identity is None or not self.task_runner.is_running:
+            return (
+                "An S4 task is active. The window remains responsive and will close "
+                "when the task finishes."
+            )
+        context = self.task_runner.active_context
+        if context is not None and context.is_publication_critical_section():
+            return (
+                "S4 finalization is publishing artifacts (noninterruptible). "
+                "The window remains open until publication finishes."
+            )
+        self.task_runner.request_cancellation()
+        self._finalization_cancel_requested = True
+        self.stage_label.setText(
+            "Cancel requested — waiting for a safe processing checkpoint."
+        )
+        self._update_enabled()
+        return (
+            "S4 finalization cancel requested. The window remains responsive and will "
+            "close after the worker confirms termination."
+        )
+
+    def _on_run_progress(
+        self,
+        event: object,
+        identity: FinalizationRequestIdentity,
+    ) -> None:
+        if self._active_finalization_identity is None:
+            return
+        if identity.request_id != self._active_finalization_identity.request_id:
+            return
+        if not isinstance(event, GuiTaskProgressEvent):
+            return
+        if event.in_publication_critical_section:
+            pass
+        elif event.cancellation_requested or self._finalization_cancel_requested:
+            self._finalization_cancel_requested = True
+            self.stage_label.setText(
+                "Cancel requested — waiting for a safe processing checkpoint."
+            )
+            self._update_enabled()
+            return
+        self.stage_label.setText(format_pipeline_progress(event))
+        if (
+            not event.is_indeterminate
+            and event.total_units is not None
+            and event.completed_units is not None
+        ):
+            self.progress.setRange(0, int(event.total_units))
+            self.progress.setValue(int(event.completed_units))
+        else:
+            self.progress.setRange(0, 0)
+        self._update_enabled()
+
+    def _on_run_success(
+        self, result: object, identity: FinalizationRequestIdentity
+    ) -> None:
         from pose_finalization import PoseFinalizationResult
 
         if not isinstance(result, PoseFinalizationResult):
             self.unexpected_error.emit(f"Unexpected S4 result type: {type(result)!r}")
             return
-        self.controller.record_success(result)
+        accepted = self.controller.record_success(
+            result, expected_identity=identity
+        )
+        if not accepted:
+            self.status_message.emit(
+                "Discarded stale finalization result (session or source changed)."
+            )
+            self.refresh_from_state()
+            return
+        # Cancel requested after the publication gate does not rewrite success.
         self.stage_label.setText(f"Finished: {result.status}")
         self.refresh_from_state()
         warnings = f" ({len(result.warnings)} warnings)" if result.warnings else ""
@@ -550,22 +690,58 @@ class PoseFinalizationPage(QWidget):
             f"S4 {result.status}{warnings}. Output: {result.final_pose_path}"
         )
 
-    def _on_run_error(self, exc: BaseException) -> None:
+    def _on_run_error(
+        self, exc: BaseException, identity: FinalizationRequestIdentity
+    ) -> None:
+        from pose_finalization import (
+            PoseFinalizationCancelledError,
+            PoseFinalizationError,
+        )
+
+        canceled = isinstance(exc, PoseFinalizationCancelledError)
         message = str(exc)
-        self.controller.record_failure(message)
-        self.stage_label.setText(f"Failed: {message}")
+        accepted = self.controller.record_failure(
+            message, expected_identity=identity, canceled=canceled
+        )
+        if not accepted:
+            self.status_message.emit(
+                "Ignored stale finalization failure after session change."
+            )
+            return
+        if canceled:
+            self.stage_label.setText("Canceled")
+        else:
+            self.stage_label.setText(f"Failed: {message}")
         with contextlib.suppress(PoseFinalizationUiError):
             self.controller.refresh_discovery()
         self.refresh_from_state()
-        from pose_finalization import PoseFinalizationError
 
-        if isinstance(exc, (PoseFinalizationUiError, PoseFinalizationError)):
+        if canceled:
+            QMessageBox.information(
+                self,
+                "Pose finalization canceled",
+                f"{message}\n\n"
+                "A canceled run directory is retained only when cancellation "
+                "occurred after run bootstrap. Canceled runs are not eligible "
+                "for downstream Subsystem 6 use.",
+            )
+            self.status_message.emit(
+                "S4 canceled. Run is not eligible downstream; a new run may be started."
+            )
+        elif isinstance(exc, (PoseFinalizationUiError, PoseFinalizationError)):
             QMessageBox.warning(self, "Pose finalization failed", message)
+            self.status_message.emit(f"S4 failed: {message}")
         else:
             self.unexpected_error.emit(message)
-        self.status_message.emit(f"S4 failed: {message}")
+            self.status_message.emit(f"S4 failed: {message}")
 
-    def _on_run_finished(self) -> None:
+    def _on_run_finished(self, identity: FinalizationRequestIdentity) -> None:
+        if (
+            self._active_finalization_identity is not None
+            and identity.request_id == self._active_finalization_identity.request_id
+        ):
+            self._active_finalization_identity = None
+        self._finalization_cancel_requested = False
         self.controller.state.task_running = False
         self.progress.setVisible(False)
         self.elapsed_timer.stop()
@@ -632,6 +808,8 @@ class PoseFinalizationPage(QWidget):
             state = self.controller.state
             if state.discovery_running and not state.task_running:
                 self.stage_label.setText("Discovering S3/S4 artifacts…")
+            elif state.run_stage == STATUS_CANCELED:
+                self.stage_label.setText("Canceled")
             elif state.run_error:
                 self.stage_label.setText(f"Failed: {state.run_error}")
             else:
@@ -668,6 +846,21 @@ class PoseFinalizationPage(QWidget):
             or self.controller.state.last_result is not None
         )
         self.open_output_button.setEnabled(has_output and not busy)
+        context = self.task_runner.active_context
+        finalization_active = (
+            self._active_finalization_identity is not None
+            and self.task_runner.is_running
+        )
+        in_publication = bool(
+            context is not None and context.is_publication_critical_section()
+        )
+        cancel_requested = bool(
+            self._finalization_cancel_requested
+            or (context is not None and context.is_cancellation_requested())
+        )
+        self.cancel_button.setEnabled(
+            finalization_active and not cancel_requested and not in_publication
+        )
 
     def _guard_idle(self, action: str) -> bool:
         if self.has_running_task:
