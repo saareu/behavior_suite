@@ -124,15 +124,21 @@ Classifications (discovery only; historical `status` is not rewritten):
 - GUI shows QC rows (status, output, classification, row counts, warnings/failures).
 - Errors surface through `status_message` / `unexpected_error` and existing logging.
 - Session change while an S5 task is active is blocked; stale async results are still rejected if source/settings diverge before accept.
-- Application close waits for non-cancellable S5 work (same pattern as S2/S4).
+- Application close requests cooperative cancellation for scientific extraction
+  and waits for worker confirmation (publication critical section is
+  noninterruptible).
 
-**Cancellation:** not supported safely in the runner. No Cancel button. Documented for a later cooperative-cancellation improvement.
+**Cancellation:** Product Quality Sprint 3 Increment 1 adds cooperative
+cancellation for full scientific extraction (shared `runtime.cancellation`
+contract + S5 checkpoints + Cancel control). See
+`docs/roadmap/product_quality_sprint_3_increment_1_s5_cancellation.md`.
 
 ---
 
 ## Known limitations (non-MVP follow-ups)
 
-1. No cooperative cancellation for full extraction.
+1. In-flight OpenCV `VideoCapture.read()` remains non-interruptible mid-call;
+   S4/S6/S7/S8 scientific cancel wiring is still future work.
 2. Preview using a selected completed run’s immutable settings is not yet exposed in the GUI.
 3. Prepared-video decode for preview remains per-request (results are cached; frames are not pre-decoded) — optional cache/performance improvements remain open.
 4. Cable-artifact removal excluded.

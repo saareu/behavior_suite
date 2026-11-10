@@ -39,11 +39,13 @@ from blob_features.contracts import (
     RUN_META_FILENAME,
     RUN_META_SCHEMA_VERSION,
     SETTINGS_USED_FILENAME,
+    STATUS_CANCELED,
     STATUS_COMPLETED,
     STATUS_COMPLETED_WITH_WARNINGS,
     STATUS_FAILED,
     STATUS_RUNNING,
     TARGET_FPS_DEFAULT,
+    BlobFeaturesCancelledError,
     BlobFeaturesError,
 )
 from blob_features.export import build_blob_features_table, write_blob_features_parquet
@@ -61,8 +63,15 @@ from blob_features.timing import (
 )
 from preprocess.models import OperationProgress
 from project.file_digest import sha256_file
+from runtime.cancellation import (
+    CancellationCallback,
+    raise_if_cancellation_requested,
+)
 
 ProgressCallback = Callable[[OperationProgress], None]
+PublicationStartedCallback = Callable[[], None]
+
+_CANCEL_MESSAGE = "Blob feature extraction cancelled before publication."
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,13 +120,15 @@ def run_blob_feature_extraction(
     request: BlobFeaturesRequest,
     *,
     progress_callback: ProgressCallback | None = None,
+    cancellation_requested: CancellationCallback | None = None,
+    publication_started: PublicationStartedCallback | None = None,
 ) -> BlobFeaturesResult:
     """Run the Sprint 2 blob-feature pipeline and persist S5 artifacts.
 
-    Cancellation is not supported: interrupting mid-run leaves ``status=failed``
-    (or ``running`` if the process is killed) and never publishes a partial
-    parquet as a completed artifact. GUI Cancel is intentionally omitted until
-    a cooperative cancellation hook exists.
+    Cooperative cancellation is optional. When ``cancellation_requested`` is
+    provided, safe checkpoints raise :class:`BlobFeaturesCancelledError` before
+    the publication critical section. Once publication begins, cancellation is
+    ignored and the run finishes as completed or failed.
     """
 
     purpose = request.run_purpose.strip()
@@ -196,8 +207,12 @@ def run_blob_feature_extraction(
     success = False
     warnings: tuple[str, ...] = ()
     blob_features_written = False
+    canceled = False
+    in_publication = False
 
     try:
+        # Checkpoint 1: before expensive source opening.
+        _raise_if_s5_cancelled(cancellation_requested)
         _report_progress(
             progress_callback,
             phase="timing",
@@ -217,7 +232,10 @@ def run_blob_feature_extraction(
             frame_count=eligible.frame_count,
             config=config,
             progress_callback=progress_callback,
+            cancellation_requested=cancellation_requested,
         )
+        # Checkpoint 4: after extraction, before postprocessing/QC.
+        _raise_if_s5_cancelled(cancellation_requested)
         _report_progress(
             progress_callback,
             phase="temporal",
@@ -250,6 +268,11 @@ def run_blob_feature_extraction(
                 "S1 prepared_sync.npz changed during S5 processing (SHA256 mismatch)."
             )
 
+        # Checkpoint 5: final pre-publication gate.
+        _raise_if_s5_cancelled(cancellation_requested)
+        in_publication = True
+        if publication_started is not None:
+            publication_started()
         _report_progress(
             progress_callback,
             phase="writing",
@@ -277,6 +300,25 @@ def run_blob_feature_extraction(
             total_units=eligible.frame_count,
             is_indeterminate=False,
         )
+    except BlobFeaturesCancelledError as exc:
+        if in_publication:
+            # Should not occur: cancel checks stop before publication begins.
+            status = STATUS_FAILED
+            success = False
+            error_message = str(exc)
+            canceled = False
+        else:
+            status = STATUS_CANCELED
+            success = False
+            canceled = True
+            error_message = str(exc)
+        if paths.blob_features.exists():
+            with suppress(OSError):
+                paths.blob_features.unlink()
+        if paths.qc.exists():
+            with suppress(OSError):
+                paths.qc.unlink()
+        blob_features_written = False
     except Exception as exc:
         status = STATUS_FAILED
         success = False
@@ -307,6 +349,8 @@ def run_blob_feature_extraction(
         blob_features_written=blob_features_written,
     )
 
+    if canceled:
+        raise BlobFeaturesCancelledError(error_message or _CANCEL_MESSAGE)
     if not success:
         raise BlobFeaturesError(error_message or "Blob feature extraction failed.")
 
@@ -404,15 +448,19 @@ def _extract_source_features(
     frame_count: int,
     config: BlobFeaturesConfig,
     progress_callback: ProgressCallback | None = None,
+    cancellation_requested: CancellationCallback | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Decode prepared video sequentially and compute per-frame features.
 
     Processing is intentionally sequential for deterministic ordering. Execution
     knobs (``n_workers`` / ``max_in_flight``) are retained in settings for
-    provenance and future optional parallelism.
+    provenance and future optional parallelism. Cancellation is checked before
+    each ``VideoCapture.read()``; an in-flight native decode may still complete.
     """
 
     _ = config.execution  # recorded in settings; sequential path for Sprint 2
+    # Checkpoint 1 (source open): honor cancel before opening VideoCapture.
+    _raise_if_s5_cancelled(cancellation_requested)
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise BlobFeaturesError(f"Cannot open prepared video: {video_path}")
@@ -420,9 +468,14 @@ def _extract_source_features(
     records: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     # Report every frame for short videos; throttle for long ones.
+    # Progress throttling is independent of per-frame cancellation polling.
     report_every = 1 if frame_count <= 120 else max(1, frame_count // 100)
     try:
+        # Checkpoint 2: after source preparation, before frame extraction.
+        _raise_if_s5_cancelled(cancellation_requested)
         for frame_idx in range(frame_count):
+            # Checkpoint 3: once per frame, before the next blocking read.
+            _raise_if_s5_cancelled(cancellation_requested)
             ok, frame = cap.read()
             if not ok or frame is None:
                 raise BlobFeaturesError(
@@ -442,6 +495,8 @@ def _extract_source_features(
                         }
                     )
                 records.append(record)
+            except BlobFeaturesCancelledError:
+                raise
             except Exception as exc:  # noqa: BLE001 — per-frame isolation
                 errors.append({"frame_idx": frame_idx, "error": str(exc)})
                 nan_record: dict[str, Any] = {
@@ -483,6 +538,16 @@ def _extract_source_features(
             f"Processed {len(records)} frames but expected {frame_count}."
         )
     return records, {"count": len(errors), "items": errors[:50]}
+
+
+def _raise_if_s5_cancelled(
+    cancellation_requested: CancellationCallback | None,
+) -> None:
+    raise_if_cancellation_requested(
+        cancellation_requested,
+        message=_CANCEL_MESSAGE,
+        error=BlobFeaturesCancelledError,
+    )
 
 
 def is_s5_run_eligible_for_downstream(s5_run_dir: Path | str) -> bool:

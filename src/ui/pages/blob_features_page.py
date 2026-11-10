@@ -95,6 +95,7 @@ class BlobFeaturesPage(QWidget):
         self._active_extraction_identity: ExtractionRequestIdentity | None = None
         self._active_open_identity: OpenRequestIdentity | None = None
         self._active_discovery_identity: DiscoveryRequestIdentity | None = None
+        self._extraction_cancel_requested = False
         self._build_ui()
         self.elapsed_timer = QTimer(self)
         self.elapsed_timer.setInterval(500)
@@ -276,8 +277,9 @@ class BlobFeaturesPage(QWidget):
             "Inspect prepared-video frames from an eligible Subsystem 1 run, "
             "adjust legacy segmentation settings, preview masks/topology, then "
             "run full-video blob feature extraction to 120 Hz parquet. "
-            "S2–S4 completion is not required. Cancellation is not supported; "
-            "partial parquet outputs are never published as completed."
+            "S2–S4 completion is not required. Extraction can be canceled "
+            "cooperatively before publication; canceled runs are kept for "
+            "traceability but are not eligible downstream."
         )
         scope.setWordWrap(True)
 
@@ -372,6 +374,9 @@ class BlobFeaturesPage(QWidget):
         self.reset_defaults_button.clicked.connect(self._reset_defaults)
         self.run_button = QPushButton("Run Full Extraction")
         self.run_button.clicked.connect(self._run_extraction)
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self._cancel_extraction)
+        self.cancel_button.setEnabled(False)
         self.open_output_button = QPushButton("Open S5 run folder")
         self.open_output_button.clicked.connect(self._open_output_folder)
         self.export_qc_overlay_button = QPushButton("Export QC Overlay Video…")
@@ -380,6 +385,7 @@ class BlobFeaturesPage(QWidget):
         actions.addWidget(self.preview_bookmarks_button)
         actions.addWidget(self.reset_defaults_button)
         actions.addWidget(self.run_button)
+        actions.addWidget(self.cancel_button)
         actions.addWidget(self.open_output_button)
         actions.addWidget(self.export_qc_overlay_button)
         actions.addStretch(1)
@@ -1087,6 +1093,7 @@ class BlobFeaturesPage(QWidget):
             return
 
         self._active_extraction_identity = identity
+        self._extraction_cancel_requested = False
         self._started_at = time.perf_counter()
         self.stage_label.setText("Running blob feature extraction…")
         self.progress.setRange(0, 0)
@@ -1096,7 +1103,8 @@ class BlobFeaturesPage(QWidget):
         self._update_enabled()
         self._emit_running_changed()
         self.status_message.emit(
-            "S5 full extraction started (settings snapshotted; cancellation unsupported)."
+            "S5 full extraction started (settings snapshotted; Cancel stops after "
+            "the current safe checkpoint)."
         )
 
         context = GuiTaskContext(
@@ -1109,7 +1117,10 @@ class BlobFeaturesPage(QWidget):
 
         def _operation(report: object) -> BlobFeaturesResult:
             return self.controller.execute_request(
-                request, progress_callback=report  # type: ignore[arg-type]
+                request,
+                progress_callback=report,  # type: ignore[arg-type]
+                cancellation_requested=context.is_cancellation_requested,
+                publication_started=context.mark_publication_critical_section,
             )
 
         try:
@@ -1122,10 +1133,15 @@ class BlobFeaturesPage(QWidget):
                 on_error=lambda exc: self._on_extraction_error(exc, identity),
                 on_finished=lambda: self._on_extraction_finished(identity),
             )
+            # Runner ownership is live only after start; refresh Cancel enablement.
+            self._update_enabled()
+            self._emit_running_changed()
         except TaskAlreadyRunningError:
             self.controller.record_failure(
                 "Extraction already running.", expected_identity=identity
             )
+            self._active_extraction_identity = None
+            self._extraction_cancel_requested = False
             self.progress.setVisible(False)
             self.elapsed_timer.stop()
             self._update_enabled()
@@ -1135,6 +1151,63 @@ class BlobFeaturesPage(QWidget):
                 "Task already running",
                 "A Subsystem 5 task is already active.",
             )
+
+    def _cancel_extraction(self) -> None:
+        """Request cooperative cancellation of the active scientific extraction."""
+
+        if self._active_extraction_identity is None or not self.task_runner.is_running:
+            return
+        context = self.task_runner.active_context
+        if context is not None and context.is_publication_critical_section():
+            self.stage_label.setText(
+                "Publication in progress — cancellation is no longer possible; "
+                "waiting for the worker to finish."
+            )
+            self.status_message.emit(
+                "S5 publication critical section already started; waiting for completion."
+            )
+            self._update_enabled()
+            return
+        if self._extraction_cancel_requested:
+            return
+        self.task_runner.request_cancellation()
+        self._extraction_cancel_requested = True
+        self.stage_label.setText(
+            "Cancel requested — stopping after the current frame."
+        )
+        self.status_message.emit(
+            "S5 cancel requested. Waiting for the worker to confirm termination."
+        )
+        self._update_enabled()
+
+    def request_cooperative_shutdown(self) -> str:
+        """Request cooperative cancel of scientific extraction for app close.
+
+        Idempotent. Does not force-stop the QThread. If publication has already
+        started, wait for the real completed/failed outcome.
+        """
+
+        if self._active_extraction_identity is None or not self.task_runner.is_running:
+            return (
+                "An S5 task is active. The window remains responsive and will close "
+                "when the task finishes."
+            )
+        context = self.task_runner.active_context
+        if context is not None and context.is_publication_critical_section():
+            return (
+                "S5 extraction is publishing artifacts (noninterruptible). "
+                "The window remains open until publication finishes."
+            )
+        self.task_runner.request_cancellation()
+        self._extraction_cancel_requested = True
+        self.stage_label.setText(
+            "Cancel requested — stopping after the current frame."
+        )
+        self._update_enabled()
+        return (
+            "S5 extraction cancel requested. The window remains responsive and will "
+            "close after the worker confirms termination."
+        )
 
     def _on_extraction_progress(
         self,
@@ -1147,6 +1220,16 @@ class BlobFeaturesPage(QWidget):
             return
         if not isinstance(event, GuiTaskProgressEvent):
             return
+        if event.in_publication_critical_section:
+            # Publication gate already passed: show real phase, never promise cancel.
+            pass
+        elif event.cancellation_requested or self._extraction_cancel_requested:
+            self._extraction_cancel_requested = True
+            self.stage_label.setText(
+                "Cancel requested — stopping after the current frame."
+            )
+            self._update_enabled()
+            return
         self.stage_label.setText(format_pipeline_progress(event))
         if (
             not event.is_indeterminate
@@ -1157,6 +1240,7 @@ class BlobFeaturesPage(QWidget):
             self.progress.setValue(int(event.completed_units))
         else:
             self.progress.setRange(0, 0)
+        self._update_enabled()
 
     def _on_extraction_success(
         self, result: object, identity: ExtractionRequestIdentity
@@ -1171,6 +1255,8 @@ class BlobFeaturesPage(QWidget):
             )
             self.refresh_from_state()
             return
+        # Cancel requested after the publication gate (or after completion) does not
+        # rewrite a successful scientific outcome.
         self.stage_label.setText(f"Finished: {result.status}")
         self.refresh_from_state()
         warnings = f" ({len(result.warnings)} warnings)" if result.warnings else ""
@@ -1181,19 +1267,38 @@ class BlobFeaturesPage(QWidget):
     def _on_extraction_error(
         self, exc: BaseException, identity: ExtractionRequestIdentity
     ) -> None:
-        _LOGGER.exception("S5 extraction failed: %s", exc)
+        from blob_features import BlobFeaturesCancelledError, BlobFeaturesError
+
+        canceled = isinstance(exc, BlobFeaturesCancelledError)
+        if not canceled:
+            _LOGGER.exception("S5 extraction failed: %s", exc)
         message = str(exc)
-        accepted = self.controller.record_failure(message, expected_identity=identity)
+        accepted = self.controller.record_failure(
+            message, expected_identity=identity, canceled=canceled
+        )
         if not accepted:
             self.status_message.emit("Ignored stale extraction failure after source change.")
             return
-        self.stage_label.setText(f"Failed: {message}")
+        if canceled:
+            self.stage_label.setText("Canceled")
+        else:
+            self.stage_label.setText(f"Failed: {message}")
         with contextlib.suppress(BlobFeaturesUiError):
             self.controller.refresh_discovery()
         self.refresh_from_state()
-        from blob_features import BlobFeaturesError
 
-        if isinstance(exc, (BlobFeaturesUiError, BlobFeaturesError)):
+        if canceled:
+            QMessageBox.information(
+                self,
+                "Blob feature extraction canceled",
+                f"{message}\n\n"
+                "The canceled run was kept for traceability and is not eligible "
+                "for downstream Subsystem 6 use.",
+            )
+            self.status_message.emit(
+                "S5 canceled. Run is not eligible downstream; a new run may be started."
+            )
+        elif isinstance(exc, (BlobFeaturesUiError, BlobFeaturesError)):
             QMessageBox.warning(self, "Blob feature extraction failed", message)
             self.status_message.emit(f"S5 failed: {message}")
         else:
@@ -1208,6 +1313,7 @@ class BlobFeaturesPage(QWidget):
             and identity.request_id == self._active_extraction_identity.request_id
         ):
             self._active_extraction_identity = None
+        self._extraction_cancel_requested = False
         self.controller.state.task_running = False
         self.progress.setVisible(False)
         self.elapsed_timer.stop()
@@ -1556,6 +1662,21 @@ class BlobFeaturesPage(QWidget):
         self.reset_defaults_button.setEnabled(not busy)
         can_run = self.controller.can_run_extraction() and not busy
         self.run_button.setEnabled(can_run)
+        context = self.task_runner.active_context
+        extraction_active = (
+            self._active_extraction_identity is not None
+            and self.task_runner.is_running
+        )
+        in_publication = bool(
+            context is not None and context.is_publication_critical_section()
+        )
+        cancel_requested = bool(
+            self._extraction_cancel_requested
+            or (context is not None and context.is_cancellation_requested())
+        )
+        self.cancel_button.setEnabled(
+            extraction_active and not cancel_requested and not in_publication
+        )
         has_output = (
             self.controller.selected_s5_run() is not None
             or self.controller.state.last_result is not None

@@ -32,7 +32,9 @@ from blob_features.contracts import (
     OCCLUSION_TEMPORAL_FEATURE_COLS,
     QC_FILENAME,
     REQUIRED_S1_FILES,
+    STATUS_CANCELED,
     TARGET_FPS_DEFAULT,
+    BlobFeaturesCancelledError,
     BlobFeaturesError,
 )
 from blob_features.export import (
@@ -116,6 +118,7 @@ __all__ = [
     "STALE_SOURCE",
     "BlobExecutionSettings",
     "BlobFeaturesConfig",
+    "BlobFeaturesCancelledError",
     "BlobFeaturesError",
     "BlobFeaturesProjectSummary",
     "BlobFeaturesRequest",
@@ -134,6 +137,7 @@ __all__ = [
     "QC_FILENAME",
     "QcSummary",
     "REQUIRED_S1_FILES",
+    "STATUS_CANCELED",
     "S1SourceIdentity",
     "SegmentationBookmark",
     "SegmentationBookmarkStore",

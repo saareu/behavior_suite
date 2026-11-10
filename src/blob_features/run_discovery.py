@@ -10,8 +10,9 @@ Prefer the newest currently eligible completed run
 (``status in {completed, completed_with_warnings}`` and
 ``classification == eligible``), ordered by ``completed_at`` / ``created_at`` /
 run-id timestamp (newest first). Do **not** auto-select a run for S6 unless it
-is currently eligible. Failed, incomplete, structurally invalid, and
-stale-source runs are never selected for downstream handoff.
+is currently eligible. Failed, incomplete, canceled, structurally invalid, and
+stale-source runs are never selected for downstream handoff. Canceled runs keep
+the outward ``failed_or_incomplete`` discovery classification.
 """
 
 from __future__ import annotations
@@ -199,6 +200,8 @@ def _classify_run(
 ) -> str:
     if metadata_errors or status is None:
         return MISSING_REQUIRED_ARTIFACTS
+    # canceled / running / failed and any other non-completed status share the
+    # outward failed_or_incomplete classification (no broader display change).
     if status == STATUS_FAILED:
         return FAILED_OR_INCOMPLETE
     if status not in (STATUS_COMPLETED, STATUS_COMPLETED_WITH_WARNINGS):

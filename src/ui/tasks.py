@@ -69,9 +69,14 @@ class GuiTaskContext:
     raw_video_path: Path | None
     generation: int
     cancellation_requested: bool = False
+    in_publication_critical_section: bool = False
 
     def request_cancellation(self) -> None:
-        """Request cooperative cancellation without force-stopping its thread."""
+        """Request cooperative cancellation without force-stopping its thread.
+
+        Repeated requests are harmless. A request is only a request: the GUI must
+        wait for the worker to confirm a canceled (or completed/failed) outcome.
+        """
 
         self.cancellation_requested = True
 
@@ -79,6 +84,16 @@ class GuiTaskContext:
         """Return a callback-compatible cancellation state."""
 
         return self.cancellation_requested
+
+    def mark_publication_critical_section(self) -> None:
+        """Mark that publication writes have begun and cancel is no longer honored."""
+
+        self.in_publication_critical_section = True
+
+    def is_publication_critical_section(self) -> bool:
+        """Return whether the worker has entered the noninterruptible publish phase."""
+
+        return self.in_publication_critical_section
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +113,7 @@ class GuiTaskProgressEvent:
     is_indeterminate: bool
     cancellation_requested: bool
     processed_video_time_sec: float | None
+    in_publication_critical_section: bool = False
 
 
 class GuiTaskProgressTracker:
@@ -153,6 +169,9 @@ class GuiTaskProgressTracker:
             is_indeterminate=progress.is_indeterminate,
             cancellation_requested=self._context.cancellation_requested,
             processed_video_time_sec=progress.processed_video_time_sec,
+            in_publication_critical_section=(
+                self._context.in_publication_critical_section
+            ),
         )
 
     def _estimate_remaining(

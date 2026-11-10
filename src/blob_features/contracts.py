@@ -52,6 +52,7 @@ STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
 STATUS_COMPLETED_WITH_WARNINGS = "completed_with_warnings"
 STATUS_FAILED = "failed"
+STATUS_CANCELED = "canceled"
 
 # Legacy Pipeline 40 occlusion static columns (values filled in Sprint 2+).
 OCCLUSION_STATIC_FEATURE_COLS = (
@@ -102,3 +103,7 @@ CABLE_REMOVAL_ASSUMED_LEGACY_DEFAULT = False
 
 class BlobFeaturesError(RuntimeError):
     """Expected Subsystem 05 validation, timing, config, or segmentation error."""
+
+
+class BlobFeaturesCancelledError(BlobFeaturesError):
+    """Confirmed cooperative cancellation before the publication critical section."""

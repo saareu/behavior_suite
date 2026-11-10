@@ -1269,11 +1269,8 @@ class MainWindow(QMainWindow):
         if self.blob_features_page.has_running_task:
             event.ignore()
             self._close_after_s5_task = True
-            self.statusBar().showMessage(
-                "An S5 task is active and has no safe cancellation hook. "
-                "The window remains responsive and will close when the task finishes. "
-                "Partial parquet outputs are never published as completed."
-            )
+            message = self.blob_features_page.request_cooperative_shutdown()
+            self.statusBar().showMessage(message)
             return
         if self.combined_features_page.has_running_task:
             event.ignore()
