@@ -28,6 +28,7 @@ from combined_features import (
     MODEL_COMPAT_FILENAME,
     QC_FILENAME,
     STALE_SOURCE,
+    STATUS_CANCELED,
     CombinedFeaturesConfig,
     CombinedFeaturesError,
     CombinedFeaturesRequest,
@@ -56,9 +57,11 @@ from pose_finalization.run_discovery import (
     summarize_pose_finalization_project,
 )
 from preprocess.models import OperationProgress
+from runtime.cancellation import CancellationCallback
 from ui.controllers.run_preprocess_controller import open_folder_in_platform_explorer
 
 ProgressCallback = Callable[[OperationProgress], None]
+PublicationStartedCallback = Callable[[], None]
 FolderOpener = Callable[[Path], bool]
 CombinedFeaturesRunner = Callable[..., CombinedFeaturesResult]
 
@@ -656,10 +659,18 @@ class CombinedFeaturesController:
         self,
         request: CombinedFeaturesRequest,
         progress_callback: ProgressCallback | None = None,
+        *,
+        cancellation_requested: CancellationCallback | None = None,
+        publication_started: PublicationStartedCallback | None = None,
     ) -> CombinedFeaturesResult:
         """Run one validated request (worker-thread safe; no Qt updates)."""
 
-        return self._runner(request, progress_callback=progress_callback)
+        return self._runner(
+            request,
+            progress_callback=progress_callback,
+            cancellation_requested=cancellation_requested,
+            publication_started=publication_started,
+        )
 
     def record_success(
         self,
@@ -695,8 +706,9 @@ class CombinedFeaturesController:
         message: str,
         *,
         expected_identity: ExtractionRequestIdentity | None = None,
+        canceled: bool = False,
     ) -> bool:
-        """Record a failed run without marking it completed."""
+        """Record a failed or canceled run without marking it completed."""
 
         self.state.task_running = False
         if (
@@ -707,7 +719,7 @@ class CombinedFeaturesController:
         ):
             return False
         self.state.last_result = None
-        self.state.run_stage = "Failed"
+        self.state.run_stage = STATUS_CANCELED if canceled else "Failed"
         self.state.run_error = message
         self.state.active_extraction_identity = None
         return True

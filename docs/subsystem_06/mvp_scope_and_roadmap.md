@@ -20,7 +20,7 @@ MainWindow
   Group 2 - Feature Processing -> S5 + S6
        CombinedFeaturesPage
             CombinedFeaturesController
-            GuiTaskRunner (async discovery + progressive extraction; non-cancellable science)
+            GuiTaskRunner (async discovery + progressive extraction; cooperative cancel before publication)
             combined_features.* (headless scientific core)
 ```
 
@@ -43,7 +43,7 @@ S4 `final_pose.parquet` and S5 `blob_features.parquet` are read-only inputs. S6 
 - Group 2 exposes S5 and S6; last Feature Processing page is remembered.
 - Session root is shared with S1-S5.
 - **S2 / S4 tasks** hard-block all navigation.
-- **S6 extraction** soft-locks like S5: Group 1 <-> Group 2 and other pages remain reachable; duplicate Run and session mutation stay blocked; no Cancel.
+- **S6 extraction** soft-locks like S5: Group 1 <-> Group 2 and other pages remain reachable; duplicate Run and session mutation stay blocked; inline Cancel requests cooperative stop before publication.
 - Default S4/S5 pair only when joint alignment succeeds; manual selections are preserved on refresh.
 
 ---
@@ -112,7 +112,7 @@ Full checklist: [`laboratory_acceptance_checklist.md`](laboratory_acceptance_che
 ## Known limitations (non-MVP follow-ups)
 
 1. No model inference or training UI (intentional MVP boundary).
-2. No cooperative cancellation for extraction (discovery uses generation supersede + stale discard).
+2. Cooperative cancellation for extraction is available (PQ Sprint 3 Increment 4); discovery still uses generation supersede + stale discard.
 3. Optional external model registry; detector bundles and SLEAP assets ship under tracked `models/` (SLEAP media via Git LFS).
 4. Working settings not yet persisted under `combined_features/_gui/`.
 5. No numerical regression against historical Pipeline 50 training caches.

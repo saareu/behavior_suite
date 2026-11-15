@@ -22,7 +22,7 @@ See also: [Implementation Contract](implementation_contract.md), [Architecture A
 | QC / results | Historical status vs current eligibility; sources; samples/rows/tracks; implantation; compat summary |
 | Run discovery | `summarize_combined_features_project` table; reopen without recalculation |
 | Async discovery (PQ Sprint 1) | `COMBINED_FEATURES_DISCOVERY` worker for the S4+S5+S6/pair bundle; atomic apply; see [`../roadmap/product_quality_sprint_1_async_discovery.md`](../roadmap/product_quality_sprint_1_async_discovery.md) |
-| Task safety | Soft nav lock matching S5; S2/S4 hard lock unchanged; no Cancel button |
+| Task safety | Soft nav lock matching S5; S2/S4 hard lock unchanged; cooperative Cancel before publication (PQ Sprint 3 Increment 4) |
 | Tests | `tests/ui/test_combined_features_gui.py` (18 cases) + S5 nav regression updates |
 | Docs | This note; contract / README / roadmap status updates |
 
@@ -35,7 +35,7 @@ See also: [Implementation Contract](implementation_contract.md), [Architecture A
 3. Inspect eligible S4 and S5 runs; confirm alignment readiness.
 4. Optionally adjust `smooth_win` / `diff_dt` / labels and an optional model-registry root.
 5. Review model-compat discovery (schema/availability only).
-6. **Run Combined Feature Extraction** (non-cancellable).
+6. **Run Combined Feature Extraction** (Cancel requests cooperative stop before publication).
 7. Inspect QC + compatibility; reopen prior S6 runs from the discovery table.
 
 Scientific formulas are not duplicated in GUI code; the page only orchestrates `combined_features.*`.
@@ -70,12 +70,12 @@ Applied the S5 remediation policy to S6:
 - Starting another S6 extraction
 - Changing / browsing / clearing the S6 session
 - Changing S4/S5 source selection or settings / registry
-- Application close waits for the non-cancellable task
+- Application close cooperatively cancels S6 extraction when still pre-publication, then waits for the worker
 
 **Unchanged**
 
 - S2/S4 hard-lock all navigation
-- No Cancel button (runner has no cooperative cancel)
+- Inline Cancel is available while a scientific extraction is active and not yet publishing
 
 Returning to Feature Processing restores the last S5/S6 page via `_last_feature_page`.
 
@@ -166,7 +166,7 @@ Before the operator completed S3 acceptance and S4, the same session had eligibl
 ## Known limitations
 
 - No model inference or training UI
-- No Cancel for long extraction
+- Cooperative Cancel stops only at safe stage boundaries (FF / Pipeline50 remain uninterruptible mid-call)
 - Model registry is optional; detector bundles and SLEAP assets ship under tracked `models/` (SLEAP media via Git LFS)
 - Working settings are not yet persisted under `combined_features/_gui/` (defaults + per-session widgets only)
 - Numerical regression vs historical Pipeline 50 caches remains out of scope

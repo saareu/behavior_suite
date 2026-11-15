@@ -500,7 +500,7 @@ def test_page_progress_and_error_reporting(
     _patch_upstream_eligible(monkeypatch)
     paths = _joint_session(tmp_path)
 
-    def _boom(request, progress_callback=None):
+    def _boom(request, progress_callback=None, **_kwargs):
         raise RuntimeError("synthetic S6 failure")
 
     page = CombinedFeaturesPage(

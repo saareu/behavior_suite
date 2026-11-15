@@ -10,7 +10,9 @@ Prefer the newest currently eligible completed run
 (``status in {completed, completed_with_warnings}`` and
 ``classification in {eligible, completed_with_warnings}``), ordered by
 ``completed_at`` / ``created_at`` / run-id timestamp (newest first). Do **not**
-auto-select a stale run.
+auto-select a stale run. Failed, incomplete, canceled, structurally invalid, and
+stale-source runs are never selected for downstream handoff. Canceled runs keep
+the outward ``failed_or_incomplete`` discovery classification.
 """
 
 from __future__ import annotations
@@ -223,6 +225,8 @@ def _classify_run(
         return MISSING_REQUIRED_ARTIFACTS
     if status == STATUS_FAILED:
         return FAILED_OR_INCOMPLETE
+    # canceled / running and any other non-completed status share the
+    # outward failed_or_incomplete classification (no broader display change).
     if status not in (STATUS_COMPLETED, STATUS_COMPLETED_WITH_WARNINGS):
         return FAILED_OR_INCOMPLETE
     if not parquet_present:

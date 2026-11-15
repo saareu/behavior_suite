@@ -1,0 +1,10 @@
+PQ Sprint 3 Increment 4 — S6 visible GUI cancellation smoke
+work_root: C:\behavior_suite\tmp_pq_sprint3_s6_cancel_gui
+method: instrumented slow worker + real cancel-persist path
+PASS: Cancel enabled during cancellable S6 processing
+PASS: Cancel requested feedback visible
+PASS: worker-confirmed Canceled; unpublished artifacts removed
+PASS: canceled excluded from S7; prior completed remains eligible
+PASS: close during active cancel defers shutdown; worker retained
+PASS: deferred close waited for worker completion
+RESULT: PASS

@@ -134,6 +134,7 @@ STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
 STATUS_COMPLETED_WITH_WARNINGS = "completed_with_warnings"
 STATUS_FAILED = "failed"
+STATUS_CANCELED = "canceled"
 
 # Implantation resolution outcomes (Sprint 1 adapter metadata).
 IMPLANTATION_RESOLVED = "resolved"
@@ -148,3 +149,7 @@ class CombinedFeaturesError(RuntimeError):
     def __init__(self, message: str, *, reason_code: str | None = None) -> None:
         super().__init__(message)
         self.reason_code = reason_code
+
+
+class CombinedFeaturesCancelledError(CombinedFeaturesError):
+    """Confirmed cooperative cancellation before the publication critical section."""

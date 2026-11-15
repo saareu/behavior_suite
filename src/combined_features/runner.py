@@ -39,10 +39,12 @@ from combined_features.contracts import (
     RUN_META_FILENAME,
     RUN_META_SCHEMA_VERSION,
     SETTINGS_USED_FILENAME,
+    STATUS_CANCELED,
     STATUS_COMPLETED,
     STATUS_COMPLETED_WITH_WARNINGS,
     STATUS_FAILED,
     STATUS_RUNNING,
+    CombinedFeaturesCancelledError,
     CombinedFeaturesError,
 )
 from combined_features.export import build_dyadic_features_table, write_dyadic_features_parquet
@@ -63,8 +65,12 @@ from project.validation_memo import (
     memoized_validation,
     run_dir_fingerprint,
 )
+from runtime.cancellation import CancellationCallback, raise_if_cancellation_requested
 
 ProgressCallback = Callable[[OperationProgress], None]
+PublicationStartedCallback = Callable[[], None]
+
+_CANCEL_MESSAGE = "Combined feature extraction cancelled before publication."
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,13 +123,31 @@ def run_combined_feature_extraction(
     request: CombinedFeaturesRequest,
     *,
     progress_callback: ProgressCallback | None = None,
+    cancellation_requested: CancellationCallback | None = None,
+    publication_started: PublicationStartedCallback | None = None,
 ) -> CombinedFeaturesResult:
-    """Run the Sprint 3 combined-feature pipeline and persist S6 artifacts."""
+    """Run the Sprint 3 combined-feature pipeline and persist S6 artifacts.
+
+    Cooperative cancellation is optional. When ``cancellation_requested`` is
+    provided, safe checkpoints raise :class:`CombinedFeaturesCancelledError`
+    before the publication critical section. Once publication begins, cancellation
+    is ignored and the run finishes as completed or failed.
+    """
 
     purpose = request.run_purpose.strip()
     if not purpose:
         raise CombinedFeaturesError("run_purpose must not be empty.")
 
+    # Checkpoint 0: before expensive S4/S5 source loading / run bootstrap.
+    _raise_if_s6_cancelled(cancellation_requested)
+    _report_progress(
+        progress_callback,
+        phase="validating_sources",
+        message="Validating S4/S5 sources",
+        completed_units=0,
+        total_units=None,
+        is_indeterminate=True,
+    )
     pair = _resolve_pair(request)
     config = _resolve_config(request)
     timestamp = _sanitize_timestamp(request.timestamp or _now_timestamp())
@@ -135,8 +159,8 @@ def run_combined_feature_extraction(
     )
     _report_progress(
         progress_callback,
-        phase="starting",
-        message="Validating S4/S5 pair and creating run directory",
+        phase="loading_inputs",
+        message="Loading inputs and creating run directory",
         completed_units=0,
         total_units=None,
         is_indeterminate=True,
@@ -205,12 +229,24 @@ def run_combined_feature_extraction(
     success = False
     warnings: tuple[str, ...] = ()
     dyadic_features_written = False
+    canceled = False
+    in_publication = False
 
     try:
+        # Checkpoint 1: after source validation and run bootstrap.
+        _raise_if_s6_cancelled(cancellation_requested)
         _report_progress(
             progress_callback,
-            phase="computing",
-            message="Computing combined pose and video features",
+            phase="adapting_sources",
+            message="Adapting sources",
+            completed_units=0,
+            total_units=None,
+            is_indeterminate=True,
+        )
+        _report_progress(
+            progress_callback,
+            phase="computing_features",
+            message="Computing combined features",
             completed_units=0,
             total_units=None,
             is_indeterminate=True,
@@ -221,6 +257,17 @@ def run_combined_feature_extraction(
             iteration_name=config.iteration_name,
             smooth_win=config.smooth_win,
             diff_dt=config.diff_dt,
+            cancellation_requested=cancellation_requested,
+        )
+        # Checkpoint after feature construction / postprocessing (processing already checked).
+        _raise_if_s6_cancelled(cancellation_requested)
+        _report_progress(
+            progress_callback,
+            phase="postprocessing",
+            message="Postprocessing complete; preparing QC",
+            completed_units=0,
+            total_units=None,
+            is_indeterminate=True,
         )
         table = build_dyadic_features_table(
             computation.features,
@@ -230,6 +277,14 @@ def run_combined_feature_extraction(
         )
         implantation = computation.adapted_pose.implantation
         implant_reason = computation.features.attrs.get("implantation_reason")
+        _report_progress(
+            progress_callback,
+            phase="computing_qc",
+            message="Computing QC",
+            completed_units=0,
+            total_units=None,
+            is_indeterminate=True,
+        )
         qc_summary = evaluate_combined_features_qc(
             table=table,
             n_tracks=computation.adapted_pose.n_tracks,
@@ -251,7 +306,17 @@ def run_combined_feature_extraction(
             settings=config.model_registry,
             feature_artifact=DYADIC_FEATURES_FILENAME,
         )
+        # Checkpoint after QC and compatibility-output preparation.
+        _raise_if_s6_cancelled(cancellation_requested)
 
+        _report_progress(
+            progress_callback,
+            phase="revalidating_sources",
+            message="Revalidating source lineage",
+            completed_units=0,
+            total_units=None,
+            is_indeterminate=True,
+        )
         # Revalidate joint S4/S5 eligibility immediately before publishing.
         revalidated = validate_joint_s4_s5_pair(
             session_root=pair.session_root,
@@ -279,10 +344,15 @@ def run_combined_feature_extraction(
                 "S5 blob_features.parquet changed during S6 processing (SHA256 mismatch)."
             )
 
+        # Checkpoint: final pre-publication gate.
+        _raise_if_s6_cancelled(cancellation_requested)
+        in_publication = True
+        if publication_started is not None:
+            publication_started()
         _report_progress(
             progress_callback,
-            phase="writing",
-            message="Writing dyadic features and QC artifacts",
+            phase="writing_artifacts",
+            message="Writing artifacts",
             completed_units=1,
             total_units=1,
             is_indeterminate=False,
@@ -307,6 +377,28 @@ def run_combined_feature_extraction(
             total_units=1,
             is_indeterminate=False,
         )
+    except CombinedFeaturesCancelledError as exc:
+        if in_publication:
+            # Should not occur: cancel checks stop before publication begins.
+            status = STATUS_FAILED
+            success = False
+            error_message = str(exc)
+            canceled = False
+        else:
+            status = STATUS_CANCELED
+            success = False
+            canceled = True
+            error_message = str(exc)
+        if paths.dyadic_features.exists():
+            with suppress(OSError):
+                paths.dyadic_features.unlink()
+        if paths.qc.exists():
+            with suppress(OSError):
+                paths.qc.unlink()
+        if paths.model_compat.exists():
+            with suppress(OSError):
+                paths.model_compat.unlink()
+        dyadic_features_written = False
     except Exception as exc:
         status = STATUS_FAILED
         success = False
@@ -340,6 +432,8 @@ def run_combined_feature_extraction(
         dyadic_features_written=dyadic_features_written,
     )
 
+    if canceled:
+        raise CombinedFeaturesCancelledError(error_message or _CANCEL_MESSAGE)
     if not success:
         raise CombinedFeaturesError(error_message or "Combined feature extraction failed.")
 
@@ -839,6 +933,16 @@ def _write_processing_log(
     if error_message:
         lines.append(f"error: {error_message}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _raise_if_s6_cancelled(
+    cancellation_requested: CancellationCallback | None,
+) -> None:
+    raise_if_cancellation_requested(
+        cancellation_requested,
+        message=_CANCEL_MESSAGE,
+        error=CombinedFeaturesCancelledError,
+    )
 
 
 def _report_progress(

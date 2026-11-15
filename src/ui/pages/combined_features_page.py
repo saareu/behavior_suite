@@ -35,6 +35,7 @@ from combined_features.contracts import (
     FAILED_OR_INCOMPLETE,
     MISSING_REQUIRED_ARTIFACTS,
     STALE_SOURCE,
+    STATUS_CANCELED,
 )
 from ui.controllers.combined_features_controller import (
     CombinedFeaturesController,
@@ -76,6 +77,7 @@ class CombinedFeaturesPage(QWidget):
         self._syncing_widgets = False
         self._started_at: float | None = None
         self._last_running_state: bool | None = None
+        self._extraction_cancel_requested = False
         self._active_extraction_identity: ExtractionRequestIdentity | None = None
         self._active_discovery_identity: DiscoveryRequestIdentity | None = None
         self._build_ui()
@@ -141,7 +143,8 @@ class CombinedFeaturesPage(QWidget):
             "Combine currently eligible Subsystem 4 final pose with Subsystem 5 "
             "blob features into a directional dyadic feature artifact and a separate "
             "model-compatibility report. S6 does not train models or run inference. "
-            "Cancellation is not supported; partial parquet is never published as completed."
+            "Extraction can be canceled cooperatively before publication; canceled "
+            "runs are kept for traceability and are not eligible for Subsystem 7."
         )
         scope.setWordWrap(True)
 
@@ -238,11 +241,15 @@ class CombinedFeaturesPage(QWidget):
         run_row = QHBoxLayout()
         self.run_button = QPushButton("Run Combined Feature Extraction")
         self.run_button.clicked.connect(self._run_extraction)
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self._cancel_extraction)
+        self.cancel_button.setEnabled(False)
         self.open_output_button = QPushButton("Open S6 run folder")
         self.open_output_button.clicked.connect(self._open_output_folder)
         self.apply_settings_button = QPushButton("Apply settings")
         self.apply_settings_button.clicked.connect(self._apply_settings)
         run_row.addWidget(self.run_button)
+        run_row.addWidget(self.cancel_button)
         run_row.addWidget(self.open_output_button)
         run_row.addWidget(self.apply_settings_button)
         run_row.addStretch(1)
@@ -660,6 +667,7 @@ class CombinedFeaturesPage(QWidget):
             return
 
         self._active_extraction_identity = identity
+        self._extraction_cancel_requested = False
         self._started_at = time.perf_counter()
         self.stage_label.setText("Running combined feature extraction…")
         self.progress.setRange(0, 0)
@@ -668,7 +676,8 @@ class CombinedFeaturesPage(QWidget):
         self._update_enabled()
         self._emit_running_changed()
         self.status_message.emit(
-            "S6 extraction started (settings snapshotted; cancellation unsupported)."
+            "S6 extraction started (settings snapshotted; Cancel stops after "
+            "the next safe checkpoint)."
         )
 
         context = GuiTaskContext(
@@ -681,7 +690,10 @@ class CombinedFeaturesPage(QWidget):
 
         def _operation(report: object) -> CombinedFeaturesResult:
             return self.controller.execute_request(
-                request, progress_callback=report  # type: ignore[arg-type]
+                request,
+                progress_callback=report,  # type: ignore[arg-type]
+                cancellation_requested=context.is_cancellation_requested,
+                publication_started=context.mark_publication_critical_section,
             )
 
         try:
@@ -694,10 +706,14 @@ class CombinedFeaturesPage(QWidget):
                 on_error=lambda exc: self._on_extraction_error(exc, identity),
                 on_finished=lambda: self._on_extraction_finished(identity),
             )
+            self._update_enabled()
+            self._emit_running_changed()
         except TaskAlreadyRunningError:
             self.controller.record_failure(
                 "Extraction already running.", expected_identity=identity
             )
+            self._active_extraction_identity = None
+            self._extraction_cancel_requested = False
             self.progress.setVisible(False)
             self.elapsed_timer.stop()
             self._update_enabled()
@@ -707,6 +723,63 @@ class CombinedFeaturesPage(QWidget):
                 "Task already running",
                 "A Subsystem 6 extraction is already active.",
             )
+
+    def _cancel_extraction(self) -> None:
+        """Request cooperative cancellation of the active scientific extraction."""
+
+        if self._active_extraction_identity is None or not self.task_runner.is_running:
+            return
+        context = self.task_runner.active_context
+        if context is not None and context.is_publication_critical_section():
+            self.stage_label.setText(
+                "Publication in progress — cancellation is no longer possible; "
+                "waiting for the worker to finish."
+            )
+            self.status_message.emit(
+                "S6 publication critical section already started; waiting for completion."
+            )
+            self._update_enabled()
+            return
+        if self._extraction_cancel_requested:
+            return
+        self.task_runner.request_cancellation()
+        self._extraction_cancel_requested = True
+        self.stage_label.setText(
+            "Cancel requested — waiting for a safe processing checkpoint."
+        )
+        self.status_message.emit(
+            "S6 cancel requested. Waiting for the worker to confirm termination."
+        )
+        self._update_enabled()
+
+    def request_cooperative_shutdown(self) -> str:
+        """Request cooperative cancel of scientific extraction for app close.
+
+        Idempotent. Does not force-stop the QThread. If publication has already
+        started, wait for the real completed/failed outcome.
+        """
+
+        if self._active_extraction_identity is None or not self.task_runner.is_running:
+            return (
+                "An S6 task is active. The window remains responsive and will close "
+                "when the task finishes."
+            )
+        context = self.task_runner.active_context
+        if context is not None and context.is_publication_critical_section():
+            return (
+                "S6 extraction is publishing artifacts (noninterruptible). "
+                "The window remains open until publication finishes."
+            )
+        self.task_runner.request_cancellation()
+        self._extraction_cancel_requested = True
+        self.stage_label.setText(
+            "Cancel requested — waiting for a safe processing checkpoint."
+        )
+        self._update_enabled()
+        return (
+            "S6 extraction cancel requested. The window remains responsive and will "
+            "close after the worker confirms termination."
+        )
 
     def _on_extraction_progress(
         self,
@@ -719,6 +792,15 @@ class CombinedFeaturesPage(QWidget):
             return
         if not isinstance(event, GuiTaskProgressEvent):
             return
+        if event.in_publication_critical_section:
+            pass
+        elif event.cancellation_requested or self._extraction_cancel_requested:
+            self._extraction_cancel_requested = True
+            self.stage_label.setText(
+                "Cancel requested — waiting for a safe processing checkpoint."
+            )
+            self._update_enabled()
+            return
         self.stage_label.setText(format_pipeline_progress(event))
         if (
             not event.is_indeterminate
@@ -729,6 +811,7 @@ class CombinedFeaturesPage(QWidget):
             self.progress.setValue(int(event.completed_units))
         else:
             self.progress.setRange(0, 0)
+        self._update_enabled()
 
     def _on_extraction_success(
         self, result: object, identity: ExtractionRequestIdentity
@@ -744,6 +827,7 @@ class CombinedFeaturesPage(QWidget):
                 "Ignored stale S6 extraction result after session/source change."
             )
             return
+        # Cancel requested after the publication gate does not rewrite success.
         self.stage_label.setText(f"Finished: {result.status}")
         self.refresh_from_state()
         warnings = f" ({len(result.warnings)} warnings)" if result.warnings else ""
@@ -754,17 +838,37 @@ class CombinedFeaturesPage(QWidget):
     def _on_extraction_error(
         self, exc: BaseException, identity: ExtractionRequestIdentity
     ) -> None:
+        from combined_features import CombinedFeaturesCancelledError
+
+        canceled = isinstance(exc, CombinedFeaturesCancelledError)
         message = str(exc)
         accepted = self.controller.record_failure(
-            message, expected_identity=identity
+            message, expected_identity=identity, canceled=canceled
         )
         if not accepted:
+            self.status_message.emit(
+                "Ignored stale S6 extraction failure after session/source change."
+            )
             return
-        self.stage_label.setText(f"Failed: {message}")
+        if canceled:
+            self.stage_label.setText("Canceled")
+        else:
+            self.stage_label.setText(f"Failed: {message}")
         with contextlib.suppress(CombinedFeaturesUiError):
             self.controller.refresh_discovery()
         self.refresh_from_state()
-        if isinstance(exc, (CombinedFeaturesUiError, CombinedFeaturesError)):
+        if canceled:
+            QMessageBox.information(
+                self,
+                "Combined feature extraction canceled",
+                f"{message}\n\n"
+                "The canceled run was kept for traceability and is not eligible "
+                "for downstream Subsystem 7 use.",
+            )
+            self.status_message.emit(
+                "S6 canceled. Run is not eligible for S7; a new run may be started."
+            )
+        elif isinstance(exc, (CombinedFeaturesUiError, CombinedFeaturesError)):
             QMessageBox.warning(self, "Combined feature extraction failed", message)
             self.status_message.emit(f"S6 failed: {message}")
         else:
@@ -776,6 +880,7 @@ class CombinedFeaturesPage(QWidget):
             and identity.request_id == self._active_extraction_identity.request_id
         ):
             self._active_extraction_identity = None
+        self._extraction_cancel_requested = False
         self.controller.state.task_running = False
         self.progress.setVisible(False)
         self.elapsed_timer.stop()
@@ -803,7 +908,9 @@ class CombinedFeaturesPage(QWidget):
             self.qc_table.setItem(index, 0, QTableWidgetItem(name))
             self.qc_table.setItem(index, 1, QTableWidgetItem(value))
         state = self.controller.state
-        if state.run_error:
+        if state.run_stage == STATUS_CANCELED:
+            self.stage_label.setText("Canceled")
+        elif state.run_error:
             self.stage_label.setText(f"Failed: {state.run_error}")
         elif not self.has_running_task:
             self.stage_label.setText(state.run_stage)
@@ -858,6 +965,20 @@ class CombinedFeaturesPage(QWidget):
             or self.controller.state.last_result is not None
         )
         self.open_output_button.setEnabled(has_output and not busy)
+        context = self.task_runner.active_context
+        extraction_active = (
+            self._active_extraction_identity is not None and self.task_runner.is_running
+        )
+        in_publication = bool(
+            context is not None and context.is_publication_critical_section()
+        )
+        cancel_requested = bool(
+            self._extraction_cancel_requested
+            or (context is not None and context.is_cancellation_requested())
+        )
+        self.cancel_button.setEnabled(
+            extraction_active and not cancel_requested and not in_publication
+        )
 
     def _guard_idle(self, action: str) -> bool:
         if self.has_running_task:

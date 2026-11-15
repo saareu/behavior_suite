@@ -13,11 +13,17 @@ from typing import Any
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 
-from combined_features.contracts import CombinedFeaturesError
+from combined_features.contracts import (
+    CombinedFeaturesCancelledError,
+    CombinedFeaturesError,
+)
 from combined_features.frame_features import FrameFeatureResult, build_frame_features
 from combined_features.pipeline50_post import apply_pipeline50_post
 from combined_features.pose_adapter import AdaptedPose, adapt_final_pose_to_frame_feature_input
 from combined_features.upstream import JointEligiblePair, validate_joint_s4_s5_pair
+from runtime.cancellation import CancellationCallback, raise_if_cancellation_requested
+
+_CANCEL_MESSAGE = "Combined feature extraction cancelled before publication."
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,9 +55,11 @@ def compute_combined_features_from_adapted(
     iteration_name: str = "suite",
     smooth_win: int = 9,
     diff_dt: int = 1,
+    cancellation_requested: CancellationCallback | None = None,
 ) -> CombinedFeaturesComputation:
     """Run FF + Pipeline 50 post on an already-adapted pose + S5 blob table."""
 
+    _raise_if_s6_cancelled(cancellation_requested)
     ff = build_frame_features(
         adapted,
         exp_name=exp_name,
@@ -59,6 +67,7 @@ def compute_combined_features_from_adapted(
         smooth_win=smooth_win,
         diff_dt=diff_dt,
     )
+    _raise_if_s6_cancelled(cancellation_requested)
     directional = ff.features_df.copy()
     if directional.empty:
         raise CombinedFeaturesError("Frame-feature calculation produced an empty table.")
@@ -69,11 +78,13 @@ def compute_combined_features_from_adapted(
     if "t_120" in directional.columns and "time_sec" not in directional.columns:
         directional["time_sec"] = directional["t_120"].astype(np.float64)
 
+    _raise_if_s6_cancelled(cancellation_requested)
     features = apply_pipeline50_post(
         directional,
         blob_features,
         adapted.implantation,
     )
+    _raise_if_s6_cancelled(cancellation_requested)
     _validate_directional_keys(features)
 
     warnings: list[str] = []
@@ -120,6 +131,7 @@ def compute_combined_features(
     iteration_name: str = "suite",
     smooth_win: int = 9,
     diff_dt: int = 1,
+    cancellation_requested: CancellationCallback | None = None,
 ) -> CombinedFeaturesComputation:
     """Validate a joint S4/S5 pair and compute the complete directional feature table."""
 
@@ -134,6 +146,7 @@ def compute_combined_features(
         iteration_name=iteration_name,
         smooth_win=smooth_win,
         diff_dt=diff_dt,
+        cancellation_requested=cancellation_requested,
     )
 
 
@@ -144,14 +157,17 @@ def compute_combined_features_from_pair(
     iteration_name: str = "suite",
     smooth_win: int = 9,
     diff_dt: int = 1,
+    cancellation_requested: CancellationCallback | None = None,
 ) -> CombinedFeaturesComputation:
     """Compute features from an already-validated ``JointEligiblePair``."""
 
+    _raise_if_s6_cancelled(cancellation_requested)
     adapted = adapt_final_pose_to_frame_feature_input(
         pair.final_pose,
         orig_frame_idx=pair.blob_features["orig_frame_idx"].to_numpy(dtype=np.int64),
         run_meta=pair.s4_meta,
     )
+    _raise_if_s6_cancelled(cancellation_requested)
     label = exp_name if exp_name is not None else Path(pair.session_root).name
     result = compute_combined_features_from_adapted(
         adapted,
@@ -160,6 +176,7 @@ def compute_combined_features_from_pair(
         iteration_name=iteration_name,
         smooth_win=smooth_win,
         diff_dt=diff_dt,
+        cancellation_requested=cancellation_requested,
     )
     metadata = dict(result.metadata)
     metadata.update(
@@ -178,6 +195,16 @@ def compute_combined_features_from_pair(
         frame_feature_result=result.frame_feature_result,
         warnings=result.warnings,
         metadata=metadata,
+    )
+
+
+def _raise_if_s6_cancelled(
+    cancellation_requested: CancellationCallback | None,
+) -> None:
+    raise_if_cancellation_requested(
+        cancellation_requested,
+        message=_CANCEL_MESSAGE,
+        error=CombinedFeaturesCancelledError,
     )
 
 
