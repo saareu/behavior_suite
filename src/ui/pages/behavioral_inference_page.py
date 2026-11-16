@@ -39,6 +39,8 @@ from behavioral_inference import (
     MISSING_REQUIRED_ARTIFACTS,
     STALE_MODELS,
     STALE_SOURCE,
+    STATUS_CANCELED,
+    BehavioralInferenceCancelledError,
     BehavioralInferenceError,
     BehavioralInferenceRunResult,
 )
@@ -82,6 +84,7 @@ class BehavioralInferencePage(QWidget):
         self._syncing_widgets = False
         self._started_at: float | None = None
         self._last_running_state: bool | None = None
+        self._inference_cancel_requested = False
         self._active_inference_identity: InferenceRequestIdentity | None = None
         self._active_discovery_identity: DiscoveryRequestIdentity | None = None
         self._dyadic_checks: dict[str, QCheckBox] = {}
@@ -151,8 +154,9 @@ class BehavioralInferencePage(QWidget):
             "Score eligible Subsystem 6 dyadic features with configured dyadic and "
             "focal detectors in one workflow. Publishes framewise predictions, wide "
             "views, QC, and model provenance for downstream S8. Does not train models, "
-            "arbitrate detectors, or generate bouts. Cancellation is not supported; "
-            "partial prediction artifacts are never published as completed."
+            "arbitrate detectors, or generate bouts. Cancel stops after the current "
+            "detector returns; partial prediction artifacts are never published as "
+            "completed or eligible for S8."
         )
         scope.setWordWrap(True)
 
@@ -323,11 +327,15 @@ class BehavioralInferencePage(QWidget):
         run_row = QHBoxLayout()
         self.run_button = QPushButton("Run Behavioral Inference")
         self.run_button.clicked.connect(self._run_inference)
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self._cancel_inference)
+        self.cancel_button.setEnabled(False)
         self.open_output_button = QPushButton("Open S7 run folder")
         self.open_output_button.clicked.connect(self._open_output_folder)
         self.apply_settings_button = QPushButton("Apply settings")
         self.apply_settings_button.clicked.connect(self._apply_settings)
         run_row.addWidget(self.run_button)
+        run_row.addWidget(self.cancel_button)
         run_row.addWidget(self.open_output_button)
         run_row.addWidget(self.apply_settings_button)
         run_row.addStretch(1)
@@ -860,6 +868,7 @@ class BehavioralInferencePage(QWidget):
             return
 
         self._active_inference_identity = identity
+        self._inference_cancel_requested = False
         self._started_at = time.perf_counter()
         self.stage_label.setText("Running behavioral inference…")
         self.progress.setRange(0, 0)
@@ -868,7 +877,8 @@ class BehavioralInferencePage(QWidget):
         self._update_enabled()
         self._emit_running_changed()
         self.status_message.emit(
-            "S7 inference started (settings snapshotted; cancellation unsupported)."
+            "S7 inference started (settings snapshotted; Cancel stops after "
+            "the current detector returns)."
         )
 
         context = GuiTaskContext(
@@ -881,7 +891,10 @@ class BehavioralInferencePage(QWidget):
 
         def _operation(report: object) -> BehavioralInferenceRunResult:
             return self.controller.execute_request(
-                request, progress_callback=report  # type: ignore[arg-type]
+                request,
+                progress_callback=report,  # type: ignore[arg-type]
+                cancellation_requested=context.is_cancellation_requested,
+                publication_started=context.mark_publication_critical_section,
             )
 
         try:
@@ -894,10 +907,14 @@ class BehavioralInferencePage(QWidget):
                 on_error=lambda exc: self._on_inference_error(exc, identity),
                 on_finished=lambda: self._on_inference_finished(identity),
             )
+            self._update_enabled()
+            self._emit_running_changed()
         except TaskAlreadyRunningError:
             self.controller.record_failure(
                 "Inference already running.", expected_identity=identity
             )
+            self._active_inference_identity = None
+            self._inference_cancel_requested = False
             self.progress.setVisible(False)
             self.elapsed_timer.stop()
             self._update_enabled()
@@ -907,6 +924,63 @@ class BehavioralInferencePage(QWidget):
                 "Task already running",
                 "A Subsystem 7 inference task is already active.",
             )
+
+    def _cancel_inference(self) -> None:
+        """Request cooperative cancellation of the active scientific inference."""
+
+        if self._active_inference_identity is None or not self.task_runner.is_running:
+            return
+        context = self.task_runner.active_context
+        if context is not None and context.is_publication_critical_section():
+            self.stage_label.setText(
+                "Publication in progress — cancellation is no longer possible; "
+                "waiting for the worker to finish."
+            )
+            self.status_message.emit(
+                "S7 publication critical section already started; waiting for completion."
+            )
+            self._update_enabled()
+            return
+        if self._inference_cancel_requested:
+            return
+        self.task_runner.request_cancellation()
+        self._inference_cancel_requested = True
+        self.stage_label.setText(
+            "Cancel requested — waiting for the current detector to finish."
+        )
+        self.status_message.emit(
+            "S7 cancel requested. Waiting for the worker to confirm termination."
+        )
+        self._update_enabled()
+
+    def request_cooperative_shutdown(self) -> str:
+        """Request cooperative cancel of scientific inference for app close.
+
+        Idempotent. Does not force-stop the QThread. If publication has already
+        started, wait for the real completed/failed outcome.
+        """
+
+        if self._active_inference_identity is None or not self.task_runner.is_running:
+            return (
+                "An S7 task is active. The window remains responsive and will close "
+                "when the task finishes."
+            )
+        context = self.task_runner.active_context
+        if context is not None and context.is_publication_critical_section():
+            return (
+                "S7 inference is publishing artifacts (noninterruptible). "
+                "The window remains open until publication finishes."
+            )
+        self.task_runner.request_cancellation()
+        self._inference_cancel_requested = True
+        self.stage_label.setText(
+            "Cancel requested — waiting for the current detector to finish."
+        )
+        self._update_enabled()
+        return (
+            "S7 inference cancel requested. The window remains responsive and will "
+            "close after the worker confirms termination."
+        )
 
     def _on_inference_progress(
         self,
@@ -919,6 +993,15 @@ class BehavioralInferencePage(QWidget):
             return
         if not isinstance(event, GuiTaskProgressEvent):
             return
+        if event.in_publication_critical_section:
+            pass
+        elif event.cancellation_requested or self._inference_cancel_requested:
+            self._inference_cancel_requested = True
+            self.stage_label.setText(
+                "Cancel requested — waiting for the current detector to finish."
+            )
+            self._update_enabled()
+            return
         self.stage_label.setText(format_pipeline_progress(event))
         if (
             not event.is_indeterminate
@@ -929,6 +1012,7 @@ class BehavioralInferencePage(QWidget):
             self.progress.setValue(int(event.completed_units))
         else:
             self.progress.setRange(0, 0)
+        self._update_enabled()
 
     def _on_inference_success(
         self, result: object, identity: InferenceRequestIdentity
@@ -944,6 +1028,7 @@ class BehavioralInferencePage(QWidget):
                 "Ignored stale S7 inference result after session/source change."
             )
             return
+        # Cancel requested after the publication gate does not rewrite success.
         self.stage_label.setText(f"Finished: {result.status}")
         self.refresh_from_state()
         warnings = f" ({len(result.warnings)} warnings)" if result.warnings else ""
@@ -954,19 +1039,37 @@ class BehavioralInferencePage(QWidget):
     def _on_inference_error(
         self, exc: BaseException, identity: InferenceRequestIdentity
     ) -> None:
+        canceled = isinstance(exc, BehavioralInferenceCancelledError)
         message = str(exc)
         accepted = self.controller.record_failure(
-            message, expected_identity=identity
+            message, expected_identity=identity, canceled=canceled
         )
         if not accepted:
+            self.status_message.emit(
+                "Ignored stale S7 inference failure after session/source change."
+            )
             return
-        self.stage_label.setText(f"Failed: {message}")
+        if canceled:
+            self.stage_label.setText("Canceled")
+        else:
+            self.stage_label.setText(f"Failed: {message}")
         self.refresh_from_state()
         if self.controller.state.session_root is not None:
             with contextlib.suppress(BehavioralInferenceUiError):
                 identity = self.controller.begin_discovery()
                 self._start_discovery_task(identity)
-        if isinstance(exc, (BehavioralInferenceUiError, BehavioralInferenceError)):
+        if canceled:
+            QMessageBox.information(
+                self,
+                "Behavioral inference canceled",
+                f"{message}\n\n"
+                "The canceled run was kept for traceability and is not eligible "
+                "for downstream Subsystem 8 use.",
+            )
+            self.status_message.emit(
+                "S7 canceled. Run is not eligible for S8; a new run may be started."
+            )
+        elif isinstance(exc, (BehavioralInferenceUiError, BehavioralInferenceError)):
             QMessageBox.warning(self, "Behavioral inference failed", message)
             self.status_message.emit(f"S7 failed: {message}")
         else:
@@ -978,6 +1081,7 @@ class BehavioralInferencePage(QWidget):
             and identity.request_id == self._active_inference_identity.request_id
         ):
             self._active_inference_identity = None
+        self._inference_cancel_requested = False
         self.controller.state.task_running = False
         self.progress.setVisible(False)
         self.elapsed_timer.stop()
@@ -1005,7 +1109,9 @@ class BehavioralInferencePage(QWidget):
             self.qc_table.setItem(index, 0, QTableWidgetItem(name))
             self.qc_table.setItem(index, 1, QTableWidgetItem(value))
         state = self.controller.state
-        if state.run_error:
+        if state.run_stage == STATUS_CANCELED:
+            self.stage_label.setText("Canceled")
+        elif state.run_error:
             self.stage_label.setText(f"Failed: {state.run_error}")
         elif not self.has_running_task:
             self.stage_label.setText(state.run_stage)
@@ -1050,6 +1156,20 @@ class BehavioralInferencePage(QWidget):
             or self.controller.state.last_result is not None
         )
         self.open_output_button.setEnabled(has_output and not busy)
+        context = self.task_runner.active_context
+        inference_active = (
+            self._active_inference_identity is not None and self.task_runner.is_running
+        )
+        in_publication = bool(
+            context is not None and context.is_publication_critical_section()
+        )
+        cancel_requested = bool(
+            self._inference_cancel_requested
+            or (context is not None and context.is_cancellation_requested())
+        )
+        self.cancel_button.setEnabled(
+            inference_active and not cancel_requested and not in_publication
+        )
 
     def _guard_idle(self, action: str) -> bool:
         if self.has_running_task:

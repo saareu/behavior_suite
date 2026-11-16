@@ -7,9 +7,16 @@ from collections.abc import Sequence
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 
-from behavioral_inference.contracts import FeatureValidationError, InferenceError
+from behavioral_inference.contracts import (
+    BehavioralInferenceCancelledError,
+    FeatureValidationError,
+    InferenceError,
+)
 from behavioral_inference.features import require_feature_matrix
 from behavioral_inference.loader import LoadedModel
+from runtime.cancellation import CancellationCallback, raise_if_cancellation_requested
+
+_CANCEL_MESSAGE = "Behavioral inference cancelled."
 
 
 def binarize_probabilities(
@@ -29,12 +36,16 @@ def score_positive_probabilities(
     *,
     row_mask: np.ndarray | pd.Series | None = None,
     excluded_fill: float = 0.0,
+    cancellation_requested: CancellationCallback | None = None,
 ) -> np.ndarray:
     """Score rows with a loaded model and return positive-class probabilities.
 
     When ``row_mask`` is provided, only masked rows are scored; excluded rows
     receive ``excluded_fill`` (legacy contact / nose-to-body routers use 0.0).
     Empty mask → all-fill array without calling ``predict_proba``.
+
+    Optional ``cancellation_requested`` is checked once before the blocking
+    ``predict_proba`` call. An in-flight call is allowed to return normally.
     """
 
     n_rows = len(features)
@@ -54,6 +65,11 @@ def score_positive_probabilities(
             raise InferenceError(
                 f"{model.detector_name}: feature validation failed: {exc}"
             ) from exc
+        raise_if_cancellation_requested(
+            cancellation_requested,
+            message=_CANCEL_MESSAGE,
+            error=BehavioralInferenceCancelledError,
+        )
         return np.asarray(model.positive_proba(matrix), dtype=float)
 
     mask = np.asarray(row_mask, dtype=bool)
@@ -65,6 +81,13 @@ def score_positive_probabilities(
 
     out = np.full(n_rows, float(excluded_fill), dtype=float)
     if not bool(mask.any()):
+        # Empty mask skips predict_proba but remains a safe cancel checkpoint so
+        # dual-specialist routers cannot bypass cancellation between specialists.
+        raise_if_cancellation_requested(
+            cancellation_requested,
+            message=_CANCEL_MESSAGE,
+            error=BehavioralInferenceCancelledError,
+        )
         return out
 
     try:
@@ -73,6 +96,11 @@ def score_positive_probabilities(
         raise InferenceError(
             f"{model.detector_name}: feature validation failed for masked rows: {exc}"
         ) from exc
+    raise_if_cancellation_requested(
+        cancellation_requested,
+        message=_CANCEL_MESSAGE,
+        error=BehavioralInferenceCancelledError,
+    )
     scored = np.asarray(model.positive_proba(matrix), dtype=float)
     if scored.shape != (int(mask.sum()),):
         raise InferenceError(

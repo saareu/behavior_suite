@@ -46,10 +46,12 @@ from behavioral_inference.contracts import (
     RUN_META_SCHEMA_VERSION,
     SETTINGS_USED_FILENAME,
     SPECIALIST_PREDICTIONS_FILENAME,
+    STATUS_CANCELED,
     STATUS_COMPLETED,
     STATUS_COMPLETED_WITH_WARNINGS,
     STATUS_FAILED,
     STATUS_RUNNING,
+    BehavioralInferenceCancelledError,
     ProvenanceError,
     PublicationError,
 )
@@ -84,8 +86,11 @@ from project.validation_memo import (
     memoized_validation,
     run_dir_fingerprint,
 )
+from runtime.cancellation import CancellationCallback, raise_if_cancellation_requested
 
 ProgressCallback = Callable[[OperationProgress], None]
+PublicationStartedCallback = Callable[[], None]
+_CANCEL_MESSAGE = "Behavioral inference cancelled."
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,16 +152,42 @@ def run_behavioral_inference_publication(
     request: BehavioralInferenceRequest,
     *,
     progress_callback: ProgressCallback | None = None,
+    cancellation_requested: CancellationCallback | None = None,
+    publication_started: PublicationStartedCallback | None = None,
 ) -> BehavioralInferenceRunResult:
-    """Run Sprint 3 publication pipeline over the Sprint 2 inference engine."""
+    """Run Sprint 3 publication pipeline over the Sprint 2 inference engine.
+
+    Cooperative cancellation is optional. When ``cancellation_requested`` is
+    provided, safe checkpoints raise :class:`BehavioralInferenceCancelledError`
+    before the publication critical section. Once publication begins, cancellation
+    is ignored and the run finishes as completed or failed.
+    """
 
     purpose = request.run_purpose.strip()
     if not purpose:
         raise PublicationError("run_purpose must not be empty.")
 
+    # Checkpoint 0: before expensive S6 / model source loading / run bootstrap.
+    _raise_if_s7_cancelled(cancellation_requested)
+    _report_progress(
+        progress_callback,
+        phase="validating_sources",
+        message="Validating S6 source and models",
+        completed_units=0,
+        total_units=None,
+        is_indeterminate=True,
+    )
     config = _resolve_config(request)
     session_root, s6_run_dir, s6_info = _resolve_s6(request)
     features_path = s6_run_dir / DYADIC_FEATURES_FILENAME
+    _report_progress(
+        progress_callback,
+        phase="loading_inputs",
+        message="Loading S6 features",
+        completed_units=0,
+        total_units=None,
+        is_indeterminate=True,
+    )
     features_df = load_dyadic_features_table(features_path)
     features_sha = _sha256(features_path)
 
@@ -166,14 +197,6 @@ def run_behavioral_inference_publication(
         session_root=session_root,
         run_id=run_id,
         output_root=request.output_root,
-    )
-    _report_progress(
-        progress_callback,
-        phase="starting",
-        message="Validating S6 source and creating S7 run directory",
-        completed_units=0,
-        total_units=None,
-        is_indeterminate=True,
     )
     _reject_output_overlap(
         paths.run_dir,
@@ -190,6 +213,9 @@ def run_behavioral_inference_publication(
     )
     if paths.run_dir.exists():
         raise PublicationError(f"S7 run directory already exists: {paths.run_dir}")
+
+    # Final pre-run-dir cancel: confirmed cancel must not invent a run path.
+    _raise_if_s7_cancelled(cancellation_requested)
 
     created_at = _iso_now()
     try:
@@ -245,16 +271,41 @@ def run_behavioral_inference_publication(
     success = False
     warnings: tuple[str, ...] = ()
     science_written = False
+    canceled = False
+    in_publication = False
     predictions_table: pd.DataFrame | None = None
     specialist_table: pd.DataFrame | None = None
     dyadic_wide: pd.DataFrame | None = None
     focal_wide: pd.DataFrame | None = None
 
-    try:
+    def _on_detector_progress(detector_name: str, completed: int, total: int) -> None:
         _report_progress(
             progress_callback,
-            phase="inference",
-            message="Running behavioral inference engine",
+            phase="running_detector_inference",
+            message=(
+                f"Running detector inference: {detector_name} "
+                f"({completed}/{total} detectors completed)"
+            ),
+            completed_units=completed,
+            total_units=total if total > 0 else None,
+            is_indeterminate=total <= 0,
+        )
+
+    try:
+        # Checkpoint 1: after run bootstrap / STATUS_RUNNING persistence.
+        _raise_if_s7_cancelled(cancellation_requested)
+        _report_progress(
+            progress_callback,
+            phase="loading_models",
+            message="Loading models",
+            completed_units=0,
+            total_units=None,
+            is_indeterminate=True,
+        )
+        _report_progress(
+            progress_callback,
+            phase="preparing_inference",
+            message="Preparing inference",
             completed_units=0,
             total_units=None,
             is_indeterminate=True,
@@ -264,6 +315,18 @@ def run_behavioral_inference_publication(
             config,
             selected_detectors_dyadic=request.selected_detectors_dyadic,
             selected_detectors_focal=request.selected_detectors_focal,
+            cancellation_requested=cancellation_requested,
+            detector_progress=_on_detector_progress,
+        )
+        # Checkpoint after all detector predictions completed.
+        _raise_if_s7_cancelled(cancellation_requested)
+        _report_progress(
+            progress_callback,
+            phase="constructing_prediction_tables",
+            message="Constructing prediction tables",
+            completed_units=0,
+            total_units=None,
+            is_indeterminate=True,
         )
 
         validation_metrics = validate_canonical_predictions(
@@ -323,6 +386,15 @@ def run_behavioral_inference_publication(
             feature_spec_digests=feature_digests,
         )
 
+        _raise_if_s7_cancelled(cancellation_requested)
+        _report_progress(
+            progress_callback,
+            phase="computing_qc",
+            message="Computing QC",
+            completed_units=0,
+            total_units=None,
+            is_indeterminate=True,
+        )
         qc_summary = evaluate_behavioral_inference_qc(
             result=inference_result,
             predictions=predictions_table,
@@ -336,6 +408,15 @@ def run_behavioral_inference_publication(
         )
         assert_structural_qc(qc_summary)
 
+        _raise_if_s7_cancelled(cancellation_requested)
+        _report_progress(
+            progress_callback,
+            phase="revalidating_sources",
+            message="Revalidating sources",
+            completed_units=0,
+            total_units=None,
+            is_indeterminate=True,
+        )
         # Revalidate S6 eligibility + digests immediately before publish.
         _revalidate_s6_before_publish(
             s6_run_dir=s6_run_dir,
@@ -344,10 +425,15 @@ def run_behavioral_inference_publication(
         )
         _revalidate_models_before_publish(model_manifest)
 
+        # Checkpoint: final pre-publication gate.
+        _raise_if_s7_cancelled(cancellation_requested)
+        in_publication = True
+        if publication_started is not None:
+            publication_started()
         _report_progress(
             progress_callback,
-            phase="writing",
-            message="Writing prediction artifacts and QC",
+            phase="writing_artifacts",
+            message="Writing artifacts",
             completed_units=1,
             total_units=1,
             is_indeterminate=False,
@@ -377,6 +463,20 @@ def run_behavioral_inference_publication(
             total_units=1,
             is_indeterminate=False,
         )
+    except BehavioralInferenceCancelledError as exc:
+        if in_publication:
+            # Should not occur: cancel checks stop before publication begins.
+            status = STATUS_FAILED
+            success = False
+            error_message = str(exc)
+            canceled = False
+        else:
+            status = STATUS_CANCELED
+            success = False
+            canceled = True
+            error_message = str(exc)
+        _unlink_science_artifacts(paths)
+        science_written = False
     except Exception as exc:
         status = STATUS_FAILED
         success = False
@@ -405,6 +505,8 @@ def run_behavioral_inference_publication(
         focal_wide_written=bool(focal_wide is not None and not focal_wide.empty and science_written),
     )
 
+    if canceled:
+        raise BehavioralInferenceCancelledError(error_message or _CANCEL_MESSAGE)
     if not success:
         raise PublicationError(error_message or "Behavioral inference publication failed.")
 
@@ -438,6 +540,16 @@ def run_behavioral_inference_publication(
         error_message=None,
         qc=qc_summary.to_metadata() if qc_summary is not None else None,
         model_manifest=model_manifest,
+    )
+
+
+def _raise_if_s7_cancelled(
+    cancellation_requested: CancellationCallback | None,
+) -> None:
+    raise_if_cancellation_requested(
+        cancellation_requested,
+        message=_CANCEL_MESSAGE,
+        error=BehavioralInferenceCancelledError,
     )
 
 

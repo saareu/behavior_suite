@@ -45,6 +45,7 @@ from behavioral_inference import (
     S7_RUNTIME_INSTALL_HINT,
     STALE_MODELS,
     STALE_SOURCE,
+    STATUS_CANCELED,
     BehavioralInferenceConfig,
     BehavioralInferenceError,
     BehavioralInferenceProjectSummary,
@@ -88,9 +89,11 @@ from combined_features.runner import (
     validate_s6_run_for_downstream,
 )
 from preprocess.models import OperationProgress
+from runtime.cancellation import CancellationCallback
 from ui.controllers.run_preprocess_controller import open_folder_in_platform_explorer
 
 ProgressCallback = Callable[[OperationProgress], None]
+PublicationStartedCallback = Callable[[], None]
 FolderOpener = Callable[[Path], bool]
 BehavioralInferenceRunner = Callable[..., BehavioralInferenceRunResult]
 
@@ -782,10 +785,18 @@ class BehavioralInferenceController:
         self,
         request: BehavioralInferenceRequest,
         progress_callback: ProgressCallback | None = None,
+        *,
+        cancellation_requested: CancellationCallback | None = None,
+        publication_started: PublicationStartedCallback | None = None,
     ) -> BehavioralInferenceRunResult:
         """Run one validated request (worker-thread safe; no Qt updates)."""
 
-        return self._runner(request, progress_callback=progress_callback)
+        return self._runner(
+            request,
+            progress_callback=progress_callback,
+            cancellation_requested=cancellation_requested,
+            publication_started=publication_started,
+        )
 
     def record_success(
         self,
@@ -820,8 +831,9 @@ class BehavioralInferenceController:
         message: str,
         *,
         expected_identity: InferenceRequestIdentity | None = None,
+        canceled: bool = False,
     ) -> bool:
-        """Record a failed run without marking it completed."""
+        """Record a failed or canceled run without marking it completed."""
 
         self.state.task_running = False
         if (
@@ -832,7 +844,7 @@ class BehavioralInferenceController:
         ):
             return False
         self.state.last_result = None
-        self.state.run_stage = "Failed"
+        self.state.run_stage = STATUS_CANCELED if canceled else "Failed"
         self.state.run_error = message
         self.state.active_inference_identity = None
         return True

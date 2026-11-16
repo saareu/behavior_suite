@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -20,6 +20,7 @@ from behavioral_inference.contracts import (
     OUTPUT_ROLE_SPECIALIST,
     PREDICTIONS_SCHEMA_VERSION,
     REQUIRED_FEATURE_META_COLS,
+    BehavioralInferenceCancelledError,
     DetectorSelectionError,
     InferenceError,
     ThresholdConfigError,
@@ -31,8 +32,11 @@ from behavioral_inference.results import (
     append_prediction_rows,
     empty_predictions_frame,
 )
+from runtime.cancellation import CancellationCallback, raise_if_cancellation_requested
 
 STANDALONE_FOCAL_DETECTORS = ("nose_to_tail", "approach", "retract")
+_CANCEL_MESSAGE = "Behavioral inference cancelled."
+DetectorProgressCallback = Callable[[str, int, int], None]
 
 
 def prepare_directional_features(features_df: pd.DataFrame) -> pd.DataFrame:
@@ -123,8 +127,16 @@ def run_focal_inference(
     config: BehavioralInferenceConfig,
     *,
     selected_detectors: Sequence[str] | None = None,
+    cancellation_requested: CancellationCallback | None = None,
+    detector_progress: DetectorProgressCallback | None = None,
+    detector_offset: int = 0,
+    detector_total: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, tuple[DetectorRunMeta, ...], list[str], dict[str, Any]]:
-    """Run focal detectors on directional rows (both directions preserved)."""
+    """Run focal detectors on directional rows (both directions preserved).
+
+    Cooperative cancellation is optional and checked between detectors and
+    before each blocking ``predict_proba`` call.
+    """
 
     warnings: list[str] = []
     routing: dict[str, Any] = {}
@@ -157,8 +169,17 @@ def run_focal_inference(
     pred_chunks: list[pd.DataFrame] = []
     diag_chunks: list[pd.DataFrame] = []
     metas: list[DetectorRunMeta] = []
+    total = int(detector_total) if detector_total is not None else len(selected)
 
-    for detector_name in selected:
+    for index, detector_name in enumerate(selected):
+        raise_if_cancellation_requested(
+            cancellation_requested,
+            message=_CANCEL_MESSAGE,
+            error=BehavioralInferenceCancelledError,
+        )
+        completed = detector_offset + index
+        if detector_progress is not None:
+            detector_progress(detector_name, completed, total)
         if detector_name == "nose_to_body":
             rows, diags, meta_list, warn, route_info = _run_nose_to_body(
                 directional,
@@ -166,6 +187,7 @@ def run_focal_inference(
                 config,
                 time_sec=time_sec,
                 sample_idx=sample_idx,
+                cancellation_requested=cancellation_requested,
             )
             warnings.extend(warn)
             routing["nose_to_body"] = route_info
@@ -184,7 +206,11 @@ def run_focal_inference(
                 "Refusing to omit it from a successful run."
             )
         threshold = resolve_working_threshold(detector_name, config)
-        probs = score_positive_probabilities(directional, model)
+        probs = score_positive_probabilities(
+            directional,
+            model,
+            cancellation_requested=cancellation_requested,
+        )
         preds = binarize_probabilities(probs, threshold.value)
         chunk = append_prediction_rows(
             empty_predictions_frame(),
@@ -251,6 +277,7 @@ def _run_nose_to_body(
     *,
     time_sec: np.ndarray,
     sample_idx: np.ndarray,
+    cancellation_requested: CancellationCallback | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[DetectorRunMeta], list[str], dict[str, Any]]:
     warnings: list[str] = []
     n = len(directional)
@@ -294,7 +321,11 @@ def _run_nose_to_body(
                 "single-stage nose_to_body threshold resolved from nose_to_body.intact "
                 f"({threshold.value}); no scalar nose_to_body threshold configured"
             )
-        probs = score_positive_probabilities(directional, model)
+        probs = score_positive_probabilities(
+            directional,
+            model,
+            cancellation_requested=cancellation_requested,
+        )
         preds = binarize_probabilities(probs, threshold.value)
         rows = append_prediction_rows(
             empty_predictions_frame(),
@@ -375,7 +406,19 @@ def _run_nose_to_body(
         ("nose_body_intact", mask_intact, model_intact, thr_intact),
         ("nose_body_occ", mask_occ, model_occ, thr_occ),
     ):
-        probs = score_positive_probabilities(directional, model, row_mask=mask)
+        # Explicit specialist boundary: empty masks skip predict_proba and must
+        # still honor cancel before any further specialist work or fusion.
+        raise_if_cancellation_requested(
+            cancellation_requested,
+            message=_CANCEL_MESSAGE,
+            error=BehavioralInferenceCancelledError,
+        )
+        probs = score_positive_probabilities(
+            directional,
+            model,
+            row_mask=mask,
+            cancellation_requested=cancellation_requested,
+        )
         # Specialist raw probs for diagnostics (0 where excluded, matching scored fill).
         # For diagnostics, store actual scored values on mask and NaN off-mask so
         # consumers can distinguish "scored 0" from "unscored".

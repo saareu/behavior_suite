@@ -613,7 +613,7 @@ def test_full_inference_launch_qc_and_reopen(
 def test_page_progress_and_failure_presentation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    def _boom(request, progress_callback=None):
+    def _boom(request, progress_callback=None, **_kwargs):
         raise RuntimeError("synthetic S7 failure")
 
     controller, session, _registry = _ready_controller(monkeypatch, tmp_path)

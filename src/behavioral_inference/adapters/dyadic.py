@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -21,6 +21,7 @@ from behavioral_inference.contracts import (
     PREDICTIONS_SCHEMA_VERSION,
     REQUIRED_FEATURE_META_COLS,
     STANDALONE_DYADIC_DETECTORS,
+    BehavioralInferenceCancelledError,
     DetectorSelectionError,
     InferenceError,
 )
@@ -32,6 +33,10 @@ from behavioral_inference.results import (
     empty_predictions_frame,
     make_pair_id,
 )
+from runtime.cancellation import CancellationCallback, raise_if_cancellation_requested
+
+_CANCEL_MESSAGE = "Behavioral inference cancelled."
+DetectorProgressCallback = Callable[[str, int, int], None]
 
 
 def collapse_to_unordered_pairs(features_df: pd.DataFrame) -> pd.DataFrame:
@@ -136,10 +141,16 @@ def run_dyadic_inference(
     config: BehavioralInferenceConfig,
     *,
     selected_detectors: Sequence[str] | None = None,
+    cancellation_requested: CancellationCallback | None = None,
+    detector_progress: DetectorProgressCallback | None = None,
+    detector_offset: int = 0,
+    detector_total: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, tuple[DetectorRunMeta, ...], list[str]]:
     """Run dyadic detectors on canonical unordered-pair rows.
 
     Returns ``(predictions, diagnostics, detector_meta, warnings)``.
+    Cooperative cancellation is optional and checked between detectors and
+    before each blocking ``predict_proba`` call.
     """
 
     warnings: list[str] = []
@@ -168,8 +179,17 @@ def run_dyadic_inference(
     pred_chunks: list[pd.DataFrame] = []
     diag_chunks: list[pd.DataFrame] = []
     metas: list[DetectorRunMeta] = []
+    total = int(detector_total) if detector_total is not None else len(selected)
 
-    for detector_name in selected:
+    for index, detector_name in enumerate(selected):
+        raise_if_cancellation_requested(
+            cancellation_requested,
+            message=_CANCEL_MESSAGE,
+            error=BehavioralInferenceCancelledError,
+        )
+        completed = detector_offset + index
+        if detector_progress is not None:
+            detector_progress(detector_name, completed, total)
         if detector_name == "contact":
             rows, diags, meta_list, warn = _run_contact(
                 collapsed,
@@ -178,6 +198,7 @@ def run_dyadic_inference(
                 pair_ids=pair_ids,
                 time_sec=time_sec,
                 sample_idx=sample_idx,
+                cancellation_requested=cancellation_requested,
             )
             warnings.extend(warn)
             pred_chunks.append(rows)
@@ -195,7 +216,11 @@ def run_dyadic_inference(
                 "Refusing to omit it from a successful run."
             )
         threshold = resolve_working_threshold(detector_name, config)
-        probs = score_positive_probabilities(collapsed, model)
+        probs = score_positive_probabilities(
+            collapsed,
+            model,
+            cancellation_requested=cancellation_requested,
+        )
         preds = binarize_probabilities(probs, threshold.value)
         chunk = append_prediction_rows(
             empty_predictions_frame(),
@@ -263,6 +288,7 @@ def _run_contact(
     pair_ids: list[str],
     time_sec: np.ndarray,
     sample_idx: np.ndarray,
+    cancellation_requested: CancellationCallback | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[DetectorRunMeta], list[str]]:
     warnings: list[str] = []
     if OCCLUSION_COLUMN not in collapsed.columns:
@@ -299,9 +325,21 @@ def _run_contact(
         ("contact_intact", intact_mask),
         ("contact_occluded", occ_mask),
     ):
+        # Explicit specialist boundary: empty masks skip predict_proba and must
+        # still honor cancel before any further specialist work or fusion.
+        raise_if_cancellation_requested(
+            cancellation_requested,
+            message=_CANCEL_MESSAGE,
+            error=BehavioralInferenceCancelledError,
+        )
         model = models[specialist]
         threshold = resolve_working_threshold(specialist, config)
-        probs = score_positive_probabilities(collapsed, model, row_mask=mask)
+        probs = score_positive_probabilities(
+            collapsed,
+            model,
+            row_mask=mask,
+            cancellation_requested=cancellation_requested,
+        )
         preds = binarize_probabilities(probs, threshold.value)
         valid = mask.astype(bool)
         invalid_reason = np.asarray(

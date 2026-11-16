@@ -52,6 +52,7 @@ STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
 STATUS_COMPLETED_WITH_WARNINGS = "completed_with_warnings"
 STATUS_FAILED = "failed"
+STATUS_CANCELED = "canceled"
 
 # Discovery classifications (S6 + model staleness).
 ELIGIBLE_DOWNSTREAM = "eligible"
@@ -257,3 +258,7 @@ class PublicationError(BehavioralInferenceError):
 
 class ProvenanceError(BehavioralInferenceError):
     """Upstream S6 or model-source provenance / staleness failures."""
+
+
+class BehavioralInferenceCancelledError(BehavioralInferenceError):
+    """Confirmed cooperative cancellation before the publication critical section."""

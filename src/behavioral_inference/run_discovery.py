@@ -4,13 +4,16 @@ Completed S7 runs remain on disk when their recorded S6 sources or model
 artifacts later change; discovery distinguishes eligible vs stale without
 rewriting historical completion status.
 
+Canceled runs keep the outward ``failed_or_incomplete`` discovery classification
+and are never selected as eligible S8 sources.
+
 Downstream selection policy
 ---------------------------
 Prefer the newest currently eligible completed run
 (``status in {completed, completed_with_warnings}`` and
 ``classification in {eligible, completed_with_warnings}``), ordered by
 ``completed_at`` / ``created_at`` / run-id timestamp (newest first). Do **not**
-auto-select a stale run.
+auto-select a stale or canceled run.
 
 Detector subsets are allowed: summaries expose ``detectors_selected`` so S8
 can decide whether required detectors are present.

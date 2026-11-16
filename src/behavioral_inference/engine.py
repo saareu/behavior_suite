@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import pandas as pd  # type: ignore[import-untyped]
@@ -18,6 +18,7 @@ from behavioral_inference.contracts import (
     LOGICAL_FOCAL_DETECTORS,
     NOSE_TO_BODY_SPECIALISTS,
     STANDALONE_DYADIC_DETECTORS,
+    BehavioralInferenceCancelledError,
     BehavioralInferenceError,
     DetectorSelectionError,
     InferenceError,
@@ -32,6 +33,10 @@ from behavioral_inference.results import (
     build_inference_result,
     empty_predictions_frame,
 )
+from runtime.cancellation import CancellationCallback, raise_if_cancellation_requested
+
+_CANCEL_MESSAGE = "Behavioral inference cancelled."
+DetectorProgressCallback = Callable[[str, int, int], None]
 
 
 def _unique_mouse_ids(features_df: pd.DataFrame) -> set[int]:
@@ -137,6 +142,7 @@ def load_models_for_selection(
     focal_selected: Sequence[str],
     *,
     allow_nose_to_body_fallback: bool,
+    cancellation_requested: CancellationCallback | None = None,
 ) -> dict[str, LoadedModel]:
     """Load only the bundles required by the selected detectors (fail-fast)."""
 
@@ -154,6 +160,11 @@ def load_models_for_selection(
 
     loaded: dict[str, LoadedModel] = {}
     for family, name in needed:
+        raise_if_cancellation_requested(
+            cancellation_requested,
+            message=_CANCEL_MESSAGE,
+            error=BehavioralInferenceCancelledError,
+        )
         info = by_name.get(name)
         if info is None or info.family != family:
             raise InferenceError(
@@ -174,6 +185,8 @@ def run_behavioral_inference(
     models: Mapping[str, LoadedModel] | None = None,
     selected_detectors_dyadic: Sequence[str] | None = None,
     selected_detectors_focal: Sequence[str] | None = None,
+    cancellation_requested: CancellationCallback | None = None,
+    detector_progress: DetectorProgressCallback | None = None,
 ) -> BehavioralInferenceResult:
     """Run unified dyadic + focal inference and return an in-memory result.
 
@@ -192,6 +205,12 @@ def run_behavioral_inference(
     selected_detectors_dyadic / selected_detectors_focal:
         Optional subset overrides. A selected detector is never silently
         omitted on success.
+    cancellation_requested:
+        Optional cooperative-cancellation callback. ``None`` or always-False
+        preserves existing behavior.
+    detector_progress:
+        Optional ``(detector_name, completed, total)`` reporter for coarse GUI
+        feedback. Does not invent percentages beyond real detector counts.
 
     Notes
     -----
@@ -220,6 +239,12 @@ def run_behavioral_inference(
 
     warnings: list[str] = []
     work = ensure_blob_helper_columns(features_df, warnings=warnings)
+
+    raise_if_cancellation_requested(
+        cancellation_requested,
+        message=_CANCEL_MESSAGE,
+        error=BehavioralInferenceCancelledError,
+    )
 
     loaded: dict[str, LoadedModel]
     if models is not None:
@@ -258,11 +283,17 @@ def run_behavioral_inference(
             raise ModelRegistryError(
                 "Model registry unavailable; configure model_registry.root explicitly"
             )
+        raise_if_cancellation_requested(
+            cancellation_requested,
+            message=_CANCEL_MESSAGE,
+            error=BehavioralInferenceCancelledError,
+        )
         loaded = load_models_for_selection(
             snapshot,
             dyadic_sel,
             focal_sel,
             allow_nose_to_body_fallback=config.adapters.allow_nose_to_body_single_stage_fallback,
+            cancellation_requested=cancellation_requested,
         )
 
     dyadic_preds = empty_predictions_frame()
@@ -271,33 +302,60 @@ def run_behavioral_inference(
     focal_diags = empty_predictions_frame()
     metas: list[DetectorRunMeta] = []
     routing: dict[str, Any] = {}
+    detector_total = len(dyadic_sel) + len(focal_sel)
 
     try:
+        raise_if_cancellation_requested(
+            cancellation_requested,
+            message=_CANCEL_MESSAGE,
+            error=BehavioralInferenceCancelledError,
+        )
         if dyadic_sel:
             dyadic_preds, dyadic_diags, dyadic_metas, dyadic_warn = run_dyadic_inference(
                 work,
                 loaded,
                 config,
                 selected_detectors=dyadic_sel,
+                cancellation_requested=cancellation_requested,
+                detector_progress=detector_progress,
+                detector_offset=0,
+                detector_total=detector_total,
             )
             warnings.extend(dyadic_warn)
             metas.extend(dyadic_metas)
+        raise_if_cancellation_requested(
+            cancellation_requested,
+            message=_CANCEL_MESSAGE,
+            error=BehavioralInferenceCancelledError,
+        )
         if focal_sel:
             focal_preds, focal_diags, focal_metas, focal_warn, focal_route = run_focal_inference(
                 work,
                 loaded,
                 config,
                 selected_detectors=focal_sel,
+                cancellation_requested=cancellation_requested,
+                detector_progress=detector_progress,
+                detector_offset=len(dyadic_sel),
+                detector_total=detector_total,
             )
             warnings.extend(focal_warn)
             metas.extend(focal_metas)
             routing.update(focal_route)
+    except BehavioralInferenceCancelledError:
+        raise
     except BehavioralInferenceError:
         raise
     except Exception as exc:  # noqa: BLE001
         if config.adapters.fail_fast_on_detector_error:
             raise InferenceError(f"Inference failed: {type(exc).__name__}: {exc}") from exc
         raise
+
+    raise_if_cancellation_requested(
+        cancellation_requested,
+        message=_CANCEL_MESSAGE,
+        error=BehavioralInferenceCancelledError,
+    )
 
     frames_to_concat = [f for f in (dyadic_preds, focal_preds) if len(f)]
     predictions = (

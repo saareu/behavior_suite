@@ -20,7 +20,7 @@ See also: [Implementation Contract](implementation_contract.md), [Architecture A
 | Detector selection | Unified dyadic + focal logical detectors; specialists nested under parents; unsupported/obsolete identified but not executable |
 | Thresholds / parity | Effective thresholds + sources; user overrides; `legacy_parity` (default) vs `raw_framewise`; settings frozen in request |
 | Readiness | S6 eligibility, two-mouse MVP, registry, deps, selected detector bundles, thresholds |
-| Execution | `run_behavioral_inference_publication` via `GuiTaskRunner` / `GuiTaskKind.BEHAVIORAL_INFERENCE`; no Cancel |
+| Execution | `run_behavioral_inference_publication` via `GuiTaskRunner` / `GuiTaskKind.BEHAVIORAL_INFERENCE`; cooperative Cancel (PQ Sprint 3 Increment 5) |
 | QC / discovery | Historical status vs current eligibility (incl. `stale_models`); prediction positives by detector; S8 handoff note |
 | Tests | `tests/ui/test_behavioral_inference_gui.py` (20 cases) + S6 GUI regression green |
 | Docs | This note; contract / README status updates |
@@ -35,7 +35,7 @@ See also: [Implementation Contract](implementation_contract.md), [Architecture A
 4. Set the trusted model-registry root; review runtime deps and detector readiness.
 5. Select any supported dyadic/focal subset (or Select all compatible).
 6. Review thresholds / parity; optional overrides; Apply settings.
-7. **Run Behavioral Inference** (non-cancellable; settings snapshotted).
+7. **Run Behavioral Inference** (settings snapshotted; Cancel stops after the current detector returns, before publication).
 8. Inspect QC / positives / invalid-route counts; reopen prior S7 runs without re-scoring.
 
 Scientific formulas are not duplicated in GUI code; the page orchestrates `behavioral_inference.*`.
@@ -60,7 +60,7 @@ Scientific formulas are not duplicated in GUI code; the page orchestrates `behav
 
 Before Run: eligible S6, exactly two tracks (MVP default), registry available, `[s7]` runtime deps, selected detectors loadable by discovery, thresholds resolved, ≥1 detector.
 
-Execution uses an immutable `BehavioralInferenceRequest` + `InferenceRequestIdentity`. Soft navigation (Groups 1–3) remains enabled during S7; session/source/registry/detector mutations are page-locked. S2/S4 hard locks unchanged. Duplicate start rejected. Close waits for non-cancellable S7 work.
+Execution uses an immutable `BehavioralInferenceRequest` + `InferenceRequestIdentity`. Soft navigation (Groups 1–3) remains enabled during S7; session/source/registry/detector mutations are page-locked. S2/S4 hard locks unchanged. Duplicate start rejected. Inline Cancel requests cooperative worker termination; MainWindow close cooperatively cancels cancellable S7 work and defers teardown while the worker remains active. See [PQ Sprint 3 Increment 5](../roadmap/product_quality_sprint_3_increment_5_s7_cancellation.md).
 
 ---
 

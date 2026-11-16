@@ -1,0 +1,12 @@
+PQ Sprint 3 Increment 5 — S7 visible GUI cancellation smoke
+work_root: C:\behavior_suite\tmp_pq_sprint3_s7_cancel_gui
+method: instrumented slow worker + real cancel-persist path
+inference_mode: instrumented worker (not live lab predict_proba)
+PASS: Cancel enabled during cancellable S7 detector inference
+PASS: Cancel requested feedback visible
+PASS: worker-confirmed Canceled; unpublished artifacts removed
+PASS: canceled excluded from S8; prior completed remains eligible
+PASS: rerun after cancellation succeeds
+PASS: close during active cancel defers shutdown; worker retained
+PASS: deferred close waited for worker completion
+RESULT: PASS
