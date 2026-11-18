@@ -263,4 +263,7 @@ Post-design-review safety corrections included in this integration:
 2. Frame-dependent edits stay disabled until displayed pixels match the playhead.
 3. Audit/docs clarify that “119 FPS” was displayed-index catch-up, not decode/present rate.
 
-Product Quality Sprint 2 is closed. Stop before Product Quality Sprint 3.
+Product Quality Sprint 2 is closed. Product Quality Sprint 3 cooperative
+cancellation is complete and accepted; see
+[`product_quality_sprint_3_closure_review.md`](product_quality_sprint_3_closure_review.md).
+Do not begin Product Quality Sprint 4 from this document.

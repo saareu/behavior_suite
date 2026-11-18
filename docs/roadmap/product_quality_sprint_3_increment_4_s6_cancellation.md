@@ -1,10 +1,11 @@
 # Product Quality Sprint 3 — Increment 4: S6 Cooperative Cancellation
 
 **Status:** Integrated on `main` (Product Quality Sprint 3 Increment 4 closed).  
+**Product Quality Sprint 3:** Complete and Accepted — see
+[`product_quality_sprint_3_closure_review.md`](product_quality_sprint_3_closure_review.md).  
 **Date:** 2026-11-15  
 **Baseline:** `d875014f58bf79c34633080cae591cbfe66932a9` (Increment 3 / S4 cancellation)  
-**Scope:** Subsystem 06 Combined Feature Extraction only. S7 cancellation unchanged.  
-Sprint 3 is **not** marked complete.
+**Scope:** Subsystem 06 Combined Feature Extraction only. S7 cancellation unchanged in this increment.
 
 ---
 
@@ -250,7 +251,8 @@ Performance (synthetic n_samples=8 joint fixture, 3 repeats after warmup):
   until return; cancel latency is bounded by those stage durations.
 - No per-sample / forward-fill loop polling in this increment.
 - S7 cooperative cancellation is intentionally deferred.
-- Sprint 3 is not complete until S7 cancellation (later increment) lands.
+- S7 cancellation and formal Sprint 3 acceptance are recorded in later
+  increment / closure docs (`product_quality_sprint_3_closure_review.md`).
 
 ---
 
@@ -285,5 +287,6 @@ pytest runs may abort at interpreter teardown (`0xC0000409`) after assertions
 pass. Treat assertion outcomes as the verification signal; keep that abort
 separate from green test results.
 
-**Stop before Increment 5. Do not wire S7 cancellation or mark Sprint 3
-complete in this increment.**
+**Increment 4 stop condition (historical):** stop before Increment 5 / S7
+cancellation inside this increment. Formal Sprint 3 completion is recorded in
+`product_quality_sprint_3_closure_review.md`.

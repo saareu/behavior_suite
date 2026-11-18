@@ -179,6 +179,132 @@ def test_false_callback_preserves_successful_output(tmp_path: Path) -> None:
     assert result.blob_features_path is not None
 
 
+def _s5_artifact_fingerprint(result_path: Path) -> dict[str, Any]:
+    import pandas as pd
+
+    from blob_features.export import load_blob_features_table
+
+    table = load_blob_features_table(result_path)
+    numeric_cols = [
+        name
+        for name in table.columns
+        if pd.api.types.is_numeric_dtype(table[name])
+    ]
+    missing_fields = {
+        name: int(table[name].isna().sum())
+        for name in table.columns
+        if table[name].isna().any()
+    }
+    return {
+        "columns": list(table.columns),
+        "n_rows": len(table),
+        "sample_idx": table["sample_idx"].to_numpy(dtype=np.int64).copy(),
+        "dense_frame_idx": table["dense_frame_idx"].to_numpy(dtype=np.int64).copy(),
+        "frame_idx": table["frame_idx"].to_numpy(dtype=np.int64).copy(),
+        "orig_frame_idx": table["orig_frame_idx"].to_numpy(dtype=np.int64).copy(),
+        "time_sec": table["time_sec"].to_numpy(dtype=np.float64).copy(),
+        "missing_fields": missing_fields,
+        "numeric": {
+            name: table[name].to_numpy(dtype=np.float64).copy() for name in numeric_cols
+        },
+    }
+
+
+def _normalized_qc(qc: dict[str, Any] | None) -> dict[str, Any]:
+    assert qc is not None
+    return {
+        "structural_ok": qc.get("structural_ok"),
+        "warning_count": qc.get("warning_count"),
+        "metrics": {
+            key: value
+            for key, value in dict(qc.get("metrics") or {}).items()
+            if key
+            not in {
+                "run_id",
+                "run_dir",
+                "created_at",
+                "completed_at",
+                "output_path",
+            }
+        },
+        "warnings": list(qc.get("warnings") or []),
+        "failures": list(qc.get("failures") or []),
+    }
+
+
+def test_scientific_invariance_no_callback_vs_false_callback(tmp_path: Path) -> None:
+    session_a = _write_synthetic_s1(tmp_path / "a", frame_count=6)
+    session_b = _write_synthetic_s1(tmp_path / "b", frame_count=6)
+    baseline = run_blob_feature_extraction(
+        BlobFeaturesRequest(
+            session_root=session_a,
+            config=_soft_config(),
+            run_purpose="test",
+            timestamp="20260101T100010",
+        )
+    )
+    false_cb = run_blob_feature_extraction(
+        BlobFeaturesRequest(
+            session_root=session_b,
+            config=_soft_config(),
+            run_purpose="test",
+            timestamp="20260101T100011",
+        ),
+        cancellation_requested=lambda: False,
+    )
+    assert baseline.success is True and false_cb.success is True
+    assert baseline.blob_features_path is not None
+    assert false_cb.blob_features_path is not None
+    left = _s5_artifact_fingerprint(baseline.blob_features_path)
+    right = _s5_artifact_fingerprint(false_cb.blob_features_path)
+    assert left["columns"] == right["columns"]
+    assert left["n_rows"] == right["n_rows"]
+    np.testing.assert_array_equal(left["sample_idx"], right["sample_idx"])
+    np.testing.assert_array_equal(left["dense_frame_idx"], right["dense_frame_idx"])
+    np.testing.assert_array_equal(left["frame_idx"], right["frame_idx"])
+    np.testing.assert_array_equal(left["orig_frame_idx"], right["orig_frame_idx"])
+    np.testing.assert_allclose(left["time_sec"], right["time_sec"], equal_nan=True)
+    assert left["missing_fields"] == right["missing_fields"]
+    assert left["numeric"].keys() == right["numeric"].keys()
+    for name in left["numeric"]:
+        np.testing.assert_allclose(
+            left["numeric"][name],
+            right["numeric"][name],
+            equal_nan=True,
+            rtol=0.0,
+            atol=0.0,
+        )
+    assert _normalized_qc(dict(baseline.qc or {})) == _normalized_qc(
+        dict(false_cb.qc or {})
+    )
+    baseline_meta = _run_meta(baseline.run_dir)
+    false_meta = _run_meta(false_cb.run_dir)
+    assert baseline_meta.get("status") == false_meta.get("status") == STATUS_COMPLETED
+
+    def _lineage_fingerprint(meta: dict[str, Any]) -> dict[str, Any]:
+        source = dict(meta.get("source_s1") or {})
+        # Exclude volatile absolute paths while retaining digest / timing lineage.
+        path_keys = {
+            "session_root",
+            "prepared_sync",
+            "prepared_video",
+            "cropped_background",
+            "preprocess_dir",
+            "prepare_meta",
+        }
+        return {
+            key: value
+            for key, value in source.items()
+            if key not in path_keys
+            and not (
+                isinstance(value, str)
+                and (":\\" in value or value.startswith("/") or "\\" in value)
+            )
+        }
+
+    assert _lineage_fingerprint(baseline_meta) == _lineage_fingerprint(false_meta)
+
+
 @pytest.mark.parametrize(
     ("nth", "label"),
     [

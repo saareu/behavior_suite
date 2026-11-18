@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 from tests.behavioral_arbitration._fixtures import build_synthetic_session
 
 from behavioral_arbitration import (
@@ -16,7 +16,11 @@ from behavioral_arbitration import (
     BehavioralArbitrationRequest,
     BehavioralArbitrationRunResult,
 )
-from behavioral_arbitration.contracts import STATUS_COMPLETED
+from behavioral_arbitration.contracts import (
+    STATUS_COMPLETED,
+    STATUS_COMPLETED_WITH_WARNINGS,
+    STATUS_FAILED,
+)
 from ui.controllers.behavioral_arbitration_controller import (
     BehavioralArbitrationController,
     BehavioralArbitrationUiError,
@@ -406,6 +410,135 @@ def test_page_progress_and_failure_presentation(
     assert controller.state.run_stage == "Failed"
     assert controller.state.run_error is not None
     assert "synthetic arbitration failure" in controller.state.run_error
+
+
+def _fake_s8_result(
+    fixture: dict[str, Any],
+    *,
+    success: bool,
+    status: str,
+    warnings: tuple[str, ...] = (),
+    error_message: str | None = None,
+) -> BehavioralArbitrationRunResult:
+    run_dir = (
+        fixture["session_root"]
+        / "behavioral_arbitration"
+        / "behavioral_arbitration__outcome"
+    )
+    return BehavioralArbitrationRunResult(
+        success=success,
+        status=status,
+        run_id="behavioral_arbitration__outcome",
+        run_dir=run_dir,
+        run_meta_path=run_dir / "run_meta.json",
+        settings_used_path=run_dir / "settings_used.yaml",
+        processing_log_path=run_dir / "processing_log.txt",
+        qc_path=run_dir / "qc.json",
+        behavior_states_path=(run_dir / "behavior_states.parquet") if success else None,
+        behavior_bouts_path=(run_dir / "behavior_bouts.parquet") if success else None,
+        diagnostics_path=None,
+        session_root=fixture["session_root"],
+        source_s7_run_id=fixture["s7_run_id"],
+        source_s6_run_id=fixture["s6_run_id"],
+        warnings=warnings,
+        error_message=error_message,
+        qc={"structural_ok": success, "warnings": list(warnings), "failures": []},
+    )
+
+
+def test_returned_ordinary_failure_uses_failed_presentation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """S8 may return success=False; GUI must not treat that as Finished."""
+
+    fixture = build_synthetic_session(tmp_path)
+    _patch_s7_s6_ok(monkeypatch, fixture)
+    dialogs: list[tuple[str, str]] = []
+    statuses: list[str] = []
+
+    def _capture_warning(parent, title, text, *args, **kwargs):  # noqa: ANN001
+        del parent, args, kwargs
+        dialogs.append((str(title), str(text)))
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(_capture_warning))
+    for name in ("information", "critical", "question"):
+        monkeypatch.setattr(QMessageBox, name, staticmethod(lambda *a, **k: 0))
+
+    def _failed_return_runner(
+        request: BehavioralArbitrationRequest,
+        progress_callback=None,
+        *,
+        cancellation_requested=None,
+        publication_started=None,
+    ):
+        del request, progress_callback, cancellation_requested, publication_started
+        return _fake_s8_result(
+            fixture,
+            success=False,
+            status=STATUS_FAILED,
+            error_message="ordinary publication failure",
+        )
+
+    controller = BehavioralArbitrationController(runner=_failed_return_runner)
+    controller.set_session(fixture["session_root"])
+    page = BehavioralArbitrationPage(controller)
+    page.status_message.connect(statuses.append)
+    page.show()
+    _wait_page_idle(page)
+    page._run_arbitration()
+    _wait_page_idle(page, timeout_sec=15.0)
+
+    assert page.stage_label.text().startswith("Failed:")
+    assert "ordinary publication failure" in page.stage_label.text()
+    assert controller.state.run_stage == "Failed"
+    assert controller.state.run_error == "ordinary publication failure"
+    assert controller.state.last_result is None
+    assert "Finished:" not in page.stage_label.text()
+    assert dialogs
+    assert "failed" in dialogs[-1][0].lower()
+    assert any("s8 failed" in msg.lower() for msg in statuses)
+
+
+def test_completed_with_warnings_remains_successful_presentation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fixture = build_synthetic_session(tmp_path)
+    _patch_s7_s6_ok(monkeypatch, fixture)
+    for name in ("warning", "information", "critical", "question"):
+        monkeypatch.setattr(QMessageBox, name, staticmethod(lambda *a, **k: 0))
+
+    def _warnings_runner(
+        request: BehavioralArbitrationRequest,
+        progress_callback=None,
+        *,
+        cancellation_requested=None,
+        publication_started=None,
+    ):
+        del request, progress_callback, cancellation_requested, publication_started
+        return _fake_s8_result(
+            fixture,
+            success=True,
+            status=STATUS_COMPLETED_WITH_WARNINGS,
+            warnings=("minor qc warning",),
+        )
+
+    controller = BehavioralArbitrationController(runner=_warnings_runner)
+    controller.set_session(fixture["session_root"])
+    page = BehavioralArbitrationPage(controller)
+    page.show()
+    _wait_page_idle(page)
+    page._run_arbitration()
+    _wait_page_idle(page, timeout_sec=15.0)
+
+    assert controller.state.run_stage == STATUS_COMPLETED_WITH_WARNINGS
+    assert controller.state.run_error is None
+    assert controller.state.last_result is not None
+    assert controller.state.last_result.success is True
+    assert controller.state.last_result.status == STATUS_COMPLETED_WITH_WARNINGS
+    assert "Failed" not in page.stage_label.text()
+    assert page.stage_label.text() != "Canceled"
+    assert STATUS_COMPLETED_WITH_WARNINGS in page.stage_label.text()
 
 
 def test_settings_config_roundtrip() -> None:

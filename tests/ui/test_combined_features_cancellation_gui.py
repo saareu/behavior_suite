@@ -431,3 +431,137 @@ def test_gui_task_context_publication_flag() -> None:
     assert context.is_publication_critical_section() is True
     context.request_cancellation()
     assert context.is_cancellation_requested() is True
+
+
+def test_pre_bootstrap_cancel_message_reports_no_run_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from combined_features import CombinedFeaturesCancelledError
+
+    dialogs: list[tuple[str, str]] = []
+    statuses: list[str] = []
+
+    def _capture_information(parent, title, text, *args, **kwargs):  # noqa: ANN001
+        del parent, args, kwargs
+        dialogs.append((str(title), str(text)))
+        return 0
+
+    monkeypatch.setattr(
+        QMessageBox, "information", staticmethod(_capture_information)
+    )
+    for name in ("warning", "critical", "question"):
+        monkeypatch.setattr(QMessageBox, name, staticmethod(lambda *a, **k: 0))
+
+    def runner(
+        request: CombinedFeaturesRequest,
+        progress_callback=None,
+        *,
+        cancellation_requested=None,
+        publication_started=None,
+    ) -> CombinedFeaturesResult:
+        del request, progress_callback, cancellation_requested, publication_started
+        raise CombinedFeaturesCancelledError(
+            "Combined feature extraction cancelled before publication."
+        )
+
+    paths = write_joint_session(tmp_path, n_samples=4)
+    page = CombinedFeaturesPage(CombinedFeaturesController(runner=runner))
+    page.status_message.connect(statuses.append)
+    page.set_session(paths["session_root"])
+    _wait_until(lambda: not page.has_running_task)
+    page.run_button.click()
+    _wait_until(lambda: not page.has_running_task, timeout_sec=60.0)
+
+    assert page.stage_label.text() == "Canceled"
+    assert page.controller.state.run_stage == STATUS_CANCELED
+    root = paths["session_root"] / "combined_features"
+    assert not root.exists() or list(root.iterdir()) == []
+    assert dialogs
+    body = dialogs[-1][1].lower()
+    assert "before run bootstrap" in body
+    assert "no s6 run directory was created" in body
+    assert "kept for traceability" not in body
+    assert any("before run bootstrap" in msg.lower() for msg in statuses)
+    page.close()
+
+
+def test_post_bootstrap_cancel_message_reports_retained_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dialogs: list[tuple[str, str]] = []
+    statuses: list[str] = []
+
+    def _capture_information(parent, title, text, *args, **kwargs):  # noqa: ANN001
+        del parent, args, kwargs
+        dialogs.append((str(title), str(text)))
+        return 0
+
+    monkeypatch.setattr(
+        QMessageBox, "information", staticmethod(_capture_information)
+    )
+    for name in ("warning", "critical", "question"):
+        monkeypatch.setattr(QMessageBox, name, staticmethod(lambda *a, **k: 0))
+
+    worker_started = threading.Event()
+    paths = write_joint_session(tmp_path, n_samples=4)
+    page = CombinedFeaturesPage(
+        CombinedFeaturesController(
+            runner=_gated_cancelable_runner(worker_started=worker_started)
+        )
+    )
+    page.status_message.connect(statuses.append)
+    page.set_session(paths["session_root"])
+    _wait_until(lambda: not page.has_running_task)
+    page.run_button.click()
+    _wait_until(lambda: worker_started.is_set())
+    page.cancel_button.click()
+    _wait_until(lambda: not page.has_running_task, timeout_sec=60.0)
+
+    assert page.stage_label.text() == "Canceled"
+    runs = list((paths["session_root"] / "combined_features").iterdir())
+    assert len(runs) == 1
+    assert dialogs
+    body = dialogs[-1][1]
+    assert "Canceled run directory retained:" in body
+    assert runs[0].name in body
+    assert "Metadata/log were kept for traceability" in body
+    assert any("retained" in msg.lower() for msg in statuses)
+    page.close()
+
+
+def test_soft_navigation_remains_available_during_s6_cancel_request(
+    tmp_path: Path, silence_modals: None
+) -> None:
+    from ui.main_window import GROUP_DATA_PREPARATION, GROUP_FEATURE_PROCESSING
+
+    del silence_modals
+    paths = write_joint_session(tmp_path, n_samples=4)
+    worker_started = threading.Event()
+    controller = CombinedFeaturesController(
+        runner=_gated_cancelable_runner(worker_started=worker_started)
+    )
+    window = MainWindow(
+        PreprocessSetupController(),
+        combined_features_controller=controller,
+    )
+    window.open_combined_features(paths["session_root"])
+    page = window.combined_features_page
+    _wait_until(lambda: not page.has_running_task)
+    page.run_button.click()
+    _wait_until(lambda: worker_started.is_set())
+    page.cancel_button.click()
+    assert page._extraction_cancel_requested is True
+    assert page.has_running_task is True
+    window._update_navigation()
+    assert window._hard_navigation_blocked() is False
+    assert window.group_data_button.isEnabled() is True
+    assert window.s1_button.isEnabled() is True
+    assert window.s6_button.isEnabled() is True
+    active_identity = page.controller.state.active_extraction_identity
+    window.set_application_group(GROUP_DATA_PREPARATION)
+    assert page.controller.state.active_extraction_identity is active_identity
+    window.set_application_group(GROUP_FEATURE_PROCESSING)
+    assert page.controller.state.active_extraction_identity is active_identity
+    _wait_until(lambda: not page.has_running_task, timeout_sec=60.0)
+    assert page.stage_label.text() == "Canceled"
+    window.close()

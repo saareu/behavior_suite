@@ -992,6 +992,20 @@ class BehavioralArbitrationPage(QWidget):
         if not isinstance(result, BehavioralArbitrationRunResult):
             self.unexpected_error.emit(f"Unexpected S8 result type: {type(result)!r}")
             return
+        # S8 scientific runner may return success=False on ordinary failure instead of
+        # raising. Route that terminal result through the Failed presentation path so
+        # GUI messaging matches persisted run status. completed_with_warnings keeps
+        # success=True and stays on the completion path below.
+        if not result.success:
+            message = (
+                result.error_message
+                or f"Behavioral arbitration ended with status {result.status}."
+            )
+            self._on_arbitration_error(
+                BehavioralArbitrationError(message),
+                identity,
+            )
+            return
         accepted = self.controller.record_success(
             result, expected_identity=identity, refresh_discovery=False
         )

@@ -10,10 +10,11 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
-from behavioral_arbitration.contracts import STATUS_COMPLETED
+from behavioral_arbitration.contracts import STATUS_CANCELED, STATUS_COMPLETED
 from behavioral_inference.contracts import ProvenanceError
 from results_packaging.contracts import IntakeError
 from results_packaging.eligibility import (
+    select_s8_run_for_packaging,
     validate_s8_source_for_packaging,
 )
 from tests.results_packaging._fixtures import (
@@ -174,6 +175,54 @@ def test_schema_and_directional_key_validation(tmp_path: Path) -> None:
                 states=dup,
                 bouts=pd.read_parquet(info["bouts_path"]),
             )
+
+
+def test_canceled_s8_rejected_for_packaging_while_completed_remains_selectable(
+    tmp_path: Path,
+) -> None:
+    """Canceled S8 fails public S9 intake; a completed sibling remains selectable."""
+
+    import json
+
+    shared = build_packaging_session(tmp_path / "shared", s8_status=STATUS_COMPLETED)
+    canceled_sibling = shared["s8_run_dir"].parent / "behavioral_arbitration__canceled"
+    canceled_sibling.mkdir(parents=True)
+    for name in (
+        "behavior_states.parquet",
+        "behavior_bouts.parquet",
+        "qc.json",
+        "settings_used.yaml",
+        "run_meta.json",
+    ):
+        src = shared["s8_run_dir"] / name
+        if src.is_file():
+            (canceled_sibling / name).write_bytes(src.read_bytes())
+    meta_path = canceled_sibling / "run_meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["status"] = STATUS_CANCELED
+    meta["run_id"] = canceled_sibling.name
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    with pytest.raises(IntakeError, match="not completed|not currently eligible"):
+        validate_s8_source_for_packaging(
+            shared["session_root"],
+            s8_run_dir=canceled_sibling,
+        )
+
+    with ExitStack() as stack:
+        for p in _eligible_patches(shared):
+            stack.enter_context(p)
+        selected = select_s8_run_for_packaging(
+            shared["session_root"],
+            s8_run_dir=shared["s8_run_dir"],
+        )
+        assert selected.run_dir == shared["s8_run_dir"].resolve()
+        result = validate_s8_source_for_packaging(
+            shared["session_root"],
+            s8_run_dir=shared["s8_run_dir"],
+        )
+    assert result.s8_eligible
+    assert result.source_s7_run_id == shared["s7_run_id"]
 
 
 def test_no_unintended_writes_to_upstream(tmp_path: Path) -> None:

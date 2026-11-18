@@ -1,6 +1,8 @@
 # Product Quality Sprint 3 — Increment 1: S5 Cooperative Cancellation
 
 **Status:** Integrated on `main` (Product Quality Sprint 3 Increment 1 closed).  
+**Product Quality Sprint 3:** Complete and Accepted — see
+[`product_quality_sprint_3_closure_review.md`](product_quality_sprint_3_closure_review.md).  
 **Date:** 2026-11-09 (verification); 2026-11-10 (integration)  
 **Baseline:** `216eb431d275f837b0d9ff7d5e4f417409fdabcf`  
 **Scope:** Shared cancellation contract + complete cooperative cancellation for

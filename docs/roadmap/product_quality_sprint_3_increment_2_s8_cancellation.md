@@ -1,9 +1,11 @@
 # Product Quality Sprint 3 — Increment 2: S8 Cooperative Cancellation
 
-**Status:** Implemented and integrated on `main`  
+**Status:** Implemented and integrated on `main` (Product Quality Sprint 3 Increment 2 closed).  
+**Product Quality Sprint 3:** Complete and Accepted — see
+[`product_quality_sprint_3_closure_review.md`](product_quality_sprint_3_closure_review.md).  
 **Date:** 2026-11-10  
 **Baseline:** `3292f8b015a8f17defd209ae9dd51c098c61ef34` (Increment 1 / S5 cancellation)  
-**Scope:** Subsystem 08 Behavioral Arbitration only. S4/S6/S7 unchanged. Sprint 3 is **not** marked complete.
+**Scope:** Subsystem 08 Behavioral Arbitration only. S4/S6/S7 unchanged in this increment.
 
 ---
 
@@ -156,5 +158,6 @@ Architectural design review and final safety verification passed
 (pre-bootstrap messaging, publication gate, shutdown deferral, scientific
 identity, S9 ineligibility, S5 regression). Integrated on `main` as Increment 2.
 
-**Stop before Increment 3 / S4 cancellation. Do not wire S6/S7 cancellation or
-mark Sprint 3 complete in this increment.**
+**Increment 2 stop condition (historical):** stop before Increment 3 / S4
+cancellation inside this increment. Formal Sprint 3 completion is recorded in
+`product_quality_sprint_3_closure_review.md`.

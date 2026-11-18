@@ -408,3 +408,42 @@ def test_close_during_active_cancellation_keeps_worker(
 
     _wait_until(lambda: not page.has_running_task, timeout_sec=60.0)
     assert page.stage_label.text() == "Canceled"
+
+
+def test_soft_navigation_remains_available_during_s5_cancel_request(
+    tmp_path: Path, silence_modals: None
+) -> None:
+    from ui.main_window import GROUP_DATA_PREPARATION, GROUP_FEATURE_PROCESSING
+
+    del silence_modals
+    session = _write_eligible_s1(tmp_path, frame_count=4)
+    worker_started = threading.Event()
+    controller = BlobFeaturesController(
+        runner=_gated_cancelable_runner(worker_started=worker_started)
+    )
+    window = MainWindow(
+        PreprocessSetupController(),
+        blob_features_controller=controller,
+    )
+    window.open_blob_features(session)
+    page = window.blob_features_page
+    _wait_until(lambda: not page.has_running_task)
+    page.controller.set_working_settings(_soft_settings())
+    page.run_button.click()
+    _wait_until(lambda: worker_started.is_set())
+    page.cancel_button.click()
+    assert page._extraction_cancel_requested is True
+    assert page.has_running_task is True
+    window._update_navigation()
+    assert window._hard_navigation_blocked() is False
+    assert window.group_data_button.isEnabled() is True
+    assert window.s1_button.isEnabled() is True
+    assert window.s5_button.isEnabled() is True
+    active_identity = page.controller.state.active_extraction_identity
+    window.set_application_group(GROUP_DATA_PREPARATION)
+    assert page.controller.state.active_extraction_identity is active_identity
+    window.set_application_group(GROUP_FEATURE_PROCESSING)
+    assert page.controller.state.active_extraction_identity is active_identity
+    _wait_until(lambda: not page.has_running_task, timeout_sec=60.0)
+    assert page.stage_label.text() == "Canceled"
+    window.close()

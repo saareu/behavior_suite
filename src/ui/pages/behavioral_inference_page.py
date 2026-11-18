@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -44,6 +45,7 @@ from behavioral_inference import (
     BehavioralInferenceError,
     BehavioralInferenceRunResult,
 )
+from behavioral_inference.contracts import BEHAVIORAL_INFERENCE_DIRNAME
 from ui.controllers.behavioral_inference_controller import (
     BehavioralInferenceController,
     BehavioralInferenceUiError,
@@ -1053,27 +1055,86 @@ class BehavioralInferencePage(QWidget):
             self.stage_label.setText("Canceled")
         else:
             self.stage_label.setText(f"Failed: {message}")
+        prior_canceled_ids = frozenset(
+            run.run_id
+            for run in (
+                self.controller.state.summary.runs
+                if self.controller.state.summary is not None
+                else ()
+            )
+            if run.status == STATUS_CANCELED
+        )
+        retained = (
+            self._retained_canceled_run_evidence(prior_canceled_ids)
+            if canceled
+            else None
+        )
         self.refresh_from_state()
         if self.controller.state.session_root is not None:
             with contextlib.suppress(BehavioralInferenceUiError):
-                identity = self.controller.begin_discovery()
-                self._start_discovery_task(identity)
+                discovery_identity = self.controller.begin_discovery()
+                self._start_discovery_task(discovery_identity)
         if canceled:
+            if retained is not None:
+                run_id, run_dir = retained
+                detail = (
+                    f"Canceled run directory retained: {run_id}\n"
+                    f"{run_dir}\n"
+                    "Metadata/log were kept for traceability. The run is not "
+                    "eligible for downstream Subsystem 8 use."
+                )
+                status = (
+                    f"S7 canceled. Retained {run_id}; not eligible for S8; "
+                    "a new run may be started."
+                )
+            else:
+                detail = (
+                    "Cancellation occurred before run bootstrap; no S7 run "
+                    "directory was created. A new run may be started."
+                )
+                status = (
+                    "S7 canceled before run bootstrap; no run directory was created."
+                )
             QMessageBox.information(
                 self,
                 "Behavioral inference canceled",
-                f"{message}\n\n"
-                "The canceled run was kept for traceability and is not eligible "
-                "for downstream Subsystem 8 use.",
+                f"{message}\n\n{detail}",
             )
-            self.status_message.emit(
-                "S7 canceled. Run is not eligible for S8; a new run may be started."
-            )
+            self.status_message.emit(status)
         elif isinstance(exc, (BehavioralInferenceUiError, BehavioralInferenceError)):
             QMessageBox.warning(self, "Behavioral inference failed", message)
             self.status_message.emit(f"S7 failed: {message}")
         else:
             self.unexpected_error.emit(message)
+
+    def _retained_canceled_run_evidence(
+        self, prior_canceled_ids: frozenset[str]
+    ) -> tuple[str, Path] | None:
+        """Detect a newly persisted canceled S7 run via on-disk identity/path."""
+
+        session_root = self.controller.state.session_root
+        if session_root is None:
+            return None
+        root = session_root / BEHAVIORAL_INFERENCE_DIRNAME
+        if not root.is_dir():
+            return None
+        for run_dir in sorted(root.iterdir(), reverse=True):
+            if not run_dir.is_dir():
+                continue
+            meta_path = run_dir / "run_meta.json"
+            if not meta_path.is_file():
+                continue
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, TypeError, ValueError):
+                continue
+            if not isinstance(meta, dict):
+                continue
+            status = meta.get("status")
+            run_id = str(meta.get("run_id") or run_dir.name)
+            if status == STATUS_CANCELED and run_id not in prior_canceled_ids:
+                return run_id, run_dir.resolve()
+        return None
 
     def _on_inference_finished(self, identity: InferenceRequestIdentity) -> None:
         if (

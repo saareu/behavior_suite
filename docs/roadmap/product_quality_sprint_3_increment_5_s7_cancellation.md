@@ -1,10 +1,11 @@
 # Product Quality Sprint 3 — Increment 5: S7 Cooperative Cancellation
 
 **Status:** Integrated on `main` (Product Quality Sprint 3 Increment 5 closed).  
+**Product Quality Sprint 3:** Complete and Accepted — see
+[`product_quality_sprint_3_closure_review.md`](product_quality_sprint_3_closure_review.md).  
 **Date:** 2026-11-16  
 **Baseline:** `e5d5fed12d15dfb3d73906afb5862d2939beac99` (Increment 4 / S6 cancellation)  
-**Scope:** Subsystem 07 Behavioral Inference only. S4/S5/S6/S8 cancellation unchanged.  
-Sprint 3 is **not** marked complete.
+**Scope:** Subsystem 07 Behavioral Inference only. S4/S5/S6/S8 cancellation unchanged in this increment.
 
 ---
 
@@ -248,7 +249,8 @@ Performance (synthetic n_frames=8 fake-model fixture, 3 repeats after warmup):
 - Dual-specialist detectors (contact / nose-to-body) may finish an already-started
   specialist score before cancel takes effect.
 - No per-sample cancellation polling.
-- Sprint 3 is not complete until cross-subsystem closure work is authorized.
+- Cross-subsystem closure and formal Sprint 3 acceptance are recorded in
+  `product_quality_sprint_3_closure_review.md`.
 
 ---
 
@@ -276,6 +278,7 @@ Final safety confirmation retained:
 - Application shutdown cannot destroy a live S7 worker.
 - Existing S4/S5/S6/S8 cancellation remains unchanged.
 
-Do not mark Sprint 3 complete. Do not begin cross-subsystem Sprint 3 closure
-in this increment. Do not change scientific models, feature calculations,
-thresholds, schemas, CSV V2 exports, or Hala cohort data.
+Increment 5 stop condition (historical): do not begin cross-subsystem Sprint 3
+closure inside this increment. Formal Sprint 3 completion is recorded in
+`product_quality_sprint_3_closure_review.md`. Do not change scientific models,
+feature calculations, thresholds, schemas, CSV V2 exports, or Hala cohort data.

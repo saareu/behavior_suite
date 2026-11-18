@@ -1,10 +1,11 @@
 # Product Quality Sprint 3 — Increment 3: S4 Cooperative Cancellation
 
 **Status:** Integrated on `main` (Product Quality Sprint 3 Increment 3 closed).  
+**Product Quality Sprint 3:** Complete and Accepted — see
+[`product_quality_sprint_3_closure_review.md`](product_quality_sprint_3_closure_review.md).  
 **Date:** 2026-11-10  
 **Baseline:** `b93e0ab86f622c80ea0ca633a51a2d426b947dae` (Increment 2 / S8 cancellation)  
-**Scope:** Subsystem 04 Pose Finalization only. S6/S7 cancellation unchanged.
-Sprint 3 is **not** marked complete.
+**Scope:** Subsystem 04 Pose Finalization only. S6/S7 cancellation unchanged in this increment.
 
 ---
 
@@ -209,8 +210,8 @@ CSV V2 changes, no S6/S7 algorithm changes.
    canceled chip yet).
 4. Pre-bootstrap cancel (before run-dir creation) raises without a canceled run
    directory; GUI copy covers both cases.
-5. Sprint 3 is not complete until remaining increments (if any) and architectural
-   acceptance are finished.
+5. Remaining increments and formal Sprint 3 acceptance are recorded in later
+   docs (`product_quality_sprint_3_closure_review.md`).
 
 ---
 
@@ -222,5 +223,6 @@ worker-outcome status, S6 ineligibility for canceled runs, hard-navigation lock
 until worker stop, deferred MainWindow shutdown, scientific invariance, S5/S8
 unchanged). Integrated on `main` as Increment 3.
 
-**Stop before Increment 4. Do not wire S6/S7 cancellation or mark Sprint 3
-complete in this increment.**
+**Increment 3 stop condition (historical):** stop before Increment 4 / S6–S7
+cancellation inside this increment. Formal Sprint 3 completion is recorded in
+`product_quality_sprint_3_closure_review.md`.

@@ -457,3 +457,42 @@ def test_close_during_active_cancellation_keeps_worker(
 
     _wait_until(lambda: not page.has_running_task, timeout_sec=60.0)
     assert page.stage_label.text() == "Canceled"
+
+
+def test_soft_navigation_remains_available_during_s8_cancel_request(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, silence_modals: None
+) -> None:
+    from ui.main_window import GROUP_BEHAVIORAL_INFERENCE, GROUP_FEATURE_PROCESSING
+
+    del silence_modals
+    fixture = build_synthetic_session(tmp_path, n_frames=6)
+    _patch_s7_s6_ok(monkeypatch, fixture)
+    worker_started = threading.Event()
+    controller = BehavioralArbitrationController(
+        runner=_gated_cancelable_runner(worker_started=worker_started)
+    )
+    window = MainWindow(
+        PreprocessSetupController(),
+        behavioral_arbitration_controller=controller,
+    )
+    window.open_behavioral_arbitration(fixture["session_root"])
+    page = window.behavioral_arbitration_page
+    _wait_until(lambda: not page.has_running_task, timeout_sec=60.0)
+    page.run_button.click()
+    _wait_until(lambda: worker_started.is_set())
+    page.cancel_button.click()
+    assert page._arbitration_cancel_requested is True
+    assert page.has_running_task is True
+    window._update_navigation()
+    assert window._hard_navigation_blocked() is False
+    assert window.group_data_button.isEnabled() is True
+    assert window.group_feature_button.isEnabled() is True
+    assert window.s8_button.isEnabled() is True
+    active_identity = page.controller.state.active_arbitration_identity
+    window.set_application_group(GROUP_FEATURE_PROCESSING)
+    assert page.controller.state.active_arbitration_identity is active_identity
+    window.set_application_group(GROUP_BEHAVIORAL_INFERENCE)
+    assert page.controller.state.active_arbitration_identity is active_identity
+    _wait_until(lambda: not page.has_running_task, timeout_sec=60.0)
+    assert page.stage_label.text() == "Canceled"
+    window.close()

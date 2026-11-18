@@ -402,3 +402,142 @@ def test_gui_task_context_publication_flag() -> None:
     assert context.is_publication_critical_section() is True
     context.request_cancellation()
     assert context.is_cancellation_requested() is True
+
+
+def test_pre_bootstrap_cancel_message_reports_no_run_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from behavioral_inference import BehavioralInferenceCancelledError
+
+    dialogs: list[tuple[str, str]] = []
+    statuses: list[str] = []
+
+    def _capture_information(parent, title, text, *args, **kwargs):  # noqa: ANN001
+        del parent, args, kwargs
+        dialogs.append((str(title), str(text)))
+        return 0
+
+    monkeypatch.setattr(
+        QMessageBox, "information", staticmethod(_capture_information)
+    )
+    for name in ("warning", "critical", "question"):
+        monkeypatch.setattr(QMessageBox, name, staticmethod(lambda *a, **k: 0))
+
+    def runner(
+        request: BehavioralInferenceRequest,
+        progress_callback=None,
+        *,
+        cancellation_requested=None,
+        publication_started=None,
+    ) -> BehavioralInferenceRunResult:
+        del request, progress_callback, cancellation_requested, publication_started
+        raise BehavioralInferenceCancelledError("Behavioral inference cancelled.")
+
+    page = _open_ready_page(tmp_path, monkeypatch, runner=runner)
+    page.status_message.connect(statuses.append)
+    page.run_button.click()
+    _wait_until(lambda: not page.has_running_task, timeout_sec=60.0)
+
+    assert page.stage_label.text() == "Canceled"
+    assert page.controller.state.run_stage == STATUS_CANCELED
+    session = page.controller.state.session_root
+    assert session is not None
+    root = session / "behavioral_inference"
+    assert not root.exists() or list(root.iterdir()) == []
+    assert dialogs
+    body = dialogs[-1][1].lower()
+    assert "before run bootstrap" in body
+    assert "no s7 run directory was created" in body
+    assert "kept for traceability" not in body
+    assert any("before run bootstrap" in msg.lower() for msg in statuses)
+    page.close()
+
+
+def test_post_bootstrap_cancel_message_reports_retained_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dialogs: list[tuple[str, str]] = []
+    statuses: list[str] = []
+
+    def _capture_information(parent, title, text, *args, **kwargs):  # noqa: ANN001
+        del parent, args, kwargs
+        dialogs.append((str(title), str(text)))
+        return 0
+
+    monkeypatch.setattr(
+        QMessageBox, "information", staticmethod(_capture_information)
+    )
+    for name in ("warning", "critical", "question"):
+        monkeypatch.setattr(QMessageBox, name, staticmethod(lambda *a, **k: 0))
+
+    worker_started = threading.Event()
+    page = _open_ready_page(
+        tmp_path,
+        monkeypatch,
+        runner=_gated_cancelable_runner(worker_started=worker_started),
+    )
+    page.status_message.connect(statuses.append)
+    page.run_button.click()
+    _wait_until(lambda: worker_started.is_set())
+    page.cancel_button.click()
+    _wait_until(lambda: not page.has_running_task, timeout_sec=60.0)
+
+    assert page.stage_label.text() == "Canceled"
+    session = page.controller.state.session_root
+    assert session is not None
+    runs = list((session / "behavioral_inference").iterdir())
+    assert len(runs) == 1
+    assert dialogs
+    body = dialogs[-1][1]
+    assert "Canceled run directory retained:" in body
+    assert runs[0].name in body
+    assert "Metadata/log were kept for traceability" in body
+    assert any("retained" in msg.lower() for msg in statuses)
+    page.close()
+
+
+def test_soft_navigation_remains_available_during_s7_cancel_request(
+    tmp_path: Path, silence_modals: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ui.main_window import GROUP_BEHAVIORAL_INFERENCE, GROUP_DATA_PREPARATION
+
+    del silence_modals
+    worker_started = threading.Event()
+    controller, session, registry = _ready_controller(monkeypatch, tmp_path)
+    controller._runner = _gated_cancelable_runner(worker_started=worker_started)
+    window = MainWindow(
+        PreprocessSetupController(),
+        behavioral_inference_controller=controller,
+    )
+    window.open_behavioral_inference(session)
+    page = window.behavioral_inference_page
+    _wait_until(lambda: not page.has_running_task)
+    page.controller.update_settings(
+        BehavioralInferenceUiSettings(
+            parity_mode="legacy_parity",
+            model_registry_root=registry,
+            selected_detectors_dyadic=("nose_to_nose",),
+            selected_detectors_focal=("approach",),
+            working_thresholds=dict(DEFAULT_WORKING_THRESHOLDS),
+        )
+    )
+    page.refresh_from_state()
+    _wait_until(lambda: page.controller.can_run_inference())
+    page.run_button.click()
+    _wait_until(lambda: worker_started.is_set())
+    page.cancel_button.click()
+    assert page._inference_cancel_requested is True
+    assert page.has_running_task is True
+    window._update_navigation()
+    assert window._hard_navigation_blocked() is False
+    assert window.group_data_button.isEnabled() is True
+    assert window.group_feature_button.isEnabled() is True
+    assert window.s7_button.isEnabled() is True
+    active_identity = page.controller.state.active_inference_identity
+    window.set_application_group(GROUP_DATA_PREPARATION)
+    assert page.controller.state.active_inference_identity is active_identity
+    window.set_application_group(GROUP_BEHAVIORAL_INFERENCE)
+    assert page.controller.state.active_inference_identity is active_identity
+    _wait_until(lambda: not page.has_running_task, timeout_sec=60.0)
+    assert page.stage_label.text() == "Canceled"
+    window.close()
